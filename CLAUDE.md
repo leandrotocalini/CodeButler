@@ -71,26 +71,24 @@ Would you like to set it up now? (5 minutes)
 
 ### Step 2: If User Says Yes, Run Setup
 
-Execute these commands automatically:
+**IMPORTANT: Execute this automatically, don't ask user to run commands manually:**
 
 ```bash
-# 1. Install Go dependencies
-cd ButlerAgent
-go mod download
-
-# 2. Build the setup wizard
-go build -o ../codebutler cmd/codebutler/main.go
-cd ..
-
-# 3. Run the interactive wizard
-./codebutler
+./setup.sh
 ```
 
-The wizard will:
-- Ask about voice transcription (OpenAI API key)
-- Ask for WhatsApp group name (default: "CodeButler Developer")
-- Ask for bot prefix (default: "[BOT]")
-- Ask for source code directory (default: "./Sources")
+This single script does everything:
+1. Checks if config.json exists (offers to reconfigure if needed)
+2. Installs Go dependencies automatically
+3. Builds setup wizard binary
+4. Builds agent binary
+5. Runs the interactive wizard (QR code, questions)
+
+The wizard will ask the user about:
+- Voice transcription (OpenAI API key)
+- WhatsApp group name (default: "CodeButler Developer")
+- Bot prefix (default: "[BOT]")
+- Source code directory (default: "./Sources")
 - Display QR code to scan with WhatsApp
 - Create the group if needed
 - Save config.json in root directory
