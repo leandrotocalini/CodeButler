@@ -8,13 +8,18 @@ import (
 
 // displayQR prints a QR code to the terminal
 func displayQR(code string) {
-	qr, err := qrcode.New(code, qrcode.Medium)
+	qr, err := qrcode.New(code, qrcode.Low)
 	if err != nil {
 		fmt.Println("Error generating QR code:", err)
 		fmt.Println("\nQR Code string:", code)
 		return
 	}
 
-	// Print QR as ASCII art to terminal
-	fmt.Println(qr.ToSmallString(false))
+	// Print QR as ASCII art to terminal (compact version)
+	ascii := qr.ToSmallString(false)
+	fmt.Println(ascii)
+
+	// Show code as backup
+	fmt.Println("\n💡 If QR is cut off, use this code in WhatsApp manually:")
+	fmt.Printf("   %s\n", code)
 }
