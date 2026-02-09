@@ -27,17 +27,13 @@ echo "   ✅ Code updated"
 # Rebuild setup binary
 echo ""
 echo "🔨 Rebuilding setup wizard..."
-cd ButlerAgent
-go build -o ../codebutler cmd/codebutler/main.go
-cd ..
+(cd ButlerAgent && go build -o ../codebutler cmd/codebutler/main.go)
 echo "   ✅ Setup wizard built"
 
 # Rebuild agent
 echo ""
 echo "🔨 Rebuilding WhatsApp agent..."
-cd ButlerAgent
-go build -o ../codebutler-agent cmd/agent/main.go
-cd ..
+(cd ButlerAgent && go build -o ../codebutler-agent cmd/agent/main.go)
 echo "   ✅ Agent built"
 
 # Clean up temp files
