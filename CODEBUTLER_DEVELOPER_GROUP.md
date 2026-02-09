@@ -1,8 +1,8 @@
-# CodeButler Developer Group - Feature Documentation
+# CodeButler Developer Group - The Only Communication Channel
 
 ## Quick Reference
 
-The "CodeButler Developer" group is automatically created when you first run CodeButler. It's your personal development command center in WhatsApp.
+The "CodeButler Developer" group is automatically created when you first run CodeButler. **It's the ONLY way to communicate with CodeButler** - no personal chat, no other groups.
 
 ## Creation Flow
 
@@ -17,7 +17,7 @@ Search for "CodeButler Developer" group
   ├─ Found? → Use existing ✅
   └─ Not found? → Create new ✨
   ↓
-Add to config.json with isDevControl: true
+Add to config.json (groupJID + groupName)
   ↓
 Send welcome message
   ↓
@@ -30,19 +30,18 @@ Ready! 🚀
 - Searches for existing group by name "CodeButler Developer"
 - Creates new group if not found
 - Only you as member (private group)
-- Automatically enabled in config
+- Automatically configured as the only channel
 
-### 2. Special Permissions
-- Same permissions as personal chat
-- Plus: Bulk operations
-- Plus: Workflow automation
-- Plus: System monitoring
-- Plus: Cross-repo analysis
+### 2. Single Channel Communication
+- **Only channel**: No personal chat support
+- **No other groups**: Only this group is allowed
+- **Simplified**: All messages must come from here
+- **Focused**: Your dedicated dev workspace
 
 ### 3. Organization
-- Separate from personal messages
-- Dedicated dev context
-- Better command history
+- All dev commands in one place
+- Clean command history
+- No mixing with personal messages
 - Easy to review past work
 
 ## Technical Implementation
@@ -52,12 +51,13 @@ Ready! 🚀
 ```json
 {
   "whatsapp": {
-    "allowedGroups": [
-      {
-        "jid": "120363123456789012@g.us",
-        "name": "CodeButler Developer",
-        "enabled": true,
-        "isDevControl": true  // Special flag
+    "sessionPath": "./whatsapp-session",
+    "personalNumber": "1234567890@s.whatsapp.net",
+    "groupJID": "120363123456789012@g.us",
+    "groupName": "CodeButler Developer"
+  }
+}
+```
       }
     ]
   }
@@ -228,17 +228,22 @@ frontend-app/src/services/auth.ts:67
 All implementations follow similar patterns ✅
 ```
 
-## Benefits Over Personal Chat
+## Why Only One Group?
 
-| Aspect | Personal Chat | CodeButler Developer |
-|--------|---------------|------------------|
-| **Context** | Mixed (personal + dev) | Pure development |
-| **History** | Cluttered | Clean, organized |
-| **Commands** | Basic only | Basic + Advanced |
-| **Bulk Ops** | ❌ | ✅ |
-| **Workflows** | ❌ | ✅ |
-| **Monitoring** | Limited | Full system status |
-| **Notifications** | Can't mute separately | Independent control |
+### Simplicity
+- **One place for everything** - No confusion about where to send messages
+- **Simple access control** - Just check if message is from this group
+- **Easy to understand** - No complex permissions or allow-lists
+
+### Organization
+- **Pure development context** - No personal messages mixed in
+- **Clean history** - Easy to review commands and responses
+- **Focused workspace** - Your dedicated dev command center
+
+### Security
+- **Ultra-simple validation** - Only one JID to check
+- **No accidental access** - Can't send from wrong chat
+- **Private by design** - Only you as member
 
 ## Setup Troubleshooting
 
@@ -246,14 +251,10 @@ All implementations follow similar patterns ✅
 ```bash
 # Manually add to config.json
 {
-  "allowedGroups": [
-    {
-      "jid": "YOUR_GROUP_JID@g.us",
-      "name": "CodeButler Developer",
-      "enabled": true,
-      "isDevControl": true
-    }
-  ]
+  "whatsapp": {
+    "groupJID": "YOUR_GROUP_JID@g.us",
+    "groupName": "CodeButler Developer"
+  }
 }
 ```
 
@@ -313,27 +314,26 @@ rm config.json
 ## Best Practices
 
 ### Recommended Usage
-1. Use CodeButler Developer for all dev commands
-2. Use personal chat for quick questions only
-3. Review command history regularly
-4. Set up workflows for repetitive tasks
-5. Mute personal chat, keep Alfred unmuted
+1. All communication goes through CodeButler Developer group
+2. Review command history regularly
+3. Set up workflows for repetitive tasks
+4. Keep notifications enabled for this group
 
 ### Command Organization
 ```
 Morning:
-  @codebutler morning standup
-  @codebutler status
+  @butler morning standup
+  @butler status
 
 During work:
   in <repo>: <specific commands>
 
 Before commit:
-  @codebutler pre-commit check <repo>
+  @butler pre-commit check <repo>
 
 End of day:
-  @codebutler summary
-  @codebutler git status in all repos
+  @butler summary
+  @butler git status in all repos
 ```
 
 ### Workflow Tips
@@ -345,23 +345,26 @@ End of day:
 ## FAQ
 
 **Q: Can I rename the group?**
-A: Yes, but update `name` in config.json to match.
+A: Yes, but update `groupName` in config.json to match.
 
 **Q: Can I add team members?**
-A: Not in current version. Create separate group for team.
+A: CodeButler is designed for single-user use. Adding members would give them full access to all your repositories.
 
 **Q: What if I delete the group?**
-A: Run `rm config.json && ./butler` to recreate.
+A: Run `rm config.json && ./butler` to recreate it.
 
-**Q: Can I have multiple dev control groups?**
-A: Not currently. One group with `isDevControl: true`.
+**Q: Can I use personal chat instead?**
+A: No. CodeButler only responds to messages from the CodeButler Developer group. This simplifies the architecture and keeps everything organized.
+
+**Q: Can I have multiple groups?**
+A: No. CodeButler only works with one group (CodeButler Developer). This is a design decision for simplicity.
 
 **Q: Does it work on WhatsApp Business?**
 A: Yes, same functionality.
 
-**Q: Can I use personal chat instead?**
-A: Yes, but you'll miss bulk operations and workflows.
+**Q: What happens if I send a message from personal chat?**
+A: CodeButler will ignore it. Only messages from the CodeButler Developer group are processed.
 
 ---
 
-**The CodeButler Developer group is your dedicated development command center. Use it wisely!** 🚀
+**The CodeButler Developer group is the ONLY way to communicate with CodeButler. Keep it organized!** 🚀

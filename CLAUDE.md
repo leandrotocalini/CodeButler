@@ -93,20 +93,8 @@ codebutler/
   "whatsapp": {
     "sessionPath": "./whatsapp-session",
     "personalNumber": "1234567890@s.whatsapp.net",
-    "allowedGroups": [
-      {
-        "jid": "120363123456789012@g.us",
-        "name": "CodeButler Developer",
-        "enabled": true,
-        "isDevControl": true
-      },
-      {
-        "jid": "123456789-1234567890@g.us",
-        "name": "Team Alpha",
-        "enabled": true,
-        "isDevControl": false
-      }
-    ]
+    "groupJID": "120363123456789012@g.us",
+    "groupName": "CodeButler Developer"
   },
   "openai": {
     "apiKey": "sk-..."
@@ -122,16 +110,17 @@ codebutler/
 
 **Important**: `config.json` is in `.gitignore` - it contains secrets!
 
-## "CodeButler Developer" Group - Development Control Center
+## "CodeButler Developer" Group - The Only Communication Channel
 
 ### Purpose
 
-The "CodeButler Developer" group is a special WhatsApp group automatically created during first-time setup. It serves as your personal development control center with the following characteristics:
+The "CodeButler Developer" group is a special WhatsApp group automatically created during first-time setup. It serves as **the only communication channel** with CodeButler.
 
 **Key Properties:**
 - **Private**: Only you as a member (single-user group)
 - **Auto-created**: Created or found during setup
-- **Pre-enabled**: Automatically added to `allowedGroups` with `isDevControl: true`
+- **Only Channel**: No personal chat support, no other groups
+- **Simplified**: All messages must come from this group
 - **Dedicated**: Used exclusively for development workflow control
 
 ### Why a Group Instead of Personal Chat?
@@ -352,36 +341,25 @@ func (c *Client) RemoveParticipants(groupJID string, participants []string) erro
 
 ### 2. Access Control (`internal/access/`)
 
-**Purpose**: Validate message senders
+**Purpose**: Validate message senders (simplified - only one group)
 
 **Key Files**:
 - `control.go` - Validation logic
-- `groups.go` - Group allow-list management
 
 **Logic**:
 ```go
 func IsAllowed(sender string, config Config) bool {
-    // Personal number always allowed
-    if sender == config.WhatsApp.PersonalNumber {
-        return true
-    }
-
-    // Check if sender is from allowed group
-    for _, group := range config.WhatsApp.AllowedGroups {
-        if group.JID == sender && group.Enabled {
-            return true
-        }
-    }
-
-    return false
+    // Only messages from CodeButler Developer group are allowed
+    return sender == config.WhatsApp.GroupJID
 }
 ```
 
 **Security Model**:
-- Default deny (reject unknown senders)
-- Explicit allow-list in config.json
-- Personal number has full access
-- Groups can be enabled/disabled without removing
+- Default deny (reject everything)
+- Only CodeButler Developer group allowed
+- No personal chat support
+- No other groups allowed
+- Ultra-simple validation
 
 ### 3. Audio Processor (`internal/audio/`)
 
@@ -595,16 +573,10 @@ type Config struct {
 }
 
 type WhatsAppConfig struct {
-    SessionPath    string         `json:"sessionPath"`
-    PersonalNumber string         `json:"personalNumber"`
-    AllowedGroups  []AllowedGroup `json:"allowedGroups"`
-}
-
-type AllowedGroup struct {
-    JID          string `json:"jid"`
-    Name         string `json:"name"`
-    Enabled      bool   `json:"enabled"`
-    IsDevControl bool   `json:"isDevControl"` // True for "CodeButler Developer" group
+    SessionPath    string `json:"sessionPath"`
+    PersonalNumber string `json:"personalNumber"`
+    GroupJID       string `json:"groupJID"`  // CodeButler Developer group JID
+    GroupName      string `json:"groupName"` // "CodeButler Developer"
 }
 
 type OpenAIConfig struct {
@@ -753,26 +725,20 @@ func runFirstTimeSetup() {
     fmt.Println("\n🔍 Searching for 'CodeButler Developer' group...")
 
     // Find or create CodeButler Developer group
-    alfredGroup, err := findOrCreateAlfredDeveloperGroup(wa, personalNumber)
+    codebutlerGroup, err := findOrCreateCodeButlerDeveloperGroup(wa, personalNumber)
     if err != nil {
         log.Fatal("Failed to setup CodeButler Developer group:", err)
     }
 
-    fmt.Printf("✅ CodeButler Developer group ready: %s\n", alfredGroup.Name)
+    fmt.Printf("✅ CodeButler Developer group ready: %s\n", codebutlerGroup.Name)
 
     // Create config
     cfg := config.Config{
         WhatsApp: config.WhatsAppConfig{
             SessionPath:    "./whatsapp-session",
             PersonalNumber: personalNumber,
-            AllowedGroups: []config.AllowedGroup{
-                {
-                    JID:          alfredGroup.JID,
-                    Name:         alfredGroup.Name,
-                    Enabled:      true,
-                    IsDevControl: true, // Special flag for dev control
-                },
-            },
+            GroupJID:       codebutlerGroup.JID,
+            GroupName:      codebutlerGroup.Name,
         },
         OpenAI: config.OpenAIConfig{
             APIKey: openaiKey,
@@ -820,7 +786,8 @@ Try these commands:
 }
 
 // findOrCreateAlfredDeveloperGroup finds existing or creates new CodeButler Developer group
-func findOrCreateAlfredDeveloperGroup(wa *whatsapp.Client, personalNumber string) (*whatsapp.Group, error) {
+// findOrCreateCodeButlerDeveloperGroup finds existing or creates new CodeButler Developer group
+func findOrCreateCodeButlerDeveloperGroup(wa *whatsapp.Client, personalNumber string) (*whatsapp.Group, error) {
     // Get all groups
     groups, err := wa.GetGroups()
     if err != nil {

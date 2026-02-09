@@ -18,15 +18,14 @@ CodeButler is a minimalist WhatsApp-based assistant built in Go that acts as a s
 - Connect via WhatsApp Web protocol (using Go WhatsApp library)
 - QR code authentication on first run
 - Persistent session management
-- **Auto-creates "CodeButler Developer" group** on first run
+- **Single Channel Communication**: CodeButler Developer group only
+  - Auto-creates "CodeButler Developer" group on first run
+  - If group exists, uses the existing one
   - Private group (only you as member)
-  - Used as development control center
-  - Auto-enabled in allowed groups
-- Access control:
-  - Personal chat (1:1 with your number)
-  - "CodeButler Developer" group (auto-created)
-  - Other explicitly approved groups
-  - Interactive group ID discovery via WhatsApp
+  - All communication happens through this group
+  - No personal chat support
+  - No other groups allowed
+- **Simplified Security**: Only one group = simpler access control
 
 ### 2. Multi-Repository Management
 ```
@@ -130,20 +129,8 @@ Response → WhatsApp
   "whatsapp": {
     "sessionPath": "./whatsapp-session",
     "personalNumber": "1234567890@s.whatsapp.net",
-    "allowedGroups": [
-      {
-        "jid": "120363123456789012@g.us",
-        "name": "CodeButler Developer",
-        "enabled": true,
-        "isDevControl": true
-      },
-      {
-        "jid": "123456789-1234567890@g.us",
-        "name": "Team Alpha",
-        "enabled": true,
-        "isDevControl": false
-      }
-    ]
+    "groupJID": "120363123456789012@g.us",
+    "groupName": "CodeButler Developer"
   },
   "openai": {
     "apiKey": "sk-..."
@@ -186,21 +173,7 @@ claude
     "🤖 CodeButler connected ✅
 
     You can now control your development workflow from here.
-    Try: @codebutler repos"
-```
-
-### Adding a Group
-
-```
-WhatsApp Conversation:
-User: @codebutler list groups
-Bot: Available groups:
-     1. Team Alpha (123-456@g.us)
-     2. Project Beta (789-012@g.us)
-
-User: @codebutler allow 1
-Bot: ✅ Team Alpha is now allowed
-     Updated config.json
+    Try: @butler repos"
 ```
 
 ### Working with Repositories
@@ -408,18 +381,20 @@ Bot: Analyzing authentication flow across repos...
 ### Access Control Layers
 
 1. **Network Level**: WhatsApp Web protocol (encrypted)
-2. **Application Level**: Personal number + allowed groups only
+2. **Application Level**: CodeButler Developer group only (simple validation)
 3. **Repository Level**: Each repo isolated with own CLAUDE.md
 4. **Credential Storage**: config.json never committed (gitignored)
 
 ### Permissions Matrix
 
-| Sender Type | Read Repos | Write Repos | Bulk Ops | Workflows | Modify Config | Special Commands |
-|-------------|------------|-------------|----------|-----------|---------------|------------------|
-| Personal Number | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| CodeButler Developer | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Other Allowed Groups | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Unknown Senders | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Sender Type | Access | All Features |
+|-------------|--------|--------------|
+| CodeButler Developer Group | ✅ | ✅ Full access |
+| Personal Chat | ❌ | Ignored |
+| Other Groups | ❌ | Ignored |
+| Unknown Senders | ❌ | Ignored |
+
+**Simple Rule**: If message is not from CodeButler Developer group → Ignore
 
 ## Technical Stack
 

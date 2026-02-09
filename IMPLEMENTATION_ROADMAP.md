@@ -216,32 +216,24 @@ This document breaks down all the tasks needed to build CodeButler from scratch 
 
 ---
 
-## Phase 3: Access Control (Est: 2-3 hours)
+## Phase 3: Access Control (Est: 1 hour)
 
 ### 3.1 Access Validation (`internal/access/control.go`)
 
 - [ ] Implement IsAllowed() function
   ```go
-  func IsAllowed(sender string, cfg *config.Config) bool
+  func IsAllowed(sender string, cfg *config.Config) bool {
+      // Ultra-simple: only check if message is from CodeButler Developer group
+      return sender == cfg.WhatsApp.GroupJID
+  }
   ```
 
-- [ ] Check if sender is personal number
-
-- [ ] Check if sender is from allowed group
-
-- [ ] Check if group is enabled
-
 - [ ] Test: Verify access control logic
+  - [ ] Message from CodeButler Developer group → Allowed
+  - [ ] Message from personal chat → Denied
+  - [ ] Message from other group → Denied
 
-### 3.2 Group Management (`internal/access/groups.go`)
-
-- [ ] Implement AllowGroup() function
-
-- [ ] Implement DenyGroup() function
-
-- [ ] Implement ListAllowedGroups() function
-
-- [ ] Test: Allow/deny groups, verify persistence
+**Note**: This is much simpler than multi-group access control. No arrays, no loops, no enable/disable flags. Just one JID comparison.
 
 ---
 
@@ -649,7 +641,7 @@ This document breaks down all the tasks needed to build CodeButler from scratch 
 | 0 | Project Setup | 2 |
 | 1 | WhatsApp Integration | 8-12 |
 | 2 | Configuration System | 4-6 |
-| 3 | Access Control | 2-3 |
+| 3 | Access Control | 1 |
 | 4 | Audio Transcription | 4-5 |
 | 5 | Repository Management | 6-8 |
 | 6 | Claude Code Executor | 8-10 |
@@ -658,9 +650,11 @@ This document breaks down all the tasks needed to build CodeButler from scratch 
 | 9 | Testing | 8-10 |
 | 10 | Documentation | 4-6 |
 | 11 | Build & Deploy | 2-3 |
-| **TOTAL** | | **64-85 hours** |
+| **TOTAL** | | **63-83 hours** |
 
 **Realistic timeline**: 2-3 weeks of full-time work, or 4-6 weeks part-time.
+
+**Note**: Phase 3 is significantly simpler now (1h vs 2-3h) due to single-group access control.
 
 ---
 
@@ -668,12 +662,12 @@ This document breaks down all the tasks needed to build CodeButler from scratch 
 
 To get a minimal viable version running quickly, focus on:
 
-### MVP Scope (Est: 24-32 hours)
+### MVP Scope (Est: 23-31 hours)
 
 - [x] Phase 0: Project Setup (2h)
 - [ ] Phase 1.1-1.3: Basic WhatsApp (6h)
 - [ ] Phase 2: Configuration (5h)
-- [ ] Phase 3: Access Control (2h)
+- [ ] Phase 3: Access Control (1h)
 - [ ] Phase 5: Repository Discovery (4h)
 - [ ] Phase 6.1: Basic Claude Executor (4h)
 - [ ] Phase 7.1-7.2: Main App (8h)
