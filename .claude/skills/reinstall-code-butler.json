@@ -1,0 +1,19 @@
+{
+  "name": "reinstall-code-butler",
+  "description": "Pull latest changes, rebuild and restart CodeButler agent",
+  "triggers": [
+    "reinstall code butler",
+    "reinstall codebutler",
+    "update code butler",
+    "update codebutler",
+    "rebuild agent",
+    "restart agent",
+    "pull and reinstall"
+  ],
+  "usage": "Use this when you need to update CodeButler with latest changes from GitHub and restart the WhatsApp agent",
+  "examples": [
+    "I pushed changes to main, can you reinstall code butler?",
+    "Update code butler to latest version",
+    "Restart the agent with latest code"
+  ]
+}

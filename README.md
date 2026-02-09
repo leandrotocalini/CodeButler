@@ -108,6 +108,26 @@ Commands:
 - `clear` - Clear selection
 - `help` - Show help
 
+### Remote Updates via WhatsApp
+
+You can update CodeButler remotely via WhatsApp! If you push changes to GitHub:
+
+```
+You (via WhatsApp): "reinstall code butler"
+
+Bot: 🔄 Pulling latest changes...
+     🔨 Rebuilding agent...
+     🚀 Restarting...
+     ✅ CodeButler updated to latest version!
+```
+
+This uses the `/reinstall-code-butler` skill that:
+- Pulls latest changes from `main`
+- Rebuilds the Go agent
+- Restarts the agent automatically
+
+Perfect for updating CodeButler on remote machines!
+
 ## Documentation
 
 - [Product Specification](PRODUCT.md) - What CodeButler does and why

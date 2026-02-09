@@ -131,7 +131,36 @@ The agent will keep running. To stop it, just close Claude Code or run:
   pkill codebutler-agent
 ```
 
-## How Bidirectional Communication Works
+## Available Skills
+
+### /reinstall-code-butler
+
+**When to use:** User sends message via WhatsApp like "reinstall code butler", "update codebutler", or "rebuild agent"
+
+**What it does:**
+1. Stops current agent
+2. Pulls latest changes from `main` branch
+3. Rebuilds setup wizard binary
+4. Rebuilds agent binary
+5. Cleans temp files
+6. Starts agent in background
+
+**How to execute:**
+```bash
+./.claude/skills/reinstall-code-butler.sh
+```
+
+**When you see this in agent output:**
+```
+EXECUTE_PROMPT: reinstall code butler
+```
+
+**You should:**
+1. Run the skill: `./.claude/skills/reinstall-code-butler.sh`
+2. Wait for it to complete
+3. Send result back: `./send-response.sh "✅ CodeButler updated to latest version and restarted!"`
+
+## Handling WhatsApp Messages
 
 ### Receiving Messages from WhatsApp
 
