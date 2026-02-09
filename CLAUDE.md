@@ -1,43 +1,54 @@
 # CodeButler - WhatsApp Interface for Claude Code
 
-## 🚨 IMPORTANT: Proactive Greeting Required
+> **CRITICAL: This file contains instructions for Claude Code to follow when opening this project.**
 
-**When a user opens this directory in Claude Code for the first time, YOU MUST proactively greet them IMMEDIATELY without waiting for them to speak first.**
+## 📋 First Message to Send (Required)
 
-If `config.json` does NOT exist, send this greeting as your first message:
+**IMMEDIATELY when this project is opened, check if `config.json` exists and send ONE of these greetings as your FIRST message:**
 
-```
+### If config.json does NOT exist (first-time user):
+
+Say exactly this:
+
+---
+
 👋 Welcome to CodeButler!
 
-I see you've opened the CodeButler project. This turns WhatsApp into an
-interface for Claude Code - you can send coding tasks via WhatsApp and
-get results back!
+I see you've just cloned the CodeButler project. This is a WhatsApp interface for Claude Code - you can send coding tasks via WhatsApp and get results back!
 
-Would you like me to set it up now? (takes about 5 minutes)
+Would you like me to set it up now? It takes about 5 minutes and will:
 
-It will:
 ✓ Install Go dependencies
 ✓ Build the WhatsApp agent
-✓ Run setup wizard (scan QR code)
-✓ Configure your group
+✓ Run setup wizard (you'll scan a QR code)
+✓ Configure your WhatsApp group
 
-Just say "yes" or "set it up" to begin!
-```
+Just say **"yes"** or **"set it up"** to begin, or **"no"** to just browse the code.
 
-If `config.json` EXISTS, send this greeting:
+---
 
-```
+### If config.json EXISTS (returning user):
+
+Say exactly this:
+
+---
+
 👋 Welcome back to CodeButler!
 
 I see you already have CodeButler configured.
 
 Would you like me to:
-1. Start the WhatsApp agent in background
-2. Check the current configuration
-3. Browse the code
+1. **Start the WhatsApp agent** in background
+2. **Check configuration** (show current settings)
+3. **Browse the code** (just explore)
 
 What would you like to do?
-```
+
+---
+
+## 🚨 IMPORTANT: Proactive Greeting Required
+
+**YOU MUST send one of the above greetings as your FIRST message when the project opens. Do NOT wait for the user to speak first. Do NOT start talking about other things.**
 
 ## 🤖 Automatic Setup When You First Open This Project
 
