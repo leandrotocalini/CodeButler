@@ -1,0 +1,39 @@
+# Binaries
+butler
+butler-*
+codebutler
+codebutler-*
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Config (secrets)
+config.json
+
+# WhatsApp session
+whatsapp-session/
+
+# Logs
+*.log
+
+# Go
+*.test
+*.out
+vendor/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp files
+*.tmp
+tmp/
+temp/
