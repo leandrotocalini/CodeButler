@@ -1,10 +1,10 @@
 #!/bin/bash
-# CodeButler Automatic Setup
-# Runs the complete setup process
+# CodeButler Setup Script
+# Builds wizard + agent, then runs web-based setup
 
 set -e
 
-echo "🤖 CodeButler Automatic Setup"
+echo "🤖 CodeButler Setup"
 echo ""
 
 # Check if already configured
@@ -12,7 +12,7 @@ if [ -f "config.json" ]; then
     echo "⚠️  config.json already exists"
     echo ""
     echo "Do you want to:"
-    echo "1. Keep existing config and start agent"
+    echo "1. Keep existing config"
     echo "2. Delete and reconfigure"
     echo ""
     read -p "Choice (1/2): " choice
@@ -34,34 +34,32 @@ echo "   ✅ Dependencies installed"
 echo ""
 
 echo "🔨 Building setup wizard..."
-go build -o ../codebutler ./cmd/codebutler/
+go build -o ../codebutler-wizard ./cmd/setup-wizard/
 echo "   ✅ Wizard built"
 echo ""
 
-echo "🔨 Building WhatsApp agent..."
+echo "🔨 Building agent..."
 go build -o ../codebutler-agent ./cmd/agent/
 cd ..
 echo "   ✅ Agent built"
 echo ""
 
-echo "🎉 Binaries ready!"
-echo ""
-echo "📋 Now running interactive setup wizard..."
-echo "   You'll be asked about:"
-echo "   - Voice transcription (OpenAI API key)"
-echo "   - WhatsApp group name"
-echo "   - Bot prefix"
-echo "   - Sources directory"
-echo ""
-echo "   Then you'll scan a QR code with WhatsApp"
+echo "🌐 Starting setup wizard..."
+echo "   Opening browser at http://localhost:3000"
 echo ""
 
-# Run the wizard
-./codebutler
+# Run wizard (blocks until setup complete)
+./codebutler-wizard
 
 echo ""
 echo "✅ Setup complete!"
 echo ""
-echo "To start the agent, run:"
-echo "  ./start-agent.sh"
+
+# Check if setup was successful
+if [ ! -f "/tmp/codebutler/setup-status.json" ]; then
+    echo "⚠️  Setup status not found"
+    exit 1
+fi
+
+echo "📋 Configuration saved to config.json"
 echo ""

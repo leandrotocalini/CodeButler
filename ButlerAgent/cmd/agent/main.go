@@ -2,53 +2,63 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
-	"strconv"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/leandrotocalini/CodeButler/internal/access"
 	"github.com/leandrotocalini/CodeButler/internal/audio"
 	"github.com/leandrotocalini/CodeButler/internal/config"
+	"github.com/leandrotocalini/CodeButler/internal/protocol"
 	"github.com/leandrotocalini/CodeButler/internal/whatsapp"
 )
 
-var (
-	currentChatID      string
-	waitingForResponse bool
-)
-
 func main() {
-	// Load config from current directory
+	fmt.Println("🤖 CodeButler Agent")
+	fmt.Println()
+
+	// Load config
 	cfg, err := config.Load("config.json")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Failed to load config: %v\n", err)
-		os.Exit(1)
+		log.Fatal("❌ Failed to load config.json:", err)
+	}
+
+	fmt.Println("📝 Configuration loaded")
+	fmt.Printf("   Group: %s\n", cfg.WhatsApp.GroupName)
+	fmt.Printf("   Voice: %v\n", cfg.OpenAI.APIKey != "")
+	fmt.Println()
+
+	// Initialize protocol directory
+	if err := protocol.Initialize(); err != nil {
+		log.Fatal("❌ Failed to initialize protocol:", err)
 	}
 
 	// Connect to WhatsApp
 	fmt.Println("📱 Connecting to WhatsApp...")
 	client, err := whatsapp.Connect(cfg.WhatsApp.SessionPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Failed to connect: %v\n", err)
-		os.Exit(1)
+		log.Fatal("❌ Failed to connect:", err)
 	}
 	defer client.Disconnect()
 
+	fmt.Println("✅ Connected to WhatsApp")
+	fmt.Println()
+
+	// Get bot prefix
 	botPrefix := cfg.WhatsApp.BotPrefix
 	if botPrefix == "" {
 		botPrefix = "[BOT]"
 	}
 
-	fmt.Println("✅ CodeButler agent running")
-	fmt.Printf("📋 Monitoring group: %s\n", cfg.WhatsApp.GroupName)
+	// Register message handler
+	fmt.Println("👂 Listening for messages...")
+	fmt.Println("   Protocol: JSON files in /tmp/codebutler/")
 	fmt.Println()
 
-	// Start file watchers in background
-	go watchResponses(client, botPrefix, cfg)
-	go watchQuestions(client, botPrefix, cfg)
-
-	// Register message handler
 	client.OnMessage(func(msg whatsapp.Message) {
 		// Ignore bot's own messages
 		if strings.HasPrefix(msg.Content, botPrefix) {
@@ -57,126 +67,156 @@ func main() {
 
 		// Access control
 		if !access.IsAllowed(msg, cfg) {
+			fmt.Printf("⛔ Blocked message from: %s\n", msg.From)
 			return
 		}
 
-		currentChatID = msg.Chat
+		fmt.Printf("📨 Message from %s: %s\n", msg.From, msg.Content)
 
 		// Handle voice messages
 		content := msg.Content
+		var transcript *string
 		if msg.IsVoice {
-			if cfg.OpenAI.APIKey == "" || cfg.OpenAI.APIKey == "sk-test-key-for-phase-testing" {
+			if cfg.OpenAI.APIKey == "" {
+				fmt.Println("   ⚠️  Voice message ignored (no OpenAI key)")
 				return
 			}
 
+			fmt.Println("   🎤 Transcribing voice...")
 			text, err := handleVoiceMessage(client, cfg.OpenAI.APIKey, msg)
 			if err != nil {
-				client.SendMessage(msg.Chat, getVoiceErrorMessage(err))
+				fmt.Printf("   ❌ Transcription failed: %v\n", err)
+				client.SendMessage(msg.Chat, botPrefix+" ❌ Voice transcription failed")
 				return
 			}
+
 			content = text
-			fmt.Printf("🎤 Voice transcribed: \"%s\"\n", content)
+			transcript = &text
+			fmt.Printf("   ✅ Transcript: %s\n", text)
 		}
 
-		// Check if this is a numeric response to a question
-		if waitingForResponse && isNumericResponse(content) {
-			// Write answer to file for Claude Code to read
-			os.WriteFile(".codebutler-answer", []byte(content), 0644)
-			waitingForResponse = false
-			fmt.Printf("📝 Answer written: %s\n", content)
+		// Write incoming message
+		incoming := &protocol.IncomingMessage{
+			MessageID:  uuid.New().String(),
+			From:       protocol.Contact{JID: msg.From, Name: ""},
+			Chat:       protocol.Contact{JID: msg.Chat, Name: ""},
+			Content:    content,
+			IsVoice:    msg.IsVoice,
+			Transcript: transcript,
+		}
+
+		if err := protocol.WriteIncoming(incoming); err != nil {
+			fmt.Printf("   ❌ Failed to write incoming.json: %v\n", err)
 			return
 		}
 
-		// Print incoming message for Claude Code to see
-		fmt.Println()
-		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-		fmt.Println("📨 INCOMING WHATSAPP MESSAGE")
-		fmt.Printf("From: %s\n", msg.From)
-		fmt.Printf("Chat: %s\n", msg.Chat)
-		fmt.Printf("Content: %s\n", content)
-		if msg.IsVoice {
-			fmt.Println("Type: Voice (transcribed)")
-		}
-		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-		fmt.Println()
-		fmt.Printf("EXECUTE_PROMPT: %s\n", content)
-		fmt.Println()
-
-		// Send acknowledgment
-		client.SendMessage(msg.Chat, botPrefix+" Mensaje recibido! Procesando...")
+		fmt.Println("   ✅ Written to /tmp/codebutler/incoming.json")
+		fmt.Println("   ⏳ Waiting for Claude to respond...")
 	})
 
-	// Keep alive
-	fmt.Println("👂 Listening for WhatsApp messages...")
-	fmt.Println("   Also monitoring for responses and questions")
+	// Start outgoing monitor (sends responses to WhatsApp)
+	go monitorOutgoing(client, botPrefix)
+
+	// Start question/answer monitor
+	go monitorQuestions(client, botPrefix)
+
+	// Wait for interrupt
+	fmt.Println("✅ Agent running")
 	fmt.Println("   Press Ctrl+C to stop")
 	fmt.Println()
-	select {}
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	<-sigCh
+
+	fmt.Println()
+	fmt.Println("👋 Shutting down...")
 }
 
-// Watch for .codebutler-response file (Claude Code sends final response)
-func watchResponses(client *whatsapp.Client, botPrefix string, cfg *config.Config) {
+func monitorOutgoing(client *whatsapp.Client, botPrefix string) {
 	for {
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(1 * time.Second)
 
-		if _, err := os.Stat(".codebutler-response"); err == nil {
-			// File exists, read and send to WhatsApp
-			content, err := os.ReadFile(".codebutler-response")
-			if err != nil {
-				continue
-			}
-
-			message := botPrefix + " " + string(content)
-			if currentChatID != "" {
-				client.SendMessage(currentChatID, message)
-				fmt.Printf("📤 Response sent to WhatsApp\n")
-			} else {
-				// Fallback to configured group
-				client.SendMessage(cfg.WhatsApp.GroupJID, message)
-				fmt.Printf("📤 Response sent to configured group\n")
-			}
-
-			// Delete file after sending
-			os.Remove(".codebutler-response")
+		if !protocol.FileExists(protocol.OutgoingPath) {
+			continue
 		}
+
+		resp, err := protocol.ReadOutgoing()
+		if err != nil {
+			fmt.Printf("⚠️  Failed to read outgoing.json: %v\n", err)
+			protocol.DeleteFile(protocol.OutgoingPath)
+			continue
+		}
+
+		// Send to WhatsApp
+		message := botPrefix + " " + resp.Content
+		if err := client.SendMessage(resp.ChatJID, message); err != nil {
+			fmt.Printf("❌ Failed to send message: %v\n", err)
+		} else {
+			fmt.Println("📤 Response sent to WhatsApp")
+		}
+
+		// Delete file
+		protocol.DeleteFile(protocol.OutgoingPath)
 	}
 }
 
-// Watch for .codebutler-question file (Claude Code asks a question)
-func watchQuestions(client *whatsapp.Client, botPrefix string, cfg *config.Config) {
+func monitorQuestions(client *whatsapp.Client, botPrefix string) {
 	for {
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(1 * time.Second)
 
-		if _, err := os.Stat(".codebutler-question"); err == nil {
-			// File exists, read and send to WhatsApp
-			content, err := os.ReadFile(".codebutler-question")
-			if err != nil {
-				continue
+		if !protocol.FileExists(protocol.QuestionPath) {
+			continue
+		}
+
+		q, err := protocol.ReadQuestion()
+		if err != nil {
+			fmt.Printf("⚠️  Failed to read question.json: %v\n", err)
+			protocol.DeleteFile(protocol.QuestionPath)
+			continue
+		}
+
+		fmt.Printf("❓ Question: %s\n", q.Text)
+
+		// Format options
+		message := fmt.Sprintf("%s %s\n", botPrefix, q.Text)
+		for i, opt := range q.Options {
+			message += fmt.Sprintf("%d. %s\n", i+1, opt)
+		}
+
+		// Send question
+		if err := client.SendMessage(q.ChatJID, message); err != nil {
+			fmt.Printf("❌ Failed to send question: %v\n", err)
+			protocol.DeleteFile(protocol.QuestionPath)
+			continue
+		}
+
+		// Delete question file
+		protocol.DeleteFile(protocol.QuestionPath)
+
+		// Wait for answer (with timeout)
+		timeout := time.After(time.Duration(q.Timeout) * time.Second)
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer ticker.Stop()
+
+		answered := false
+		for !answered {
+			select {
+			case <-timeout:
+				fmt.Println("   ⏱️  Question timed out")
+				return
+
+			case <-ticker.C:
+				if protocol.FileExists(protocol.AnswerPath) {
+					ans, err := protocol.ReadAnswer()
+					if err == nil && ans.QuestionID == q.QuestionID {
+						fmt.Printf("   ✅ Answer received: %s\n", ans.Text)
+						answered = true
+					}
+				}
 			}
-
-			message := botPrefix + " " + string(content)
-			if currentChatID != "" {
-				client.SendMessage(currentChatID, message)
-				fmt.Printf("❓ Question sent to WhatsApp\n")
-			} else {
-				// Fallback to configured group
-				client.SendMessage(cfg.WhatsApp.GroupJID, message)
-				fmt.Printf("❓ Question sent to configured group\n")
-			}
-
-			// Mark that we're waiting for response
-			waitingForResponse = true
-
-			// Delete question file after sending
-			os.Remove(".codebutler-question")
 		}
 	}
-}
-
-func isNumericResponse(text string) bool {
-	text = strings.TrimSpace(text)
-	_, err := strconv.Atoi(text)
-	return err == nil
 }
 
 func handleVoiceMessage(client *whatsapp.Client, apiKey string, msg whatsapp.Message) (string, error) {
@@ -194,36 +234,4 @@ func handleVoiceMessage(client *whatsapp.Client, apiKey string, msg whatsapp.Mes
 	}
 
 	return text, nil
-}
-
-func getVoiceErrorMessage(err error) string {
-	errStr := err.Error()
-
-	if strings.Contains(errStr, "insufficient_quota") || strings.Contains(errStr, "429") {
-		return "❌ No pude transcribir el mensaje de voz.\n\n" +
-			"💳 Tu cuenta de OpenAI se quedó sin créditos.\n" +
-			"💡 Agregá saldo en: https://platform.openai.com/account/billing"
-	}
-
-	if strings.Contains(errStr, "401") || strings.Contains(errStr, "invalid") {
-		return "❌ No pude transcribir el mensaje de voz.\n\n" +
-			"🔑 El API key de OpenAI es inválido.\n" +
-			"💡 Verificá tu configuración."
-	}
-
-	if strings.Contains(errStr, "rate_limit") {
-		return "❌ No pude transcribir el mensaje de voz.\n\n" +
-			"⏳ Demasiadas solicitudes a OpenAI.\n" +
-			"💡 Intentá de nuevo en unos minutos."
-	}
-
-	if strings.Contains(errStr, "download failed") {
-		return "❌ No pude transcribir el mensaje de voz.\n\n" +
-			"📡 Error al descargar el audio de WhatsApp.\n" +
-			"💡 Intentá enviarlo de nuevo."
-	}
-
-	return "❌ No pude transcribir el mensaje de voz.\n\n" +
-		"⚠️  Error desconocido.\n" +
-		"💡 Intentá de nuevo más tarde."
 }

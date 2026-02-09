@@ -1,1478 +1,381 @@
 # CodeButler - WhatsApp Interface for Claude Code
 
-> **CRITICAL: This file contains instructions for Claude Code to follow when opening this project.**
+> **Instructions for Claude Code when working in this project**
 
-## 📋 First Message to Send (Required)
+## 🚀 Setup Flow
 
-**IMMEDIATELY when this project is opened, check if `config.json` exists and send ONE of these greetings as your FIRST message:**
+When user opens this project for the first time:
 
-### If config.json does NOT exist (first-time user):
+1. Check if `config.json` exists
+2. If NOT exists, run: `./setup.sh`
+3. This opens a **web browser** at `http://localhost:3000`
+4. User completes setup in browser (scan QR, enter keys)
+5. Setup wizard returns JSON status
+6. Start agent in background
 
-Say exactly this:
+## 📡 JSON Protocol (Agent ↔ Claude)
 
----
+All communication between the Go agent and Claude Code happens via **JSON files** in `/tmp/codebutler/`.
 
-👋 Welcome to CodeButler!
-
-I see you've just cloned the CodeButler project. This is a WhatsApp interface for Claude Code - you can send coding tasks via WhatsApp and get results back!
-
-Would you like me to set it up now? It takes about 5 minutes and will:
-
-✓ Install Go dependencies
-✓ Build the WhatsApp agent
-✓ Run setup wizard (you'll scan a QR code)
-✓ Configure your WhatsApp group
-
-Just say **"yes"** or **"set it up"** to begin, or **"no"** to just browse the code.
-
----
-
-### If config.json EXISTS (returning user):
-
-Say exactly this:
-
----
-
-👋 Welcome back to CodeButler!
-
-I see you already have CodeButler configured.
-
-Would you like me to:
-1. **Start the WhatsApp agent** in background
-2. **Check configuration** (show current settings)
-3. **Browse the code** (just explore)
-
-What would you like to do?
-
----
-
-## 🚨 IMPORTANT: Proactive Greeting Required
-
-**YOU MUST send one of the above greetings as your FIRST message when the project opens. Do NOT wait for the user to speak first. Do NOT start talking about other things.**
-
-## 🤖 Automatic Setup When You First Open This Project
-
-**After the user responds "yes" to setup:**
-
-### Step 1: Detect First-Time Setup
-
-Check if `config.json` exists. If not, offer:
+### Directory Structure
 
 ```
-👋 Welcome to CodeButler!
-
-This project turns WhatsApp into an interface for Claude Code.
-You can send coding tasks via WhatsApp and get results back.
-
-Would you like to set it up now? (5 minutes)
-
-[Yes, set up CodeButler] [No, just browse the code]
+/tmp/codebutler/
+├── incoming.json       # Agent writes, Claude reads (WhatsApp → Claude)
+├── outgoing.json       # Claude writes, Agent reads (Claude → WhatsApp)
+├── question.json       # Claude writes when asking user
+└── answer.json         # Agent writes when user responds
 ```
 
-### Step 2: If User Says Yes, Run Setup
+### 1. Incoming Message (WhatsApp → Claude)
 
-**IMPORTANT: Execute this automatically, don't ask user to run commands manually:**
-
-```bash
-./setup.sh
-```
-
-This single script does everything:
-1. Checks if config.json exists (offers to reconfigure if needed)
-2. Installs Go dependencies automatically
-3. Builds setup wizard binary
-4. Builds agent binary
-5. Runs the interactive wizard (QR code, questions)
-
-The wizard will ask the user about:
-- Voice transcription (OpenAI API key)
-- WhatsApp group name (default: "CodeButler Developer")
-- Bot prefix (default: "[BOT]")
-- Source code directory (default: "./Sources")
-- Display QR code to scan with WhatsApp
-- Create the group if needed
-- Save config.json in root directory
-
-### Step 3: After Setup, Offer to Start Agent
-
-```
-✅ Setup complete!
-
-CodeButler is now configured. To receive WhatsApp messages:
-
-[Start Agent in Background] [Start Later]
-```
-
-### Step 4: Running the Agent
-
-If user clicks "Start Agent", execute:
-
-```bash
-./start-agent.sh &
-```
-
-This will:
-- Build the agent binary from ButlerAgent/cmd/agent/
-- Start it in background
-- Monitor WhatsApp for messages
-- Monitor for responses and questions from you (Claude Code)
-
-Then show:
-
-```
-✅ CodeButler agent is running in background
-
-When WhatsApp messages arrive, I'll receive them as prompts.
-You can continue working normally.
-
-The agent will keep running. To stop it, just close Claude Code or run:
-  pkill codebutler-agent
-```
-
-## Available Skills
-
-### /reinstall-code-butler
-
-**When to use:** User sends message via WhatsApp like "reinstall code butler", "update codebutler", or "rebuild agent"
-
-**What it does:**
-1. Stops current agent
-2. Pulls latest changes from `main` branch
-3. Rebuilds setup wizard binary
-4. Rebuilds agent binary
-5. Cleans temp files
-6. Starts agent in background
-
-**How to execute:**
-```bash
-./.claude/skills/reinstall-code-butler.sh
-```
-
-**When you see this in agent output:**
-```
-EXECUTE_PROMPT: reinstall code butler
-```
-
-**You should:**
-1. Run the skill: `./.claude/skills/reinstall-code-butler.sh`
-2. Wait for it to complete
-3. Send result back: `./send-response.sh "✅ CodeButler updated to latest version and restarted!"`
-
-## Handling WhatsApp Messages
-
-### Receiving Messages from WhatsApp
-
-When a message arrives, the agent prints:
-
-```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📨 INCOMING WHATSAPP MESSAGE
-From: 5491234567890@s.whatsapp.net
-Chat: 120363123456789012@g.us
-Content: add authentication to the API
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-EXECUTE_PROMPT: add authentication to the API
-```
-
-**You should:**
-1. Detect `EXECUTE_PROMPT:` in agent output
-2. Extract the prompt text
-3. Execute it like the user typed it directly
-4. Process normally (read files, make changes, etc.)
-
-### Sending Responses Back to WhatsApp
-
-After you finish processing, send the result back:
-
-```bash
-./send-response.sh "✅ Authentication added successfully!
-
-Modified files:
-- src/auth/jwt.js (new file)
-- src/middleware/auth.js (new file)
-- src/routes/api.js (updated)
-
-Total: 127 lines added"
-```
-
-The agent will send this message to WhatsApp with the bot prefix.
-
-### Asking Questions via WhatsApp
-
-If you need to ask the user a question during processing:
-
-```bash
-ANSWER=$(./ask-question.sh "Which database ORM?" "Sequelize" "Prisma" "Mongoose")
-
-# User will receive:
-# [BOT] Which database ORM?
-# 1. Sequelize
-# 2. Prisma
-# 3. Mongoose
-
-# User responds: "2"
-
-# ANSWER now contains: "2"
-
-echo "User chose option: $ANSWER"
-# Continue with Prisma...
-```
-
-The script waits for user response (30 second timeout).
-
-### Using AskUserQuestion Tool
-
-When you use the AskUserQuestion tool, you'll need to manually translate it to the ask-question.sh script:
-
-**Instead of:**
-```javascript
-AskUserQuestion({
-  questions: [{
-    question: "Which database?",
-    options: [
-      { label: "PostgreSQL" },
-      { label: "MySQL" },
-      { label: "MongoDB" }
-    ]
-  }]
-})
-```
-
-**Do this:**
-```bash
-ANSWER=$(./ask-question.sh "Which database?" "PostgreSQL" "MySQL" "MongoDB")
-
-# Map answer back
-case $ANSWER in
-  1) DB="PostgreSQL" ;;
-  2) DB="MySQL" ;;
-  3) DB="MongoDB" ;;
-esac
-
-echo "Using database: $DB"
-```
-
-## File Structure
-
-```
-CodeButler/
-├── CLAUDE.md                    # This file (instructions for you)
-├── README.md                    # User documentation
-├── LICENSE
-├── .gitignore
-│
-├── config.json                  # Generated by setup (gitignored)
-├── whatsapp-session/            # WhatsApp session data (gitignored)
-├── Sources/                     # User's code repos (gitignored)
-│   ├── repo1/
-│   └── repo2/
-│
-├── ButlerAgent/                 # Go agent code
-│   ├── cmd/
-│   │   ├── codebutler/          # Setup wizard
-│   │   └── agent/               # WhatsApp agent
-│   ├── internal/
-│   │   ├── whatsapp/
-│   │   ├── config/
-│   │   ├── access/
-│   │   ├── audio/
-│   │   ├── bot/
-│   │   ├── commands/
-│   │   ├── repo/
-│   │   └── ...
-│   ├── go.mod
-│   └── go.sum
-│
-├── docs/                        # Documentation
-│   ├── ARCHITECTURE.md
-│   ├── BIDIRECTIONAL_AGENT.md
-│   └── ...
-│
-├── start-agent.sh               # Start the agent
-├── send-response.sh             # Send response to WhatsApp
-└── ask-question.sh              # Ask question via WhatsApp
-```
-
-## Commands You Might Need
-
-```bash
-# Check if setup is needed
-test -f config.json && echo "Setup done" || echo "Setup needed"
-
-# Run setup wizard
-cd ButlerAgent
-go build -o ../codebutler cmd/codebutler/main.go
-cd ..
-./codebutler
-
-# Build agent
-cd ButlerAgent
-go build -o ../codebutler-agent cmd/agent/main.go
-cd ..
-
-# Start agent
-./start-agent.sh
-
-# Check if agent is running
-pgrep -f codebutler-agent
-
-# Stop agent
-pkill codebutler-agent
-
-# Send response to WhatsApp
-./send-response.sh "Your message here"
-
-# Ask question (waits for answer)
-ANSWER=$(./ask-question.sh "Question?" "Option 1" "Option 2")
-echo "Answer: $ANSWER"
-```
-
-## Example Workflow
-
-**User sends via WhatsApp:** "add JWT authentication"
-
-**Agent output (you see this):**
-```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📨 INCOMING WHATSAPP MESSAGE
-Content: add JWT authentication
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-EXECUTE_PROMPT: add JWT authentication
-```
-
-**You process it:**
-```bash
-# Read existing files
-# Make changes
-
-# Ask question if needed
-ANSWER=$(./ask-question.sh "Which JWT library?" "jsonwebtoken" "jose" "passport-jwt")
-
-# Continue based on answer
-# Write files
-
-# Send result
-./send-response.sh "✅ JWT authentication added!
-Files created:
-- src/auth/jwt.js
-- src/middleware/auth.js"
-```
-
-**User receives on WhatsApp:**
-```
-[BOT] Which JWT library?
-1. jsonwebtoken
-2. jose
-3. passport-jwt
-
-[User responds: "1"]
-
-[BOT] ✅ JWT authentication added!
-Files created:
-- src/auth/jwt.js
-- src/middleware/auth.js
-```
-
-## Voice Messages
-
-If user sends voice message, agent automatically:
-1. Downloads audio
-2. Transcribes with OpenAI Whisper
-3. Processes as text
-
-Output shows:
-```
-🎤 Voice transcribed: "add authentication to the API"
-
-EXECUTE_PROMPT: add authentication to the API
-```
-
-## Security & Access Control
-
-- Only messages from configured WhatsApp group are processed
-- Bot ignores its own messages (prefix detection)
-- config.json contains secrets (gitignored)
-- Sources/ directory is gitignored (user's private code)
-
-## Troubleshooting
-
-### Agent won't start
-```bash
-# Check if config exists
-ls -la config.json
-
-# Rebuild agent
-cd ButlerAgent
-go build -o ../codebutler-agent cmd/agent/main.go
-cd ..
-./start-agent.sh
-```
-
-### Messages not being received
-- Verify WhatsApp is connected (agent shows "✅ CodeButler agent running")
-- Check message is from correct group
-- Verify bot prefix in config.json
-
-### Response not sent to WhatsApp
-- Check agent is running: `pgrep -f codebutler-agent`
-- Verify script: `./send-response.sh "test"`
-- Check agent output for "📤 Response sent"
-
----
-
-**This architecture enables true bidirectional communication between WhatsApp and Claude Code!** 🚀
-
-
-## Project Overview
-
-CodeButler is a **bidirectional WhatsApp interface for Claude Code**. It allows you to:
-- Send coding tasks via WhatsApp
-- Receive Claude's questions via WhatsApp
-- Answer with simple numeric responses (1, 2, 3)
-- Get results back in WhatsApp
-
-## Core Concept
-
-Think of CodeButler as a **multi-repo aware WhatsApp bot** that:
-1. Connects to WhatsApp via QR code authentication
-2. Receives messages from your personal number or approved groups
-3. Routes requests to the appropriate repository in `Sources/`
-4. Executes Claude Code SDK in that repository's context
-5. Returns responses via WhatsApp
-
-## Architecture
-
-```
-WhatsApp ←→ Go Server (CodeButler) ←→ Claude Code SDK (per-repo)
-                ↓
-         Sources/ directory
-         ├── repo-a/
-         ├── repo-b/
-         └── repo-c/
-```
-
-## Key Design Decisions
-
-### 1. Why Go?
-- **Single binary**: Easy deployment (just `./butler`)
-- **Fast startup**: ~10ms vs Node.js ~200ms
-- **Low memory**: ~20MB idle vs Node.js ~50MB
-- **Concurrency**: Goroutines for parallel message handling
-- **No runtime**: Ship one file, no dependencies
-
-### 2. Why Claude Code SDK (not Claude API)?
-- **Cost**: Free with Claude Pro/Max subscription
-- **Features**: Full tool use, file operations, bash
-- **Context**: Better understanding of code structure
-- **Sessions**: Persistent conversation history
-- **No limits**: No token counting or rate limits (within subscription)
-
-### 3. Why Multi-Repo Focus?
-Real developers often work on:
-- Multiple microservices
-- Frontend + Backend repos
-- Shared libraries
-- Different client projects
-
-CodeButler makes it natural to ask questions like:
-- "Compare auth implementation between api-service and mobile-app"
-- "What's the data flow from frontend to backend?"
-- "Find all uses of UserModel across repos"
-
-### 4. Why WhatsApp?
-- **Mobile-first**: Code from anywhere
-- **Voice input**: Transcribe ideas while walking
-- **Group collab**: Team can share one assistant
-- **Familiar UX**: Everyone knows WhatsApp
-- **Always on**: No need to open laptop
-
-## File Structure
-
-```
-codebutler/
-├── main.go                   # Entry point
-├── config.json              # Runtime config (gitignored)
-├── .gitignore
-│
-├── internal/
-│   ├── whatsapp/            # WhatsApp client & handlers
-│   ├── access/              # Access control logic
-│   ├── audio/               # Whisper API integration
-│   ├── repo/                # Repository management
-│   ├── claude/              # Claude Code SDK executor
-│   └── config/              # Config loading
-│
-└── Sources/                 # Multi-repo workspace
-    ├── repo-a/
-    │   └── CLAUDE.md        # Repo-specific context
-    ├── repo-b/
-    │   └── CLAUDE.md
-    └── repo-c/
-        └── CLAUDE.md
-```
-
-## Configuration System
-
-### config.json (auto-generated on first run)
+**File:** `/tmp/codebutler/incoming.json`
 
 ```json
 {
-  "whatsapp": {
-    "sessionPath": "./whatsapp-session",
-    "personalNumber": "1234567890@s.whatsapp.net",
-    "groupJID": "120363123456789012@g.us",
-    "groupName": "CodeButler Developer"
+  "type": "message",
+  "timestamp": "2025-02-09T20:00:00Z",
+  "message_id": "msg_abc123",
+  "from": {
+    "jid": "5491234567890@s.whatsapp.net",
+    "name": "Leandro"
   },
-  "openai": {
-    "apiKey": "sk-..."
+  "chat": {
+    "jid": "120363123456789012@g.us",
+    "name": "CodeButler Developer"
   },
-  "claudeCode": {
-    "oauthToken": "from-env-CLAUDE_CODE_OAUTH_TOKEN"
+  "content": "add authentication to the API",
+  "is_voice": false,
+  "transcript": null
+}
+```
+
+**What Claude should do:**
+1. Read `/tmp/codebutler/incoming.json`
+2. Process the prompt in `content`
+3. Write response to `/tmp/codebutler/outgoing.json`
+4. Delete incoming.json (consumed)
+
+### 2. Outgoing Response (Claude → WhatsApp)
+
+**File:** `/tmp/codebutler/outgoing.json`
+
+```json
+{
+  "type": "response",
+  "timestamp": "2025-02-09T20:05:00Z",
+  "reply_to": "msg_abc123",
+  "chat_jid": "120363123456789012@g.us",
+  "content": "✅ Authentication added successfully!\n\nModified files:\n- src/auth/jwt.js (new)\n- src/middleware/auth.js (new)\n- src/routes/api.js (updated)\n\nTotal: 127 lines added"
+}
+```
+
+**What Agent does:**
+1. Poll `/tmp/codebutler/outgoing.json` every 1s
+2. When found, send to WhatsApp
+3. Delete file (consumed)
+
+### 3. Ask Question (Claude → User)
+
+**File:** `/tmp/codebutler/question.json`
+
+```json
+{
+  "type": "question",
+  "timestamp": "2025-02-09T20:02:00Z",
+  "question_id": "q_xyz789",
+  "chat_jid": "120363123456789012@g.us",
+  "text": "Which database ORM?",
+  "options": [
+    "Sequelize",
+    "Prisma",
+    "Mongoose"
+  ],
+  "timeout": 30
+}
+```
+
+**What Agent does:**
+1. Send question to WhatsApp as: `[BOT] Which database ORM?\n1. Sequelize\n2. Prisma\n3. Mongoose`
+2. Wait for user response
+3. Write answer to `/tmp/codebutler/answer.json`
+
+### 4. Answer (User → Claude)
+
+**File:** `/tmp/codebutler/answer.json`
+
+```json
+{
+  "type": "answer",
+  "timestamp": "2025-02-09T20:02:15Z",
+  "question_id": "q_xyz789",
+  "selected": 2,
+  "text": "Prisma"
+}
+```
+
+**What Claude does:**
+1. Poll `/tmp/codebutler/answer.json`
+2. When found, read answer
+3. Continue processing
+4. Delete file (consumed)
+
+### 5. Setup Status (Wizard → Claude)
+
+**File:** `/tmp/codebutler/setup-status.json`
+
+```json
+{
+  "type": "setup_complete",
+  "timestamp": "2025-02-09T19:55:00Z",
+  "success": true,
+  "user": {
+    "jid": "5493764705749@s.whatsapp.net",
+    "name": "Leandro"
   },
-  "sources": {
-    "rootPath": "./Sources"
-  }
+  "group": {
+    "jid": "120363405395407771@g.us",
+    "name": "CodeButler Developer"
+  },
+  "voice_enabled": true,
+  "config_path": "./config.json"
 }
 ```
 
-**Important**: `config.json` is in `.gitignore` - it contains secrets!
+## 🔧 Commands for Claude
 
-## "CodeButler Developer" Group - The Only Communication Channel
+### Run Setup
+```bash
+./setup.sh
+```
+- Builds binaries (wizard + agent)
+- Starts web server at http://localhost:3000
+- Opens browser automatically
+- Returns when setup complete
+- Outputs: `/tmp/codebutler/setup-status.json`
 
-### Purpose
+### Start Agent
+```bash
+./start-agent.sh
+```
+- Runs agent in background
+- Creates `/tmp/codebutler/` directory
+- Starts monitoring for messages
 
-The "CodeButler Developer" group is a special WhatsApp group automatically created during first-time setup. It serves as **the only communication channel** with CodeButler.
-
-**Key Properties:**
-- **Private**: Only you as a member (single-user group)
-- **Auto-created**: Created or found during setup
-- **Only Channel**: No personal chat support, no other groups
-- **Simplified**: All messages must come from this group
-- **Dedicated**: Used exclusively for development workflow control
-
-### Why a Group Instead of Personal Chat?
-
-1. **Organization**: Separate personal messages from dev commands
-2. **Context Preservation**: Group history persists better than personal chat
-3. **Future-proof**: Easy to add team members later if needed
-4. **Notifications**: Can mute/unmute independently from personal chat
-5. **Multi-device**: Works better across multiple devices
-
-### Special Capabilities
-
-When CodeButler detects a message from the CodeButler Developer group (`isDevControl: true`):
-
-```go
-func handleMessage(msg whatsapp.Message, cfg config.Config) {
-    // Check if from dev control group
-    isDevControl := false
-    for _, group := range cfg.WhatsApp.AllowedGroups {
-        if group.JID == msg.Sender && group.IsDevControl {
-            isDevControl = true
-            break
-        }
-    }
-
-    if isDevControl {
-        // Enable special commands:
-        // - System status queries
-        // - Bulk operations across all repos
-        // - Workflow automation
-        // - Config modifications
-        // - Debug commands
-    }
+### Send Response
+```bash
+# Claude writes JSON, agent picks it up automatically
+cat > /tmp/codebutler/outgoing.json <<EOF
+{
+  "type": "response",
+  "chat_jid": "120363405395407771@g.us",
+  "content": "Done!"
 }
+EOF
 ```
 
-### Usage Examples
+### Ask Question
+```bash
+cat > /tmp/codebutler/question.json <<EOF
+{
+  "type": "question",
+  "question_id": "q1",
+  "chat_jid": "120363405395407771@g.us",
+  "text": "Which option?",
+  "options": ["A", "B", "C"],
+  "timeout": 30
+}
+EOF
 
-**System Status:**
-```
-User (in CodeButler Developer): @codebutler status
-Bot: 📊 System Status
-     - Active repos: 3
-     - Running sessions: 1 (api-service)
-     - Queue: empty
-     - Last activity: 2m ago
-     - Memory usage: 45MB
-     - Uptime: 3h 24m
-```
-
-**Bulk Operations:**
-```
-User: @codebutler run tests in all repos
-Bot: Running tests across 3 repositories...
-
-     ✅ api-service: 45 passed, 0 failed
-     ✅ frontend-app: 123 passed, 2 skipped
-     ❌ mobile-client: 18 passed, 2 failed
-
-     Total: 186 passed, 2 failed, 2 skipped
-     Duration: 12.4s
+# Wait for answer
+while [ ! -f /tmp/codebutler/answer.json ]; do sleep 1; done
+cat /tmp/codebutler/answer.json
 ```
 
-**Workflow Automation:**
-```
-User: @codebutler when api-service tests pass, create PR
-Bot: Created workflow automation:
+## 📝 Claude's Workflow
 
-     Trigger: api-service tests pass
-     Actions:
-     1. Run linter
-     2. Build Docker image
-     3. Create PR to main branch
-
-     Saved as: workflow-api-pr-creation
-     Status: Active ✅
-```
-
-**Cross-Repo Analysis:**
-```
-User: @codebutler compare auth flow between api-service and mobile-client
-Bot: Analyzing authentication flows...
-
-     API Service (Sources/api-service/):
-     - JWT with RS256
-     - Token expiry: 24h
-     - Refresh token: Yes
-     - Session storage: Redis
-
-     Mobile Client (Sources/mobile-client/):
-     - JWT stored in Keychain
-     - Auto-refresh on 401
-     - Biometric authentication: Yes
-     - Offline mode: Basic features only
-
-     Differences:
-     - Mobile uses Keychain, API uses Redis
-     - Mobile has biometric auth
-     - API has longer token expiry
-```
-
-### Comparison: Personal Chat vs CodeButler Developer Group
-
-| Feature | Personal Chat | CodeButler Developer Group |
-|---------|---------------|------------------------|
-| **Basic commands** | ✅ Yes | ✅ Yes |
-| **Repo operations** | ✅ Yes | ✅ Yes |
-| **System status** | ❌ Limited | ✅ Full details |
-| **Bulk operations** | ❌ No | ✅ Yes |
-| **Workflow automation** | ❌ No | ✅ Yes |
-| **Config changes** | ❌ No | ✅ Yes (future) |
-| **Debug commands** | ❌ No | ✅ Yes |
-| **Context mixing** | ❌ Mixed with personal msgs | ✅ Dev-only |
-
-### Recommendation
-
-Use the CodeButler Developer group as your primary interface with CodeButler for all development tasks. Reserve personal chat for quick questions or when you're in a conversation and don't want to switch contexts.
-
-## Component Breakdown
-
-### 1. WhatsApp Handler (`internal/whatsapp/`)
-
-**Purpose**: Manage WhatsApp Web connection
-
-**Key Files**:
-- `client.go` - WhatsApp socket connection
-- `auth.go` - QR code generation & session management
-- `handler.go` - Message event handlers
-- `media.go` - Download voice messages, images
-- `groups.go` - Group creation and management
-
-**Libraries**:
-- `github.com/Rhymen/go-whatsapp` - WhatsApp Web protocol
-
-**Responsibilities**:
-- Establish WhatsApp connection via QR
-- Persist session to avoid re-scanning QR
-- Listen for incoming messages
-- Send outgoing messages
-- Download media (voice messages)
-- Fetch group metadata
-- **Create/find "CodeButler Developer" control group**
-- Manage group operations (create, add members, get info)
-
-**Group Management (`internal/whatsapp/groups.go`)**:
-
-```go
-package whatsapp
-
-import (
-    "fmt"
-    whatsapp "github.com/Rhymen/go-whatsapp"
-)
-
-type Group struct {
-    JID  string
-    Name string
-}
-
-// GetGroups returns all groups the user is part of
-func (c *Client) GetGroups() ([]Group, error) {
-    groups := []Group{}
-
-    // Get all chats
-    chats, err := c.conn.GetAllChats()
-    if err != nil {
-        return nil, err
-    }
-
-    // Filter for group chats
-    for _, chat := range chats {
-        if strings.HasSuffix(chat.Jid, "@g.us") {
-            groups = append(groups, Group{
-                JID:  chat.Jid,
-                Name: chat.Name,
-            })
-        }
-    }
-
-    return groups, nil
-}
-
-// CreateGroup creates a new WhatsApp group
-func (c *Client) CreateGroup(name string, participants []string) (string, error) {
-    // WhatsApp groups require JID format for participants
-    // participants should be like: "1234567890@s.whatsapp.net"
-
-    groupJID, err := c.conn.CreateGroup(name, participants)
-    if err != nil {
-        return "", fmt.Errorf("failed to create group: %w", err)
-    }
-
-    return groupJID, nil
-}
-
-// GetGroupInfo returns detailed info about a group
-func (c *Client) GetGroupInfo(groupJID string) (*whatsapp.GroupInfo, error) {
-    info, err := c.conn.GetGroupInfo(groupJID)
-    if err != nil {
-        return nil, fmt.Errorf("failed to get group info: %w", err)
-    }
-
-    return &info, nil
-}
-
-// AddParticipants adds members to a group
-func (c *Client) AddParticipants(groupJID string, participants []string) error {
-    _, err := c.conn.UpdateGroupParticipants(groupJID, participants, whatsapp.ParticipantsAdd)
-    return err
-}
-
-// RemoveParticipants removes members from a group
-func (c *Client) RemoveParticipants(groupJID string, participants []string) error {
-    _, err := c.conn.UpdateGroupParticipants(groupJID, participants, whatsapp.ParticipantsRemove)
-    return err
-}
-```
-
-### 2. Access Control (`internal/access/`)
-
-**Purpose**: Validate message senders (simplified - only one group)
-
-**Key Files**:
-- `control.go` - Validation logic
-
-**Logic**:
-```go
-func IsAllowed(sender string, config Config) bool {
-    // Only messages from CodeButler Developer group are allowed
-    return sender == config.WhatsApp.GroupJID
-}
-```
-
-**Security Model**:
-- Default deny (reject everything)
-- Only CodeButler Developer group allowed
-- No personal chat support
-- No other groups allowed
-- Ultra-simple validation
-
-### 3. Audio Processor (`internal/audio/`)
-
-**Purpose**: Transcribe voice messages
-
-**Key Files**:
-- `transcribe.go` - OpenAI Whisper API integration
-- `download.go` - Save audio to temp file
-
-**Flow**:
-```
-1. Detect voice message in WhatsApp handler
-2. Download audio to /tmp/audio-{timestamp}.ogg
-3. Call OpenAI Whisper API:
-   POST https://api.openai.com/v1/audio/transcriptions
-   Body: multipart/form-data with audio file
-4. Extract transcription text
-5. Delete temp file
-6. Return text for processing
-```
-
-**API Call**:
-```go
-func TranscribeAudio(audioPath string, apiKey string) (string, error) {
-    file, _ := os.Open(audioPath)
-    defer file.Close()
-
-    body := &bytes.Buffer{}
-    writer := multipart.NewWriter(body)
-    part, _ := writer.CreateFormFile("file", filepath.Base(audioPath))
-    io.Copy(part, file)
-    writer.WriteField("model", "whisper-1")
-    writer.Close()
-
-    req, _ := http.NewRequest("POST",
-        "https://api.openai.com/v1/audio/transcriptions",
-        body)
-    req.Header.Set("Authorization", "Bearer " + apiKey)
-    req.Header.Set("Content-Type", writer.FormDataContentType())
-
-    resp, _ := http.DefaultClient.Do(req)
-    defer resp.Body.Close()
-
-    var result struct {
-        Text string `json:"text"`
-    }
-    json.NewDecoder(resp.Body).Decode(&result)
-
-    return result.Text, nil
-}
-```
-
-### 4. Repository Manager (`internal/repo/`)
-
-**Purpose**: Discover and route to repositories
-
-**Key Files**:
-- `manager.go` - Scan Sources/ directory
-- `router.go` - Determine target repo from message
-- `context.go` - Load CLAUDE.md for repo
-
-**Repository Discovery**:
-```go
-func DiscoverRepos(sourcesPath string) ([]Repository, error) {
-    var repos []Repository
-
-    entries, _ := os.ReadDir(sourcesPath)
-    for _, entry := range entries {
-        if !entry.IsDir() {
-            continue
-        }
-
-        repoPath := filepath.Join(sourcesPath, entry.Name())
-
-        // Check if it's a git repo
-        gitPath := filepath.Join(repoPath, ".git")
-        if _, err := os.Stat(gitPath); os.IsNotExist(err) {
-            continue
-        }
-
-        // Load CLAUDE.md if exists
-        claudePath := filepath.Join(repoPath, "CLAUDE.md")
-        context := ""
-        if data, err := os.ReadFile(claudePath); err == nil {
-            context = string(data)
-        }
-
-        repos = append(repos, Repository{
-            Name: entry.Name(),
-            Path: repoPath,
-            Context: context,
-        })
-    }
-
-    return repos, nil
-}
-```
-
-**Routing Logic**:
-```go
-func RouteMessage(message string, repos []Repository) *Repository {
-    // Explicit: "in repo-name: do something"
-    if strings.HasPrefix(message, "in ") {
-        parts := strings.SplitN(message, ":", 2)
-        repoName := strings.TrimPrefix(parts[0], "in ")
-        repoName = strings.TrimSpace(repoName)
-
-        for _, repo := range repos {
-            if repo.Name == repoName {
-                return &repo
-            }
-        }
-    }
-
-    // Implicit: analyze message for repo mentions
-    for _, repo := range repos {
-        if strings.Contains(message, repo.Name) {
-            return &repo
-        }
-    }
-
-    // Default: return first repo or ask user
-    if len(repos) > 0 {
-        return &repos[0]
-    }
-
-    return nil
-}
-```
-
-### 5. Claude Code Executor (`internal/claude/`)
-
-**Purpose**: Execute Claude Code SDK in repository context
-
-**Key Files**:
-- `executor.go` - Spawn Claude Code process
-- `session.go` - Manage conversation sessions
-- `tools.go` - Handle tool use results
-
-**Execution Flow**:
-```go
-func ExecuteInRepo(repo Repository, prompt string, sessionID string) (string, error) {
-    // 1. Prepare working directory
-    workDir := repo.Path
-
-    // 2. Build Claude Code command
-    cmd := exec.Command("claude",
-        "--non-interactive",
-        "--session-id", sessionID,
-        prompt,
-    )
-    cmd.Dir = workDir
-
-    // 3. Set environment
-    cmd.Env = append(os.Environ(),
-        "CLAUDE_CODE_OAUTH_TOKEN=" + os.Getenv("CLAUDE_CODE_OAUTH_TOKEN"),
-    )
-
-    // 4. Execute and capture output
-    output, err := cmd.CombinedOutput()
-    if err != nil {
-        return "", err
-    }
-
-    return string(output), nil
-}
-```
-
-**Session Management**:
-- Each repo has its own session ID
-- Sessions persist across messages
-- Stored in `~/.claude/sessions/{repo-name}/`
-- Allows multi-turn conversations
-
-**Alternative Approach (SDK as library)**:
-```go
-// If Claude Code SDK provides a Go library in future
-import "github.com/anthropic-ai/claude-code-go"
-
-func ExecuteWithSDK(repo Repository, prompt string) (string, error) {
-    sdk := claude.NewSDK(claude.Config{
-        OAuthToken: os.Getenv("CLAUDE_CODE_OAUTH_TOKEN"),
-        WorkDir: repo.Path,
-    })
-
-    result, err := sdk.Query(claude.QueryOptions{
-        Prompt: prompt,
-        Context: repo.Context, // CLAUDE.md content
-        Tools: []string{"bash", "read", "write", "edit"},
-    })
-
-    return result.Output, err
-}
-```
-
-### 6. Config Manager (`internal/config/`)
-
-**Purpose**: Load and validate configuration
-
-**Key Files**:
-- `load.go` - Read config.json
-- `types.go` - Config struct definitions
-
-**Config Struct**:
-```go
-type Config struct {
-    WhatsApp WhatsAppConfig `json:"whatsapp"`
-    OpenAI   OpenAIConfig   `json:"openai"`
-    Claude   ClaudeConfig   `json:"claudeCode"`
-    Sources  SourcesConfig  `json:"sources"`
-}
-
-type WhatsAppConfig struct {
-    SessionPath    string `json:"sessionPath"`
-    PersonalNumber string `json:"personalNumber"`
-    GroupJID       string `json:"groupJID"`  // CodeButler Developer group JID
-    GroupName      string `json:"groupName"` // "CodeButler Developer"
-}
-
-type OpenAIConfig struct {
-    APIKey string `json:"apiKey"`
-}
-
-type ClaudeConfig struct {
-    OAuthToken string `json:"oauthToken"`
-}
-
-type SourcesConfig struct {
-    RootPath string `json:"rootPath"`
-}
-```
-
-**Loading Logic**:
-```go
-func Load(path string) (*Config, error) {
-    data, err := os.ReadFile(path)
-    if err != nil {
-        return nil, err
-    }
-
-    var cfg Config
-    if err := json.Unmarshal(data, &cfg); err != nil {
-        return nil, err
-    }
-
-    // Validate
-    if cfg.WhatsApp.PersonalNumber == "" {
-        return nil, errors.New("personalNumber is required")
-    }
-
-    // Load OAuth token from env if not in config
-    if cfg.Claude.OAuthToken == "" {
-        cfg.Claude.OAuthToken = os.Getenv("CLAUDE_CODE_OAUTH_TOKEN")
-    }
-
-    return &cfg, nil
-}
-```
-
-## Main Application Flow
-
-### main.go Structure
-
-```go
-package main
-
-import (
-    "codebutler/internal/whatsapp"
-    "codebutler/internal/access"
-    "codebutler/internal/audio"
-    "codebutler/internal/repo"
-    "codebutler/internal/claude"
-    "codebutler/internal/config"
-)
-
-func main() {
-    // 1. Check if first run
-    if !fileExists("config.json") {
-        runFirstTimeSetup()
-        return
-    }
-
-    // 2. Load configuration
-    cfg, err := config.Load("config.json")
-    if err != nil {
-        log.Fatal("Failed to load config:", err)
-    }
-
-    // 3. Discover repositories
-    repos, err := repo.DiscoverRepos(cfg.Sources.RootPath)
-    if err != nil {
-        log.Fatal("Failed to discover repos:", err)
-    }
-    log.Printf("Found %d repositories", len(repos))
-
-    // 4. Connect to WhatsApp
-    wa, err := whatsapp.Connect(cfg.WhatsApp.SessionPath)
-    if err != nil {
-        log.Fatal("Failed to connect to WhatsApp:", err)
-    }
-    defer wa.Disconnect()
-
-    // 5. Register message handler
-    wa.OnMessage(func(msg whatsapp.Message) {
-        // Access control
-        if !access.IsAllowed(msg.Sender, cfg) {
-            log.Printf("Rejected message from: %s", msg.Sender)
-            return
-        }
-
-        // Handle voice messages
-        content := msg.Content
-        if msg.IsVoice {
-            audioPath := audio.Download(msg.MediaURL)
-            transcript, _ := audio.Transcribe(audioPath, cfg.OpenAI.APIKey)
-            content = transcript
-        }
-
-        // Route to repository
-        targetRepo := repo.RouteMessage(content, repos)
-        if targetRepo == nil {
-            wa.SendMessage(msg.Sender, "No repository found. Use: in <repo-name>: <message>")
-            return
-        }
-
-        // Execute Claude Code
-        sessionID := getSessionID(msg.Sender, targetRepo.Name)
-        result, err := claude.Execute(targetRepo, content, sessionID)
-        if err != nil {
-            wa.SendMessage(msg.Sender, "Error: " + err.Error())
-            return
-        }
-
-        // Send response
-        wa.SendMessage(msg.Sender, result)
-    })
-
-    // 6. Keep alive
-    log.Println("CodeButler is running...")
-    select {} // Block forever
-}
-
-func runFirstTimeSetup() {
-    fmt.Println("=== CodeButler First Time Setup ===")
-
-    // WhatsApp auth
-    wa, err := whatsapp.Connect("./whatsapp-session")
-    if err != nil {
-        log.Fatal(err)
-    }
-
-    // Get personal number
-    info := wa.GetInfo()
-    personalNumber := info.Wid
-
-    fmt.Printf("✅ Connected as: %s\n\n", personalNumber)
-
-    // Prompt for OpenAI key
-    fmt.Print("Enter OpenAI API Key: ")
-    var openaiKey string
-    fmt.Scanln(&openaiKey)
-
-    fmt.Println("\n🔍 Searching for 'CodeButler Developer' group...")
-
-    // Find or create CodeButler Developer group
-    codebutlerGroup, err := findOrCreateCodeButlerDeveloperGroup(wa, personalNumber)
-    if err != nil {
-        log.Fatal("Failed to setup CodeButler Developer group:", err)
-    }
-
-    fmt.Printf("✅ CodeButler Developer group ready: %s\n", codebutlerGroup.Name)
-
-    // Create config
-    cfg := config.Config{
-        WhatsApp: config.WhatsAppConfig{
-            SessionPath:    "./whatsapp-session",
-            PersonalNumber: personalNumber,
-            GroupJID:       codebutlerGroup.JID,
-            GroupName:      codebutlerGroup.Name,
-        },
-        OpenAI: config.OpenAIConfig{
-            APIKey: openaiKey,
-        },
-        Claude: config.ClaudeConfig{
-            OAuthToken: "from-env-CLAUDE_CODE_OAUTH_TOKEN",
-        },
-        Sources: config.SourcesConfig{
-            RootPath: "./Sources",
-        },
-    }
-
-    // Save config
-    data, _ := json.MarshalIndent(cfg, "", "  ")
-    os.WriteFile("config.json", data, 0600)
-
-    // Create .gitignore
-    gitignore := `config.json
-whatsapp-session/
-*.log
-claude
-`
-    os.WriteFile(".gitignore", []byte(gitignore), 0644)
-
-    // Create Sources directory
-    os.MkdirAll("Sources", 0755)
-
-    fmt.Println("\n✅ Setup complete!")
-
-    // Send welcome message to CodeButler Developer group
-    welcomeMsg := `🤖 CodeButler connected ✅
-
-You can now control your development workflow from here.
-
-Try these commands:
-- @codebutler repos
-- @codebutler status
-- @codebutler help`
-
-    wa.SendMessage(alfredGroup.JID, welcomeMsg)
-    fmt.Println("📱 Welcome message sent to CodeButler Developer group")
-    fmt.Println("\nRun './butler' to start")
-
-    wa.Disconnect()
-}
-
-// findOrCreateAlfredDeveloperGroup finds existing or creates new CodeButler Developer group
-// findOrCreateCodeButlerDeveloperGroup finds existing or creates new CodeButler Developer group
-func findOrCreateCodeButlerDeveloperGroup(wa *whatsapp.Client, personalNumber string) (*whatsapp.Group, error) {
-    // Get all groups
-    groups, err := wa.GetGroups()
-    if err != nil {
-        return nil, fmt.Errorf("failed to get groups: %w", err)
-    }
-
-    // Search for existing "CodeButler Developer" group
-    for _, group := range groups {
-        if group.Name == "CodeButler Developer" {
-            fmt.Println("   Found existing 'CodeButler Developer' group")
-            return &group, nil
-        }
-    }
-
-    // Group doesn't exist, create it
-    fmt.Println("   'CodeButler Developer' group not found, creating...")
-
-    groupJID, err := wa.CreateGroup("CodeButler Developer", []string{})
-    if err != nil {
-        return nil, fmt.Errorf("failed to create group: %w", err)
-    }
-
-    fmt.Println("   ✅ Created 'CodeButler Developer' group")
-
-    return &whatsapp.Group{
-        JID:  groupJID,
-        Name: "CodeButler Developer",
-    }, nil
-}
-```
-
-## Development Workflow
-
-### Building
+### When project opens:
 
 ```bash
-# Development build
-go build -o claude main.go
+if [ ! -f config.json ]; then
+  echo "👋 Welcome to CodeButler! Setting up..."
+  ./setup.sh
 
-# Production build (optimized)
-go build -ldflags="-s -w" -o claude main.go
+  # Read setup status
+  STATUS=$(cat /tmp/codebutler/setup-status.json)
 
-# Cross-compile for Linux
-GOOS=linux GOARCH=amd64 go build -o claude-linux main.go
+  # Show user what happened
+  echo "✅ Setup complete!"
+  echo "   User: $(echo $STATUS | jq -r '.user.name')"
+  echo "   Group: $(echo $STATUS | jq -r '.group.name')"
+
+  # Start agent
+  ./start-agent.sh
+  echo "✅ Agent running in background"
+else
+  echo "👋 Welcome back! Starting agent..."
+  ./start-agent.sh
+fi
 ```
 
-### Testing
+### When incoming message arrives:
 
 ```bash
-# Unit tests
-go test ./internal/...
+# Agent writes incoming.json when message arrives
+if [ -f /tmp/codebutler/incoming.json ]; then
+  MSG=$(cat /tmp/codebutler/incoming.json)
+  CONTENT=$(echo $MSG | jq -r '.content')
+  CHAT=$(echo $MSG | jq -r '.chat.jid')
+  MSG_ID=$(echo $MSG | jq -r '.message_id')
 
-# Integration test
-go test -tags=integration ./...
+  # Process the prompt
+  echo "📨 WhatsApp: $CONTENT"
 
-# Test with specific repo
-./butler --test-repo Sources/my-repo
-```
+  # ... do work ...
 
-### Debugging
-
-```bash
-# Enable debug logging
-./butler --debug
-
-# View WhatsApp messages
-./butler --debug-whatsapp
-
-# Test Whisper API
-./butler --test-whisper /path/to/audio.ogg
-```
-
-## Integration Points
-
-### 1. WhatsApp ←→ Go
-- Library: `go-whatsapp`
-- Protocol: WhatsApp Web (WebSocket)
-- Auth: QR code scan (one-time)
-- Session: Persistent in `whatsapp-session/`
-
-### 2. Go ←→ Claude Code SDK
-- Method: Spawn subprocess (`exec.Command`)
-- Communication: stdin/stdout
-- Working Dir: Repository path
-- Session: Per-repo session IDs
-
-### 3. Go ←→ Whisper API
-- API: REST (HTTPS)
-- Endpoint: `https://api.openai.com/v1/audio/transcriptions`
-- Format: multipart/form-data
-- Cost: ~$0.006 per minute
-
-### 4. Go ←→ File System
-- Repos: `Sources/` directory scan
-- Context: Read `CLAUDE.md` files
-- Config: Read/write `config.json`
-- Session: Delegate to Claude Code SDK
-
-## Error Handling Strategy
-
-### WhatsApp Connection Errors
-```go
-// Retry with exponential backoff
-for retries := 0; retries < 5; retries++ {
-    wa, err := whatsapp.Connect(sessionPath)
-    if err == nil {
-        return wa, nil
-    }
-
-    backoff := time.Duration(math.Pow(2, float64(retries))) * time.Second
-    log.Printf("Connection failed, retrying in %v...", backoff)
-    time.Sleep(backoff)
+  # Send response
+  cat > /tmp/codebutler/outgoing.json <<EOF
+{
+  "type": "response",
+  "reply_to": "$MSG_ID",
+  "chat_jid": "$CHAT",
+  "content": "✅ Task completed!"
 }
+EOF
+
+  # Clean up
+  rm /tmp/codebutler/incoming.json
+fi
 ```
 
-### Claude Code Execution Errors
-```go
-result, err := claude.Execute(repo, prompt, sessionID)
-if err != nil {
-    // Send friendly error to user
-    errorMsg := fmt.Sprintf(
-        "Sorry, I encountered an error:\n\n%s\n\nTry rephrasing your question.",
-        err.Error(),
-    )
-    wa.SendMessage(sender, errorMsg)
-    return
-}
-```
+### When asking a question:
 
-### Whisper API Errors
-```go
-transcript, err := audio.Transcribe(audioPath, apiKey)
-if err != nil {
-    // Fallback: ask user to type
-    wa.SendMessage(sender,
-        "I couldn't transcribe your voice message. Could you type it instead?")
-    return
-}
-```
-
-## Security Considerations
-
-### 1. Config File Protection
-- `config.json` has mode 0600 (owner read/write only)
-- Never committed to git (in `.gitignore`)
-- Contains sensitive tokens
-
-### 2. Access Control
-- Default deny all unknown senders
-- Personal number has full privileges
-- Groups require explicit approval
-
-### 3. Repository Isolation
-- Each repo has its own CLAUDE.md context
-- Sessions don't leak between repos
-- File operations limited to repo directory
-
-### 4. Credential Storage
-- OAuth token from environment variable (preferred)
-- OpenAI key in config.json (encrypted at rest recommended)
-- WhatsApp session encrypted by library
-
-## Performance Optimization
-
-### 1. Concurrent Message Handling
-```go
-// Use goroutines for parallel processing
-go func(msg whatsapp.Message) {
-    handleMessage(msg)
-}(msg)
-```
-
-### 2. Repository Cache
-```go
-var repoCache struct {
-    sync.RWMutex
-    repos []Repository
-    lastScan time.Time
-}
-
-func GetRepos() []Repository {
-    repoCache.RLock()
-    if time.Since(repoCache.lastScan) < 5*time.Minute {
-        defer repoCache.RUnlock()
-        return repoCache.repos
-    }
-    repoCache.RUnlock()
-
-    // Re-scan
-    repoCache.Lock()
-    defer repoCache.Unlock()
-    repoCache.repos = repo.DiscoverRepos("./Sources")
-    repoCache.lastScan = time.Now()
-    return repoCache.repos
-}
-```
-
-### 3. Session Reuse
-- Keep Claude Code sessions alive
-- Avoid re-initialization overhead
-- Clear old sessions after 24h
-
-## Future Enhancements
-
-### Near-term
-- [ ] Web UI for config management
-- [ ] Group chat statistics
-- [ ] Rate limiting per sender
-- [ ] Scheduled tasks (cron-like)
-
-### Mid-term
-- [ ] Multi-language support (Spanish, etc.)
-- [ ] Custom tool definitions
-- [ ] Repository templates
-- [ ] Backup/restore config
-
-### Long-term
-- [ ] Plugin system for custom commands
-- [ ] Web dashboard for monitoring
-- [ ] Multiple AI providers (fallback)
-- [ ] Self-hosting documentation
-
-## Troubleshooting
-
-### WhatsApp Won't Connect
 ```bash
-# Delete session and re-auth
-rm -rf whatsapp-session/
-./butler  # Will show QR again
+# Write question
+cat > /tmp/codebutler/question.json <<EOF
+{
+  "type": "question",
+  "question_id": "$(uuidgen)",
+  "chat_jid": "120363405395407771@g.us",
+  "text": "Which database?",
+  "options": ["PostgreSQL", "MySQL", "MongoDB"],
+  "timeout": 30
+}
+EOF
+
+# Wait for answer (max 30s)
+TIMEOUT=30
+ELAPSED=0
+while [ ! -f /tmp/codebutler/answer.json ] && [ $ELAPSED -lt $TIMEOUT ]; do
+  sleep 1
+  ELAPSED=$((ELAPSED + 1))
+done
+
+if [ -f /tmp/codebutler/answer.json ]; then
+  ANSWER=$(cat /tmp/codebutler/answer.json)
+  SELECTED=$(echo $ANSWER | jq -r '.selected')
+  TEXT=$(echo $ANSWER | jq -r '.text')
+
+  echo "User selected: $TEXT"
+  rm /tmp/codebutler/answer.json
+else
+  echo "⏱️  Question timed out"
+fi
 ```
 
-### Claude Code Not Found
-```bash
-# Install Claude Code CLI
-npm install -g @anthropic-ai/claude-code
+## 🗂️ Project Structure
 
-# Verify installation
-which claude
+```
+CodeButler/
+├── CLAUDE.md                    # This file (instructions for Claude)
+├── README.md                    # User documentation
+├── setup.sh                     # Setup script (builds + starts wizard)
+├── start-agent.sh               # Start agent in background
+│
+├── ButlerAgent/                 # Go source code
+│   ├── cmd/
+│   │   ├── setup-wizard/        # Web-based setup wizard
+│   │   └── agent/               # WhatsApp agent
+│   └── internal/
+│       ├── whatsapp/            # WhatsApp client
+│       ├── protocol/            # JSON protocol handlers
+│       └── config/              # Config management
+│
+├── config.json                  # Runtime config (gitignored)
+├── Sources/                     # User's code repos (gitignored)
+└── /tmp/codebutler/            # JSON communication files
 ```
 
-### Whisper API Errors
-```bash
-# Test API key
-curl https://api.openai.com/v1/models \
-  -H "Authorization: Bearer $OPENAI_API_KEY"
-```
+## 🚫 What Claude Should NOT Do
 
-### Repository Not Detected
-```bash
-# Verify Sources/ structure
-ls -la Sources/
+- ❌ Don't parse terminal output or logs
+- ❌ Don't "guess" what happened
+- ❌ Don't use ask-question.sh or send-response.sh (old scripts)
+- ❌ Don't run the agent directly (`./codebutler-agent`)
+- ✅ Always use JSON files for communication
+- ✅ Always use ./setup.sh and ./start-agent.sh
 
-# Each repo should have .git/
-ls -la Sources/your-repo/.git/
+## 🎯 Example: Full Workflow
+
+```bash
+# User opens project for first time
+$ claude
+
+# Claude detects no config.json
+echo "👋 Setting up CodeButler..."
+
+./setup.sh
+# → Opens browser at http://localhost:3000
+# → User scans QR, enters OpenAI key
+# → Wizard writes /tmp/codebutler/setup-status.json
+# → Browser shows "Setup complete!"
+
+# Claude reads setup status
+cat /tmp/codebutler/setup-status.json
+# {
+#   "success": true,
+#   "user": {"name": "Leandro", ...},
+#   "group": {"name": "CodeButler Developer", ...}
+# }
+
+echo "✅ Setup complete! Starting agent..."
+
+./start-agent.sh
+# → Agent runs in background
+# → Monitors WhatsApp
+# → Writes incoming.json when messages arrive
+
+echo "✅ CodeButler ready! Send messages from WhatsApp."
+
+# --- Later: Message arrives from WhatsApp ---
+
+# Agent writes incoming.json
+cat /tmp/codebutler/incoming.json
+# {
+#   "content": "add JWT authentication",
+#   "chat": {"jid": "120363...@g.us"},
+#   ...
+# }
+
+echo "📨 Task: add JWT authentication"
+
+# Claude does the work...
+# ... reads files, makes changes, etc ...
+
+# Claude sends response
+cat > /tmp/codebutler/outgoing.json <<EOF
+{
+  "type": "response",
+  "chat_jid": "120363405395407771@g.us",
+  "content": "✅ JWT authentication added!\n\nFiles created:\n- src/auth/jwt.js\n- src/middleware/auth.js"
+}
+EOF
+
+rm /tmp/codebutler/incoming.json
+
+echo "✅ Response sent to WhatsApp"
 ```
 
 ---
 
-This document should give you (Claude Code) complete context for helping build CodeButler. When implementing features, refer to the component breakdown and code examples above.
+**That's it!** Clean, simple, JSON-based communication. No guessing, no parsing logs.

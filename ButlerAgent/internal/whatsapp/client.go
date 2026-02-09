@@ -132,3 +132,40 @@ func (c *Client) GetJID() types.JID {
 	}
 	return *c.wac.Store.ID
 }
+
+// ConnectWithQR returns the client and QR channel for web-based setup
+func ConnectWithQR(sessionPath string) (*Client, <-chan whatsmeow.QRChannelItem, error) {
+	if err := os.MkdirAll(sessionPath, 0755); err != nil {
+		return nil, nil, fmt.Errorf("failed to create session directory: %w", err)
+	}
+
+	dbPath := sessionPath + "/session.db"
+	container, err := sqlstore.New(context.Background(), "sqlite3", "file:"+dbPath+"?_foreign_keys=on", waLog.Noop)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create sqlstore: %w", err)
+	}
+
+	deviceStore, err := container.GetFirstDevice(context.Background())
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get device: %w", err)
+	}
+
+	wac := whatsmeow.NewClient(deviceStore, waLog.Noop)
+
+	if wac.Store.ID != nil {
+		return nil, nil, fmt.Errorf("already logged in, delete session first")
+	}
+
+	qrChan, _ := wac.GetQRChannel(context.Background())
+	err = wac.Connect()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to connect: %w", err)
+	}
+
+	client := &Client{
+		wac:         wac,
+		sessionPath: sessionPath,
+	}
+
+	return client, qrChan, nil
+}
