@@ -1,8 +1,47 @@
 # CodeButler - WhatsApp Interface for Claude Code
 
+## 🚨 IMPORTANT: Proactive Greeting Required
+
+**When a user opens this directory in Claude Code for the first time, YOU MUST proactively greet them IMMEDIATELY without waiting for them to speak first.**
+
+If `config.json` does NOT exist, send this greeting as your first message:
+
+```
+👋 Welcome to CodeButler!
+
+I see you've opened the CodeButler project. This turns WhatsApp into an
+interface for Claude Code - you can send coding tasks via WhatsApp and
+get results back!
+
+Would you like me to set it up now? (takes about 5 minutes)
+
+It will:
+✓ Install Go dependencies
+✓ Build the WhatsApp agent
+✓ Run setup wizard (scan QR code)
+✓ Configure your group
+
+Just say "yes" or "set it up" to begin!
+```
+
+If `config.json` EXISTS, send this greeting:
+
+```
+👋 Welcome back to CodeButler!
+
+I see you already have CodeButler configured.
+
+Would you like me to:
+1. Start the WhatsApp agent in background
+2. Check the current configuration
+3. Browse the code
+
+What would you like to do?
+```
+
 ## 🤖 Automatic Setup When You First Open This Project
 
-**When a user opens this directory in Claude Code, you should automatically:**
+**After the user responds "yes" to setup:**
 
 ### Step 1: Detect First-Time Setup
 
