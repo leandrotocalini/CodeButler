@@ -42,50 +42,27 @@ WhatsApp Group ←→ CodeButler (Go) ←→ Claude Code CLI (per-repo)
 ### First Time Setup
 
 ```bash
-# 1. Clone this repo
-git clone https://github.com/yourusername/CodeButler.git
+# 1. Clone the repo
+git clone https://github.com/leandrotocalini/CodeButler.git
 cd CodeButler
 
-# 2. Open in Claude Code
-claude
-
-# Claude will automatically offer to set up CodeButler!
-# Just say "yes" and follow the wizard.
+# 2. Run the setup script (does everything automatically)
+./setup.sh
 ```
 
-**Or manually:**
+The setup script will:
+- ✅ Install Go dependencies
+- ✅ Build the WhatsApp agent
+- ✅ Run interactive wizard (scan QR code, configure settings)
+- ✅ Create config.json
+
+After the wizard completes, start the agent:
 
 ```bash
-# Install dependencies
-go mod download
-
-# Build and run setup wizard
-go build -o codebutler cmd/codebutler/main.go
-./codebutler
-```
-
-The wizard asks:
-- **Voice transcription?** (OpenAI API key for Whisper)
-- **Group name?** (default: "CodeButler Developer")
-- **Bot prefix?** (default: "[BOT]")
-- **Code directory?** (default: "./Sources")
-
-Then scan the QR code with WhatsApp.
-
-### Start the Agent
-
-After setup, start the WhatsApp agent:
-
-```bash
-# Easy way
 ./start-agent.sh
-
-# Or manually
-go build -o codebutler-agent cmd/agent/main.go
-./codebutler-agent
 ```
 
-**When using Claude Code**, I'll offer to start it automatically in background.
+That's it! Now send messages to your WhatsApp group and CodeButler will process them.
 
 ### Using It
 
