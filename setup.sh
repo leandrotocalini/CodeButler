@@ -34,12 +34,12 @@ echo "   ✅ Dependencies installed"
 echo ""
 
 echo "🔨 Building setup wizard..."
-go build -o ../codebutler cmd/codebutler/main.go
+go build -o ../codebutler ./cmd/codebutler/
 echo "   ✅ Wizard built"
 echo ""
 
 echo "🔨 Building WhatsApp agent..."
-go build -o ../codebutler-agent cmd/agent/main.go
+go build -o ../codebutler-agent ./cmd/agent/
 cd ..
 echo "   ✅ Agent built"
 echo ""
