@@ -19,8 +19,8 @@ var (
 )
 
 func main() {
-	// Load config (from parent directory)
-	cfg, err := config.Load("../config.json")
+	// Load config from current directory
+	cfg, err := config.Load("config.json")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "❌ Failed to load config: %v\n", err)
 		os.Exit(1)
@@ -28,7 +28,7 @@ func main() {
 
 	// Connect to WhatsApp
 	fmt.Println("📱 Connecting to WhatsApp...")
-	client, err := whatsapp.Connect("../" + cfg.WhatsApp.SessionPath)
+	client, err := whatsapp.Connect(cfg.WhatsApp.SessionPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "❌ Failed to connect: %v\n", err)
 		os.Exit(1)
@@ -81,7 +81,7 @@ func main() {
 		// Check if this is a numeric response to a question
 		if waitingForResponse && isNumericResponse(content) {
 			// Write answer to file for Claude Code to read
-			os.WriteFile("../.codebutler-answer", []byte(content), 0644)
+			os.WriteFile(".codebutler-answer", []byte(content), 0644)
 			waitingForResponse = false
 			fmt.Printf("📝 Answer written: %s\n", content)
 			return
@@ -119,9 +119,9 @@ func watchResponses(client *whatsapp.Client, botPrefix string, cfg *config.Confi
 	for {
 		time.Sleep(500 * time.Millisecond)
 
-		if _, err := os.Stat("../.codebutler-response"); err == nil {
+		if _, err := os.Stat(".codebutler-response"); err == nil {
 			// File exists, read and send to WhatsApp
-			content, err := os.ReadFile("../.codebutler-response")
+			content, err := os.ReadFile(".codebutler-response")
 			if err != nil {
 				continue
 			}
@@ -137,7 +137,7 @@ func watchResponses(client *whatsapp.Client, botPrefix string, cfg *config.Confi
 			}
 
 			// Delete file after sending
-			os.Remove("../.codebutler-response")
+			os.Remove(".codebutler-response")
 		}
 	}
 }
@@ -147,9 +147,9 @@ func watchQuestions(client *whatsapp.Client, botPrefix string, cfg *config.Confi
 	for {
 		time.Sleep(500 * time.Millisecond)
 
-		if _, err := os.Stat("../.codebutler-question"); err == nil {
+		if _, err := os.Stat(".codebutler-question"); err == nil {
 			// File exists, read and send to WhatsApp
-			content, err := os.ReadFile("../.codebutler-question")
+			content, err := os.ReadFile(".codebutler-question")
 			if err != nil {
 				continue
 			}
@@ -168,7 +168,7 @@ func watchQuestions(client *whatsapp.Client, botPrefix string, cfg *config.Confi
 			waitingForResponse = true
 
 			// Delete question file after sending
-			os.Remove("../.codebutler-question")
+			os.Remove(".codebutler-question")
 		}
 	}
 }
