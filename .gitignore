@@ -1,8 +1,8 @@
-# Binaries
-butler
-butler-*
-codebutler
-codebutler-*
+# Binaries (in root only)
+/butler
+/butler-*
+/codebutler
+/codebutler-*
 *.exe
 *.dll
 *.so
