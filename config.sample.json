@@ -1,0 +1,15 @@
+{
+  "whatsapp": {
+    "sessionPath": "./whatsapp-session",
+    "personalNumber": "1234567890@s.whatsapp.net",
+    "groupJID": "120363123456789012@g.us",
+    "groupName": "CodeButler Developer",
+    "botPrefix": "[BOT]"
+  },
+  "openai": {
+    "apiKey": "sk-..."
+  },
+  "sources": {
+    "rootPath": "./Sources"
+  }
+}

@@ -1,147 +1,177 @@
 # CodeButler
 
-**Your code's personal butler** - Multi-repository development assistant via WhatsApp
+**Your code's personal butler** - Claude Code execution via WhatsApp
 
-Built with Go • Powered by Claude Code SDK
+Built with Go • Powered by Claude Code SDK • Bidirectional Communication
 
 ---
 
 ## What is CodeButler?
 
-CodeButler is a WhatsApp-based development assistant built in Go that helps you manage multiple code repositories through natural conversation. It acts as your personal butler, handling development tasks across all your projects from your phone.
+CodeButler is a **bidirectional WhatsApp interface** for Claude Code. It runs as a background agent that:
+
+1. **Receives** WhatsApp messages and executes them as Claude Code prompts
+2. **Sends** Claude's questions back to WhatsApp (1/2/3 options)
+3. **Receives** your numeric responses and passes them to Claude
+4. **Delivers** final results back via WhatsApp
+
+**Code from anywhere. Claude asks, you answer via WhatsApp. Simple.**
 
 ### Key Features
 
-- 🤖 **WhatsApp Integration** - Control your development workflow from your phone
-- 📁 **Multi-Repo Native** - Work across multiple repositories simultaneously
-- 🎙️ **Voice Messages** - Transcribe voice to text with Whisper API
-- 🔒 **Secure by Design** - Explicit access control for personal chat and approved groups
-- ⚡ **Go Performance** - Fast startup, low memory, single binary deployment
-- 🎯 **Claude Code SDK** - Leverages your existing Claude Pro/Max subscription (no API costs)
+- 🤖 **WhatsApp Integration** - Control Claude Code from your phone
+- 📁 **Multi-Repository** - Work across multiple repositories
+- 🎙️ **Voice Messages** - Optional transcription with Whisper API
+- 🔒 **Secure by Design** - Single authorized group access
+- ⚡ **Background Execution** - Long-running tasks don't block
+- 🎯 **Claude Code SDK** - Execute real Claude Code commands
 
 ### Core Concept
 
 ```
-WhatsApp ←→ CodeButler (Go) ←→ Claude Code SDK (per-repo)
-                ↓
-         Sources/ directory
-         ├── api-service/
-         ├── frontend-app/
-         └── mobile-client/
+WhatsApp Group ←→ CodeButler (Go) ←→ Claude Code CLI (per-repo)
+                        ↓
+                 Sources/ directory
+                 ├── project-a/ (with CLAUDE.md)
+                 ├── project-b/ (with CLAUDE.md)
+                 └── project-c/ (with CLAUDE.md)
 ```
 
 ## Quick Start
 
-### Prerequisites
+### First Time Setup
 
 ```bash
-# Install Go 1.21+
-brew install go
-
-# Install Node.js (for Claude Code SDK)
-brew install node
-
-# Install Claude Code CLI
-npm install -g @anthropic-ai/claude-code
-
-# Get OpenAI API key (for voice transcription)
-# Visit: https://platform.openai.com/api-keys
-```
-
-### Installation
-
-```bash
-# Clone repository
-git clone git@github.com:leandrotocalini/CodeButler.git
+# 1. Clone this repo
+git clone https://github.com/yourusername/CodeButler.git
 cd CodeButler
 
-# Build
-go build -o butler main.go
+# 2. Open in Claude Code
+claude
 
-# First run (interactive setup)
-./butler
+# Claude will automatically offer to set up CodeButler!
+# Just say "yes" and follow the wizard.
 ```
 
-### First Run Setup
+**Or manually:**
 
-1. **Scan QR** with WhatsApp on your phone
-2. **Enter OpenAI API Key** when prompted
-3. **CodeButler Developer group** is automatically created or found
-4. **Start coding** from WhatsApp!
+```bash
+# Install dependencies
+go mod download
 
-### Usage
+# Build and run setup wizard
+go build -o codebutler cmd/codebutler/main.go
+./codebutler
+```
+
+The wizard asks:
+- **Voice transcription?** (OpenAI API key for Whisper)
+- **Group name?** (default: "CodeButler Developer")
+- **Bot prefix?** (default: "[BOT]")
+- **Code directory?** (default: "./Sources")
+
+Then scan the QR code with WhatsApp.
+
+### Start the Agent
+
+After setup, start the WhatsApp agent:
+
+```bash
+# Easy way
+./start-agent.sh
+
+# Or manually
+go build -o codebutler-agent cmd/agent/main.go
+./codebutler-agent
+```
+
+**When using Claude Code**, I'll offer to start it automatically in background.
+
+### Using It
+
+Send messages to your **CodeButler Developer** WhatsApp group:
 
 ```
-# In WhatsApp (personal chat or CodeButler Developer group):
+You: "add tests to the authentication module"
+Bot: Mensaje recibido! Procesando...
 
-@butler repos
-→ Lists all repositories in Sources/
+[Claude Code processes the request]
 
-@butler status
-→ Shows system status and active sessions
-
-in api-service: add logging to user controller
-→ Executes in specific repository
-
-[voice message]: "explain the auth flow in frontend"
-→ Transcribes and processes your voice message
+Bot: ✅ Added 12 unit tests covering login, logout, password reset...
 ```
+
+Commands:
+- `repos` - List repositories
+- `use <name>` - Select repository
+- `status` - Show active repository
+- `run <prompt>` - Execute task
+- `clear` - Clear selection
+- `help` - Show help
 
 ## Documentation
 
 - [Product Specification](PRODUCT.md) - What CodeButler does and why
 - [Technical Documentation](CLAUDE.md) - Architecture and implementation details
-- [CodeButler Developer Group](CODEBUTLER_DEVELOPER_GROUP.md) - Your development control center
-- [Implementation Roadmap](IMPLEMENTATION_ROADMAP.md) - Development plan and tasks
+- [Implementation Status](PHASE_7_COMPLETE.md) - Current phase completion
 
 ## Project Structure
 
 ```
 CodeButler/
-├── main.go                    # Entry point
-├── go.mod                     # Dependencies
+├── README.md                    # You are here
+├── CLAUDE.md                    # Instructions for Claude Code
+├── LICENSE
+├── .gitignore
 │
-├── internal/
-│   ├── whatsapp/              # WhatsApp client & handlers
-│   ├── access/                # Access control logic
-│   ├── audio/                 # Whisper API integration
-│   ├── repo/                  # Repository management
-│   ├── claude/                # Claude Code SDK executor
-│   └── config/                # Configuration system
+├── config.json                  # Generated by setup (gitignored)
+├── whatsapp-session/            # WhatsApp data (gitignored)
+├── Sources/                     # Your repos (gitignored)
 │
-├── Sources/                   # Your repositories go here
-│   ├── repo-a/
-│   │   └── CLAUDE.md          # Repo-specific context
-│   ├── repo-b/
-│   │   └── CLAUDE.md
-│   └── repo-c/
-│       └── CLAUDE.md
+├── ButlerAgent/                 # Go agent code
+│   ├── cmd/
+│   │   ├── codebutler/          # Setup wizard
+│   │   └── agent/               # WhatsApp agent
+│   ├── internal/
+│   │   ├── whatsapp/            # WhatsApp client
+│   │   ├── config/              # Config management
+│   │   ├── access/              # Access control
+│   │   ├── audio/               # Voice transcription
+│   │   ├── bot/                 # Bot logic
+│   │   ├── commands/            # Command parsing
+│   │   └── repo/                # Repository management
+│   ├── go.mod
+│   └── go.sum
 │
-└── docs/                      # Additional documentation
+├── docs/                        # Documentation
+│   ├── ARCHITECTURE.md
+│   ├── BIDIRECTIONAL_AGENT.md
+│   └── ...
+│
+├── start-agent.sh               # Start the agent
+├── send-response.sh             # Send response to WhatsApp
+└── ask-question.sh              # Ask question via WhatsApp
 ```
 
 ## Configuration
 
-After first run, configuration is stored in `config.json` (gitignored):
+Generated automatically by wizard (`config.json`):
 
 ```json
 {
   "whatsapp": {
-    "personalNumber": "1234567890@s.whatsapp.net",
-    "allowedGroups": [
-      {
-        "jid": "120363123456789012@g.us",
-        "name": "CodeButler Developer",
-        "enabled": true,
-        "isDevControl": true
-      }
-    ]
+    "sessionPath": "./whatsapp-session",
+    "personalNumber": "5491134567890@s.whatsapp.net",
+    "groupJID": "120363123456789012@g.us",
+    "groupName": "CodeButler Developer"
   },
   "openai": {
-    "apiKey": "sk-..."
+    "apiKey": ""
   },
   "claudeCode": {
-    "oauthToken": "from-env-CLAUDE_CODE_OAUTH_TOKEN"
+    "oauthToken": ""
+  },
+  "sources": {
+    "rootPath": "./Sources"
   }
 }
 ```
@@ -150,57 +180,55 @@ After first run, configuration is stored in `config.json` (gitignored):
 
 ### The Problem
 
-Modern developers often work on:
-- Multiple microservices
-- Frontend + Backend repositories
-- Shared libraries
-- Different client projects
-
-Switching contexts between repos is tedious and breaks flow.
+Using Claude Code typically requires:
+- Being at your computer
+- Switching between projects manually
+- Waiting for commands to complete
+- Managing multiple terminal windows
 
 ### The Solution
 
 CodeButler lets you:
-- Ask questions across all repositories
-- Make changes from your phone
+- Execute Claude Code from anywhere via WhatsApp
+- Switch repositories with simple commands
+- Get results automatically when tasks complete
 - Use voice messages while away from computer
-- Run bulk operations (tests, status checks) across all repos
-- Keep development context in one place
+- Work on multiple projects from one chat
 
 ### Why Go?
 
 - **Single binary** - Deploy one file, no dependencies
 - **Fast startup** - ~10ms vs Node.js ~200ms
 - **Low memory** - ~20MB idle vs Node.js ~50MB
-- **Great concurrency** - Goroutines for parallel operations
+- **Great concurrency** - Background task execution
 - **Cross-platform** - Easy to build for macOS, Linux, Windows
 
-### Why Claude Code SDK?
+### Why Claude Code?
 
-- **No API costs** - Uses your Claude Pro/Max subscription
-- **Better context** - Full understanding of code structure
-- **Rich tools** - File operations, bash, web access
-- **Session continuity** - Persistent conversation history
+- Uses your Claude Pro/Max subscription
+- Full understanding of code structure
+- File operations, bash, web access
+- Better than API for development tasks
 
 ## Commands
 
-### Basic Commands (All Chats)
+All commands use `@codebutler` prefix:
 
 ```bash
-@butler repos          # List all repositories
-@butler help           # Show help message
-in <repo>: <message>   # Target specific repository
+@codebutler help              # Show help
+@codebutler repos             # List repositories
+@codebutler use <repo>        # Select repository
+@codebutler status            # Show active repo
+@codebutler run <prompt>      # Execute Claude Code
+@codebutler clear             # Clear session
 ```
 
-### Dev Control Commands (CodeButler Developer Group Only)
-
-```bash
-@butler status                         # System status
-@butler run tests in all repos         # Bulk operations
-@butler compare <file> between repos   # Cross-repo analysis
-@butler list groups                    # Group management
-@butler allow group <name>             # Add group to allowed list
-```
+**Aliases:**
+- `repos` = `list` = `ls`
+- `use` = `select` = `cd`
+- `status` = `current` = `pwd`
+- `run` = `exec` = `do`
+- `clear` = `reset`
 
 ## Development
 
@@ -208,89 +236,85 @@ in <repo>: <message>   # Target specific repository
 
 ```bash
 # Development build
-go build -o butler main.go
+go build -o codebutler ./cmd/codebutler/
+
+# Test integration
+go build -o test-integration ./cmd/test-integration/
 
 # Production build (optimized)
-go build -ldflags="-s -w" -o butler main.go
-
-# Cross-compile for Linux
-GOOS=linux GOARCH=amd64 go build -o butler-linux main.go
+go build -ldflags="-s -w" -o codebutler ./cmd/codebutler/
 ```
 
 ### Testing
 
 ```bash
 # Run unit tests
-go test ./internal/...
+go test ./internal/commands/... -v
+go test ./internal/repo/... -v
+go test ./internal/config/... -v
+go test ./internal/access/... -v
 
-# Run integration tests
-go test -tags=integration ./...
-
-# Run with debug logging
-./butler --debug
+# Run integration test
+./test-integration
 ```
 
 ## Security
 
-- **Access Control** - Only personal number and explicitly allowed groups can use CodeButler
-- **Config Protection** - `config.json` has 0600 permissions (owner read/write only)
-- **WhatsApp Encryption** - All messages encrypted by WhatsApp end-to-end
-- **Repository Isolation** - Each repo has independent context via CLAUDE.md
-- **Credential Management** - Sensitive tokens stored securely, never committed to git
+- **Access Control** - Only authorized WhatsApp group
+- **Config Protection** - `config.json` has 0600 permissions
+- **WhatsApp Encryption** - End-to-end encrypted
+- **OAuth Token** - Use environment variable (recommended)
+- **No Shell Injection** - Uses exec.Command directly
+
+## Implementation Status
+
+- [x] **Phase 1**: WhatsApp Integration ✅
+- [x] **Phase 2**: Configuration System ✅
+- [x] **Phase 3**: Access Control ✅
+- [x] **Phase 4**: Audio Transcription ✅
+- [x] **Phase 5**: Repository Management ✅
+- [x] **Phase 6**: Claude Code Executor ✅
+- [x] **Phase 7**: First-time Setup ✅
+- [ ] **Phase 8**: Advanced Features
+- [ ] **Phase 9**: Testing & Polish
+- [ ] **Phase 10**: Documentation
+- [ ] **Phase 11**: Build & Deploy
+
+**Current Status**: Phases 1-7 COMPLETE and PRODUCTION-READY
+
+See phase completion docs:
+- [PHASE_6_COMPLETE.md](PHASE_6_COMPLETE.md)
+- [PHASE_7_COMPLETE.md](PHASE_7_COMPLETE.md)
 
 ## FAQ
 
-### Does this violate WhatsApp ToS?
+### Does this work with Claude API?
 
-CodeButler uses the WhatsApp Web protocol (like web.whatsapp.com). Personal use is typically safe, but business/commercial use may violate ToS. Use at your own risk.
+CodeButler is designed for Claude Code CLI, which requires Claude Pro/Max subscription. It doesn't use the Claude API.
 
 ### How much does it cost?
 
 - CodeButler itself: Free (open source)
-- Claude Code SDK: Included with Claude Pro/Max subscription ($20-$40/month)
-- OpenAI Whisper API: ~$0.006 per minute of audio transcription
+- Claude Pro/Max: $20/month (includes Claude Code)
+- OpenAI Whisper API: ~$0.006/minute (optional, for voice)
 - WhatsApp: Free
 
-### Can I use it with Claude API instead of SDK?
+### Can multiple people use it?
 
-Yes, but you'll pay per-token. The SDK is included with your Claude subscription and has no additional costs.
+Yes, but all users in the group have the same access to your repositories. Use with trusted team members only.
 
-### What happens if my phone is offline?
+### What's CLAUDE.md?
 
-CodeButler needs WhatsApp Web connection. If your phone loses internet, messages won't be received until it reconnects.
+A file in each repository that tells Claude Code how to work with that project. Required for CodeButler to use a repository.
 
-### Can multiple people use the same CodeButler instance?
+### Does it violate WhatsApp ToS?
 
-Yes! Add their WhatsApp groups to the allowed list. However, each group will have the same access to your repositories.
-
-## Roadmap
-
-- [x] Project planning and architecture
-- [ ] Phase 1: WhatsApp integration
-- [ ] Phase 2: Configuration system
-- [ ] Phase 3: Repository management
-- [ ] Phase 4: Claude Code executor
-- [ ] Phase 5: Audio transcription
-- [ ] Phase 6: Dev control commands
-- [ ] Phase 7: Bulk operations
-- [ ] Phase 8: Testing and documentation
-- [ ] v1.0.0 Release
-
-See [IMPLEMENTATION_ROADMAP.md](IMPLEMENTATION_ROADMAP.md) for detailed tasks.
-
-## Contributing
-
-Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+CodeButler uses WhatsApp Web protocol. Personal use is typically safe, but commercial use may violate ToS. Use at your own risk.
 
 ## License
 
 MIT License - See [LICENSE](LICENSE) file
 
-## Support
-
-- GitHub Issues: [github.com/leandrotocalini/CodeButler/issues](https://github.com/leandrotocalini/CodeButler/issues)
-- Discussions: [github.com/leandrotocalini/CodeButler/discussions](https://github.com/leandrotocalini/CodeButler/discussions)
-
 ---
 
-**Built with ❤️ for developers who want their personal code butler**
+**Built with ❤️ for developers who want remote Claude Code execution**
