@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CodeButler Dashboard</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 40px 20px;
+        }
+
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+        }
+
+        .header {
+            background: white;
+            border-radius: 20px;
+            padding: 30px;
+            margin-bottom: 20px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+        }
+
+        h1 {
+            color: #333;
+            font-size: 28px;
+            margin-bottom: 10px;
+        }
+
+        .status-badge {
+            display: inline-block;
+            padding: 6px 16px;
+            border-radius: 20px;
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        .status-badge.running {
+            background: #e8f5e9;
+            color: #388e3c;
+        }
+
+        .status-badge.stopped {
+            background: #ffebee;
+            color: #c62828;
+        }
+
+        .card {
+            background: white;
+            border-radius: 20px;
+            padding: 30px;
+            margin-bottom: 20px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+        }
+
+        .card h2 {
+            color: #333;
+            font-size: 20px;
+            margin-bottom: 20px;
+        }
+
+        .info-grid {
+            display: grid;
+            gap: 15px;
+        }
+
+        .info-item {
+            padding: 15px;
+            background: #f5f5f5;
+            border-radius: 10px;
+        }
+
+        .info-label {
+            font-size: 12px;
+            color: #666;
+            text-transform: uppercase;
+            font-weight: 600;
+            margin-bottom: 5px;
+        }
+
+        .info-value {
+            font-size: 16px;
+            color: #333;
+            font-weight: 500;
+        }
+
+        .btn {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 10px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s;
+        }
+
+        .btn:hover { transform: translateY(-2px); }
+        .btn:disabled { opacity: 0.6; cursor: not-allowed; }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .btn-danger {
+            background: #f44336;
+            color: white;
+        }
+
+        .btn-secondary {
+            background: #e0e0e0;
+            color: #333;
+        }
+
+        .actions {
+            display: flex;
+            gap: 10px;
+            margin-top: 20px;
+        }
+
+        .emoji {
+            font-size: 24px;
+            margin-right: 10px;
+        }
+
+        input {
+            width: 100%;
+            padding: 10px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 14px;
+        }
+
+        input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 5px;
+            color: #666;
+            font-size: 13px;
+            font-weight: 600;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1><span class="emoji">🤖</span>CodeButler</h1>
+            <span id="status-badge" class="status-badge running">● Agent Running</span>
+        </div>
+
+        <div class="card">
+            <h2>Configuration</h2>
+            <div class="info-grid">
+                <div class="info-item">
+                    <div class="info-label">WhatsApp Group</div>
+                    <div class="info-value">{{.Config.WhatsApp.GroupName}}</div>
+                </div>
+                <div class="info-item">
+                    <div class="info-label">Bot Prefix</div>
+                    <div class="info-value">{{.Config.WhatsApp.BotPrefix}}</div>
+                </div>
+                <div class="info-item">
+                    <div class="info-label">Sources Directory</div>
+                    <div class="info-value">{{.Config.Sources.RootPath}}</div>
+                </div>
+                <div class="info-item">
+                    <div class="info-label">Voice Transcription</div>
+                    <div class="info-value">{{if .Config.OpenAI.APIKey}}✅ Enabled{{else}}❌ Disabled{{end}}</div>
+                </div>
+            </div>
+
+            <div class="actions">
+                <button id="btn-stop" class="btn btn-danger" onclick="stopAgent()">Stop Agent</button>
+                <button id="btn-start" class="btn btn-primary" style="display:none;" onclick="startAgent()">Start Agent</button>
+                <button class="btn btn-secondary" onclick="showConfig()">Edit Config</button>
+            </div>
+        </div>
+
+        <div id="edit-config" class="card" style="display:none;">
+            <h2>Edit Configuration</h2>
+            <form id="config-form">
+                <div class="form-group">
+                    <label>Group Name</label>
+                    <input type="text" id="group-name" value="{{.Config.WhatsApp.GroupName}}">
+                </div>
+                <div class="form-group">
+                    <label>Bot Prefix</label>
+                    <input type="text" id="bot-prefix" value="{{.Config.WhatsApp.BotPrefix}}">
+                </div>
+                <div class="form-group">
+                    <label>Sources Directory</label>
+                    <input type="text" id="sources-dir" value="{{.Config.Sources.RootPath}}">
+                </div>
+                <div class="form-group">
+                    <label>OpenAI API Key</label>
+                    <input type="password" id="openai-key" placeholder="sk-..." value="{{.Config.OpenAI.APIKey}}">
+                </div>
+                <div class="actions">
+                    <button type="submit" class="btn btn-primary">Save Changes</button>
+                    <button type="button" class="btn btn-secondary" onclick="hideConfig()">Cancel</button>
+                </div>
+            </form>
+        </div>
+
+        <div class="card">
+            <h2>Protocol</h2>
+            <div class="info-item">
+                <div class="info-label">Communication</div>
+                <div class="info-value">JSON files in /tmp/codebutler/</div>
+            </div>
+            <div class="info-item" style="margin-top:10px;">
+                <div class="info-label">How it works</div>
+                <div class="info-value" style="font-size:13px;line-height:1.6;">
+                    • WhatsApp messages → <code>incoming.json</code><br>
+                    • Claude responses → <code>outgoing.json</code><br>
+                    • Questions → <code>question.json</code><br>
+                    • Answers → <code>answer.json</code>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let agentRunning = {{.AgentRunning}};
+
+        function updateStatus() {
+            const badge = document.getElementById('status-badge');
+            const btnStop = document.getElementById('btn-stop');
+            const btnStart = document.getElementById('btn-start');
+
+            if (agentRunning) {
+                badge.className = 'status-badge running';
+                badge.textContent = '● Agent Running';
+                btnStop.style.display = 'inline-block';
+                btnStart.style.display = 'none';
+            } else {
+                badge.className = 'status-badge stopped';
+                badge.textContent = '● Agent Stopped';
+                btnStop.style.display = 'none';
+                btnStart.style.display = 'inline-block';
+            }
+        }
+
+        async function stopAgent() {
+            const response = await fetch('/api/agent/stop', { method: 'POST' });
+            if (response.ok) {
+                agentRunning = false;
+                updateStatus();
+            }
+        }
+
+        async function startAgent() {
+            const response = await fetch('/api/agent/start', { method: 'POST' });
+            if (response.ok) {
+                agentRunning = true;
+                updateStatus();
+            }
+        }
+
+        function showConfig() {
+            document.getElementById('edit-config').style.display = 'block';
+        }
+
+        function hideConfig() {
+            document.getElementById('edit-config').style.display = 'none';
+        }
+
+        document.getElementById('config-form').onsubmit = async function(e) {
+            e.preventDefault();
+
+            const config = {
+                whatsapp: {
+                    session_path: "./whatsapp-session",
+                    group_jid: "{{.Config.WhatsApp.GroupJID}}",
+                    group_name: document.getElementById('group-name').value,
+                    bot_prefix: document.getElementById('bot-prefix').value
+                },
+                openai: {
+                    api_key: document.getElementById('openai-key').value
+                },
+                sources: {
+                    root_path: document.getElementById('sources-dir').value
+                }
+            };
+
+            const response = await fetch('/api/config', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(config)
+            });
+
+            if (response.ok) {
+                location.reload();
+            } else {
+                alert('Failed to save config');
+            }
+        };
+
+        updateStatus();
+    </script>
+</body>
+</html>

@@ -6,14 +6,10 @@
     <title>CodeButler Setup</title>
     <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
 
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             min-height: 100vh;
             display: flex;
@@ -26,30 +22,33 @@
             background: white;
             border-radius: 20px;
             box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-            max-width: 500px;
+            max-width: 600px;
             width: 100%;
             padding: 40px;
         }
 
-        h1 {
-            color: #333;
-            margin-bottom: 10px;
-            font-size: 28px;
-        }
+        h1 { color: #333; font-size: 28px; margin-bottom: 10px; }
+        .subtitle { color: #666; margin-bottom: 30px; font-size: 14px; }
 
-        .subtitle {
-            color: #666;
+        .progress {
+            display: flex;
+            gap: 10px;
             margin-bottom: 30px;
-            font-size: 14px;
         }
 
-        .step {
-            display: none;
+        .progress-step {
+            flex: 1;
+            height: 4px;
+            background: #e0e0e0;
+            border-radius: 2px;
+            transition: background 0.3s;
         }
 
-        .step.active {
-            display: block;
-        }
+        .progress-step.active { background: #667eea; }
+        .progress-step.completed { background: #4caf50; }
+
+        .step { display: none; }
+        .step.active { display: block; }
 
         #qr-container {
             display: flex;
@@ -58,10 +57,7 @@
             padding: 20px;
         }
 
-        #qr-canvas {
-            margin: 20px 0;
-            border-radius: 10px;
-        }
+        #qr-canvas { margin: 20px 0; border-radius: 10px; }
 
         .status {
             padding: 12px 20px;
@@ -71,24 +67,10 @@
             text-align: center;
         }
 
-        .status.info {
-            background: #e3f2fd;
-            color: #1976d2;
-        }
+        .status.info { background: #e3f2fd; color: #1976d2; }
+        .status.success { background: #e8f5e9; color: #388e3c; }
 
-        .status.success {
-            background: #e8f5e9;
-            color: #388e3c;
-        }
-
-        .status.error {
-            background: #ffebee;
-            color: #c62828;
-        }
-
-        .form-group {
-            margin-bottom: 20px;
-        }
+        .form-group { margin-bottom: 20px; }
 
         label {
             display: block;
@@ -125,18 +107,8 @@
             transition: transform 0.2s;
         }
 
-        button:hover {
-            transform: translateY(-2px);
-        }
-
-        button:active {
-            transform: translateY(0);
-        }
-
-        button:disabled {
-            opacity: 0.6;
-            cursor: not-allowed;
-        }
+        button:hover { transform: translateY(-2px); }
+        button:disabled { opacity: 0.6; cursor: not-allowed; }
 
         .spinner {
             border: 3px solid #f3f3f3;
@@ -159,19 +131,28 @@
             margin-top: 5px;
         }
 
-        .emoji {
-            font-size: 48px;
-            margin-bottom: 20px;
+        .emoji { font-size: 48px; margin-bottom: 20px; }
+
+        .form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
         }
     </style>
 </head>
 <body>
     <div class="container">
+        <div class="progress" id="progress">
+            <div class="progress-step active"></div>
+            <div class="progress-step"></div>
+            <div class="progress-step"></div>
+        </div>
+
         <!-- Step 1: QR Code -->
         <div id="step-qr" class="step active">
             <div class="emoji">📱</div>
             <h1>Scan QR Code</h1>
-            <p class="subtitle">Open WhatsApp and scan this code</p>
+            <p class="subtitle">Connect your WhatsApp</p>
 
             <div id="qr-container">
                 <div class="status info">
@@ -190,27 +171,27 @@
 
             <form id="config-form">
                 <div class="form-group">
-                    <label for="openai-key">OpenAI API Key (Optional)</label>
-                    <input type="password" id="openai-key" placeholder="sk-...">
-                    <div class="help-text">For voice message transcription with Whisper</div>
-                </div>
-
-                <div class="form-group">
                     <label for="group-name">WhatsApp Group Name</label>
                     <input type="text" id="group-name" value="CodeButler Developer" required>
                     <div class="help-text">The group where commands will be sent</div>
                 </div>
 
-                <div class="form-group">
-                    <label for="bot-prefix">Bot Message Prefix</label>
-                    <input type="text" id="bot-prefix" value="[BOT]" required>
-                    <div class="help-text">Prefix for bot responses</div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="bot-prefix">Bot Prefix</label>
+                        <input type="text" id="bot-prefix" value="[BOT]" required>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="sources-dir">Sources Dir</label>
+                        <input type="text" id="sources-dir" value="./Sources" required>
+                    </div>
                 </div>
 
                 <div class="form-group">
-                    <label for="sources-dir">Sources Directory</label>
-                    <input type="text" id="sources-dir" value="./Sources" required>
-                    <div class="help-text">Where your code repositories are stored</div>
+                    <label for="openai-key">OpenAI API Key (Optional)</label>
+                    <input type="password" id="openai-key" placeholder="sk-... (for voice messages)">
+                    <div class="help-text">Leave empty to skip voice transcription</div>
                 </div>
 
                 <button type="submit">Complete Setup</button>
@@ -221,46 +202,60 @@
         <div id="step-done" class="step">
             <div class="emoji">✅</div>
             <h1>Setup Complete!</h1>
-            <p class="subtitle">CodeButler is ready to use</p>
+            <p class="subtitle">CodeButler is ready</p>
 
             <div class="status success">
-                Your WhatsApp is connected and configured. Close this window and return to your terminal.
+                Your WhatsApp is connected. The agent is now running and monitoring for messages.
             </div>
+
+            <button onclick="location.reload()">Go to Dashboard</button>
         </div>
     </div>
 
     <script>
+        let currentStep = 1;
         const ws = new WebSocket('ws://localhost:3000/ws/qr');
         const qrCanvas = document.getElementById('qr-canvas');
-        let userInfo = null;
+
+        function updateProgress() {
+            const steps = document.querySelectorAll('.progress-step');
+            steps.forEach((step, index) => {
+                if (index < currentStep - 1) {
+                    step.classList.add('completed');
+                    step.classList.remove('active');
+                } else if (index === currentStep - 1) {
+                    step.classList.add('active');
+                    step.classList.remove('completed');
+                } else {
+                    step.classList.remove('active', 'completed');
+                }
+            });
+        }
+
+        function showStep(stepNum) {
+            document.querySelectorAll('.step').forEach(el => el.classList.remove('active'));
+
+            if (stepNum === 1) document.getElementById('step-qr').classList.add('active');
+            if (stepNum === 2) document.getElementById('step-config').classList.add('active');
+            if (stepNum === 3) document.getElementById('step-done').classList.add('active');
+
+            currentStep = stepNum;
+            updateProgress();
+        }
 
         ws.onmessage = function(event) {
             const data = JSON.parse(event.data);
 
             if (data.type === 'qr') {
-                // Hide spinner
                 document.querySelector('.spinner').style.display = 'none';
-
-                // Generate QR code
                 QRCode.toCanvas(qrCanvas, data.code, {
                     width: 300,
                     margin: 2
                 });
             } else if (data.type === 'connected') {
-                userInfo = data.user;
                 document.getElementById('user-name').textContent = data.user.name || data.user.jid;
-
-                // Move to config step
-                document.getElementById('step-qr').classList.remove('active');
-                document.getElementById('step-config').classList.add('active');
-            } else if (data.type === 'error') {
-                alert('Error: ' + data.error);
+                showStep(2);
             }
-        };
-
-        ws.onerror = function(error) {
-            console.error('WebSocket error:', error);
-            alert('Connection error. Please refresh the page.');
         };
 
         document.getElementById('config-form').onsubmit = async function(e) {
@@ -275,18 +270,14 @@
 
             const response = await fetch('/api/setup', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(setupData)
             });
 
             if (response.ok) {
-                document.getElementById('step-config').classList.remove('active');
-                document.getElementById('step-done').classList.add('active');
+                showStep(3);
             } else {
-                const error = await response.text();
-                alert('Setup failed: ' + error);
+                alert('Setup failed: ' + await response.text());
             }
         };
     </script>

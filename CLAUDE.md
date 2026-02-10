@@ -2,29 +2,32 @@
 
 > **Instructions for Claude Code when working in this project**
 
-## 🚀 Setup Flow
+## 🚀 Quick Start
 
-When user opens this project for the first time:
+**Single command to rule them all:**
 
-1. Check if `config.json` exists
-2. If NOT exists, run: `./setup.sh`
-3. This opens a **web browser** at `http://localhost:3000`
-4. User completes setup in browser (scan QR, enter keys)
-5. Setup wizard returns JSON status
-6. Start agent in background
+```bash
+./setup.sh
+```
+
+This:
+1. Builds the CodeButler binary
+2. Opens web UI at `http://localhost:3000`
+3. If no config → shows setup wizard
+4. If config exists → shows dashboard + starts agent
+
+**That's it. One binary, one UI, everything unified.**
 
 ## 📡 JSON Protocol (Agent ↔ Claude)
 
-All communication between the Go agent and Claude Code happens via **JSON files** in `/tmp/codebutler/`.
-
-### Directory Structure
+All communication happens via JSON files in `/tmp/codebutler/`:
 
 ```
 /tmp/codebutler/
-├── incoming.json       # Agent writes, Claude reads (WhatsApp → Claude)
-├── outgoing.json       # Claude writes, Agent reads (Claude → WhatsApp)
-├── question.json       # Claude writes when asking user
-└── answer.json         # Agent writes when user responds
+├── incoming.json    # Agent → Claude (WhatsApp messages)
+├── outgoing.json    # Claude → Agent (responses)
+├── question.json    # Claude → Agent (ask user)
+└── answer.json      # Agent → Claude (user response)
 ```
 
 ### 1. Incoming Message (WhatsApp → Claude)
@@ -52,9 +55,9 @@ All communication between the Go agent and Claude Code happens via **JSON files*
 
 **What Claude should do:**
 1. Read `/tmp/codebutler/incoming.json`
-2. Process the prompt in `content`
+2. Process the prompt
 3. Write response to `/tmp/codebutler/outgoing.json`
-4. Delete incoming.json (consumed)
+4. Delete incoming.json
 
 ### 2. Outgoing Response (Claude → WhatsApp)
 
@@ -66,16 +69,16 @@ All communication between the Go agent and Claude Code happens via **JSON files*
   "timestamp": "2025-02-09T20:05:00Z",
   "reply_to": "msg_abc123",
   "chat_jid": "120363123456789012@g.us",
-  "content": "✅ Authentication added successfully!\n\nModified files:\n- src/auth/jwt.js (new)\n- src/middleware/auth.js (new)\n- src/routes/api.js (updated)\n\nTotal: 127 lines added"
+  "content": "✅ Authentication added!\n\nFiles:\n- src/auth/jwt.js (new)\n- src/middleware/auth.js (new)"
 }
 ```
 
 **What Agent does:**
-1. Poll `/tmp/codebutler/outgoing.json` every 1s
-2. When found, send to WhatsApp
-3. Delete file (consumed)
+1. Polls every 1s for outgoing.json
+2. Sends to WhatsApp
+3. Deletes file
 
-### 3. Ask Question (Claude → User)
+### 3. Question (Claude → User)
 
 **File:** `/tmp/codebutler/question.json`
 
@@ -86,19 +89,10 @@ All communication between the Go agent and Claude Code happens via **JSON files*
   "question_id": "q_xyz789",
   "chat_jid": "120363123456789012@g.us",
   "text": "Which database ORM?",
-  "options": [
-    "Sequelize",
-    "Prisma",
-    "Mongoose"
-  ],
+  "options": ["Sequelize", "Prisma", "Mongoose"],
   "timeout": 30
 }
 ```
-
-**What Agent does:**
-1. Send question to WhatsApp as: `[BOT] Which database ORM?\n1. Sequelize\n2. Prisma\n3. Mongoose`
-2. Wait for user response
-3. Write answer to `/tmp/codebutler/answer.json`
 
 ### 4. Answer (User → Claude)
 
@@ -114,141 +108,49 @@ All communication between the Go agent and Claude Code happens via **JSON files*
 }
 ```
 
-**What Claude does:**
-1. Poll `/tmp/codebutler/answer.json`
-2. When found, read answer
-3. Continue processing
-4. Delete file (consumed)
-
-### 5. Setup Status (Wizard → Claude)
-
-**File:** `/tmp/codebutler/setup-status.json`
-
-```json
-{
-  "type": "setup_complete",
-  "timestamp": "2025-02-09T19:55:00Z",
-  "success": true,
-  "user": {
-    "jid": "5493764705749@s.whatsapp.net",
-    "name": "Leandro"
-  },
-  "group": {
-    "jid": "120363405395407771@g.us",
-    "name": "CodeButler Developer"
-  },
-  "voice_enabled": true,
-  "config_path": "./config.json"
-}
-```
-
 ## 🔧 Commands for Claude
 
-### Run Setup
+### Run CodeButler
+
 ```bash
 ./setup.sh
 ```
-- Builds binaries (wizard + agent)
-- Starts web server at http://localhost:3000
-- Opens browser automatically
-- Returns when setup complete
-- Outputs: `/tmp/codebutler/setup-status.json`
 
-### Start Agent
+- First time: Opens wizard → scan QR → configure → starts agent
+- Already configured: Opens dashboard → shows status
+- Always shows web UI at `http://localhost:3000`
+
+### Read Setup Status
+
+After first-time setup completes:
+
 ```bash
-./start-agent.sh
+cat /tmp/codebutler/setup-status.json
 ```
-- Runs agent in background
-- Creates `/tmp/codebutler/` directory
-- Starts monitoring for messages
 
-### Send Response
+Returns:
+```json
+{
+  "success": true,
+  "user": {"jid": "...", "name": "Leandro"},
+  "group": {"jid": "...", "name": "CodeButler Developer"},
+  "voice_enabled": true
+}
+```
+
+### Send Response to WhatsApp
+
 ```bash
-# Claude writes JSON, agent picks it up automatically
 cat > /tmp/codebutler/outgoing.json <<EOF
 {
   "type": "response",
   "chat_jid": "120363405395407771@g.us",
-  "content": "Done!"
+  "content": "✅ Task completed!"
 }
 EOF
 ```
 
 ### Ask Question
-```bash
-cat > /tmp/codebutler/question.json <<EOF
-{
-  "type": "question",
-  "question_id": "q1",
-  "chat_jid": "120363405395407771@g.us",
-  "text": "Which option?",
-  "options": ["A", "B", "C"],
-  "timeout": 30
-}
-EOF
-
-# Wait for answer
-while [ ! -f /tmp/codebutler/answer.json ]; do sleep 1; done
-cat /tmp/codebutler/answer.json
-```
-
-## 📝 Claude's Workflow
-
-### When project opens:
-
-```bash
-if [ ! -f config.json ]; then
-  echo "👋 Welcome to CodeButler! Setting up..."
-  ./setup.sh
-
-  # Read setup status
-  STATUS=$(cat /tmp/codebutler/setup-status.json)
-
-  # Show user what happened
-  echo "✅ Setup complete!"
-  echo "   User: $(echo $STATUS | jq -r '.user.name')"
-  echo "   Group: $(echo $STATUS | jq -r '.group.name')"
-
-  # Start agent
-  ./start-agent.sh
-  echo "✅ Agent running in background"
-else
-  echo "👋 Welcome back! Starting agent..."
-  ./start-agent.sh
-fi
-```
-
-### When incoming message arrives:
-
-```bash
-# Agent writes incoming.json when message arrives
-if [ -f /tmp/codebutler/incoming.json ]; then
-  MSG=$(cat /tmp/codebutler/incoming.json)
-  CONTENT=$(echo $MSG | jq -r '.content')
-  CHAT=$(echo $MSG | jq -r '.chat.jid')
-  MSG_ID=$(echo $MSG | jq -r '.message_id')
-
-  # Process the prompt
-  echo "📨 WhatsApp: $CONTENT"
-
-  # ... do work ...
-
-  # Send response
-  cat > /tmp/codebutler/outgoing.json <<EOF
-{
-  "type": "response",
-  "reply_to": "$MSG_ID",
-  "chat_jid": "$CHAT",
-  "content": "✅ Task completed!"
-}
-EOF
-
-  # Clean up
-  rm /tmp/codebutler/incoming.json
-fi
-```
-
-### When asking a question:
 
 ```bash
 # Write question
@@ -263,23 +165,68 @@ cat > /tmp/codebutler/question.json <<EOF
 }
 EOF
 
-# Wait for answer (max 30s)
-TIMEOUT=30
-ELAPSED=0
-while [ ! -f /tmp/codebutler/answer.json ] && [ $ELAPSED -lt $TIMEOUT ]; do
-  sleep 1
-  ELAPSED=$((ELAPSED + 1))
-done
+# Wait for answer
+while [ ! -f /tmp/codebutler/answer.json ]; do sleep 1; done
 
-if [ -f /tmp/codebutler/answer.json ]; then
-  ANSWER=$(cat /tmp/codebutler/answer.json)
-  SELECTED=$(echo $ANSWER | jq -r '.selected')
-  TEXT=$(echo $ANSWER | jq -r '.text')
+# Read answer
+ANSWER=$(cat /tmp/codebutler/answer.json | jq -r '.text')
+echo "User chose: $ANSWER"
 
-  echo "User selected: $TEXT"
-  rm /tmp/codebutler/answer.json
+# Clean up
+rm /tmp/codebutler/answer.json
+```
+
+## 📝 Claude's Workflow
+
+### On project open:
+
+```bash
+# Check if configured
+if [ ! -f config.json ]; then
+  echo "👋 Welcome to CodeButler! Running setup..."
+  ./setup.sh
+  # → Opens browser
+  # → User completes setup
+  # → Returns when done
+
+  # Read status
+  cat /tmp/codebutler/setup-status.json
+
+  echo "✅ Setup complete! Agent is running."
 else
-  echo "⏱️  Question timed out"
+  echo "👋 CodeButler already configured."
+  echo "   Web UI: http://localhost:3000"
+
+  # Optionally start if not running
+  ./setup.sh &
+fi
+```
+
+### When incoming message arrives:
+
+```bash
+# Check for incoming
+if [ -f /tmp/codebutler/incoming.json ]; then
+  MSG=$(cat /tmp/codebutler/incoming.json)
+  CONTENT=$(echo $MSG | jq -r '.content')
+  CHAT=$(echo $MSG | jq -r '.chat.jid')
+
+  echo "📨 WhatsApp: $CONTENT"
+
+  # Process task
+  # ... do work ...
+
+  # Send response
+  cat > /tmp/codebutler/outgoing.json <<EOF
+{
+  "type": "response",
+  "chat_jid": "$CHAT",
+  "content": "✅ Done!"
+}
+EOF
+
+  # Clean up
+  rm /tmp/codebutler/incoming.json
 fi
 ```
 
@@ -287,87 +234,111 @@ fi
 
 ```
 CodeButler/
-├── CLAUDE.md                    # This file (instructions for Claude)
-├── README.md                    # User documentation
-├── setup.sh                     # Setup script (builds + starts wizard)
-├── start-agent.sh               # Start agent in background
+├── CLAUDE.md                    # This file
+├── setup.sh                     # Build & run script
 │
-├── ButlerAgent/                 # Go source code
-│   ├── cmd/
-│   │   ├── setup-wizard/        # Web-based setup wizard
-│   │   └── agent/               # WhatsApp agent
+├── ButlerAgent/                 # Go source
+│   ├── cmd/codebutler/          # Unified binary (setup + agent + web UI)
+│   │   ├── main.go
+│   │   └── templates/
+│   │       ├── setup.html       # Setup wizard UI
+│   │       └── dashboard.html   # Dashboard UI
 │   └── internal/
 │       ├── whatsapp/            # WhatsApp client
-│       ├── protocol/            # JSON protocol handlers
-│       └── config/              # Config management
+│       ├── protocol/            # JSON protocol
+│       ├── config/              # Config management
+│       ├── access/              # Access control
+│       └── audio/               # Voice transcription
 │
 ├── config.json                  # Runtime config (gitignored)
-├── Sources/                     # User's code repos (gitignored)
-└── /tmp/codebutler/            # JSON communication files
+├── whatsapp-session/            # WhatsApp session (gitignored)
+├── Sources/                     # User's repos (gitignored)
+└── /tmp/codebutler/            # JSON protocol files
 ```
+
+## 🌐 Web UI Features
+
+### Setup Mode (no config.json)
+
+1. **Step 1: QR Code**
+   - Shows QR via WebSocket
+   - User scans with WhatsApp
+
+2. **Step 2: Configure**
+   - Group name
+   - Bot prefix
+   - Sources directory
+   - OpenAI API key (optional)
+
+3. **Step 3: Complete**
+   - Shows success
+   - Auto-starts agent
+
+### Dashboard Mode (config.json exists)
+
+- Shows agent status (running/stopped)
+- Displays current config
+- Edit config inline
+- Start/Stop agent buttons
+- Shows protocol info
 
 ## 🚫 What Claude Should NOT Do
 
-- ❌ Don't parse terminal output or logs
-- ❌ Don't "guess" what happened
-- ❌ Don't use ask-question.sh or send-response.sh (old scripts)
-- ❌ Don't run the agent directly (`./codebutler-agent`)
-- ✅ Always use JSON files for communication
-- ✅ Always use ./setup.sh and ./start-agent.sh
+- ❌ Don't parse stdout/logs from agent
+- ❌ Don't guess what happened
+- ❌ Don't use old scripts (they don't exist anymore)
+- ✅ Always use JSON protocol
+- ✅ Trust the web UI for setup
+- ✅ Read setup-status.json after setup
 
 ## 🎯 Example: Full Workflow
 
 ```bash
-# User opens project for first time
-$ claude
+# User clones repo
+git clone github.com:leandrotocalini/CodeButler.git
+cd CodeButler
 
-# Claude detects no config.json
-echo "👋 Setting up CodeButler..."
-
+# User (or Claude) runs setup
 ./setup.sh
-# → Opens browser at http://localhost:3000
-# → User scans QR, enters OpenAI key
-# → Wizard writes /tmp/codebutler/setup-status.json
-# → Browser shows "Setup complete!"
+# → Browser opens at http://localhost:3000
+# → Shows setup wizard (no config.json)
+# → User scans QR
+# → User fills form
+# → Setup completes
+# → Writes /tmp/codebutler/setup-status.json
+# → Agent starts automatically
+# → Dashboard now shows
 
-# Claude reads setup status
+# Read setup result
 cat /tmp/codebutler/setup-status.json
 # {
 #   "success": true,
-#   "user": {"name": "Leandro", ...},
-#   "group": {"name": "CodeButler Developer", ...}
+#   "user": {"jid": "...", "name": "Leandro"},
+#   "group": {"jid": "...", "name": "CodeButler Developer"}
 # }
 
-echo "✅ Setup complete! Starting agent..."
+echo "✅ CodeButler is running!"
+echo "   Web UI: http://localhost:3000"
 
-./start-agent.sh
-# → Agent runs in background
-# → Monitors WhatsApp
-# → Writes incoming.json when messages arrive
-
-echo "✅ CodeButler ready! Send messages from WhatsApp."
-
-# --- Later: Message arrives from WhatsApp ---
+# --- Later: WhatsApp message arrives ---
 
 # Agent writes incoming.json
 cat /tmp/codebutler/incoming.json
 # {
 #   "content": "add JWT authentication",
-#   "chat": {"jid": "120363...@g.us"},
-#   ...
+#   "chat": {"jid": "120363...@g.us"}
 # }
 
 echo "📨 Task: add JWT authentication"
 
-# Claude does the work...
-# ... reads files, makes changes, etc ...
+# Process task...
 
-# Claude sends response
-cat > /tmp/codebutler/outgoing.json <<EOF
+# Write response
+cat > /tmp/codebutler/outgoing.json <<'EOF'
 {
   "type": "response",
   "chat_jid": "120363405395407771@g.us",
-  "content": "✅ JWT authentication added!\n\nFiles created:\n- src/auth/jwt.js\n- src/middleware/auth.js"
+  "content": "✅ JWT added!\n- src/auth/jwt.js\n- src/middleware/auth.js"
 }
 EOF
 
@@ -378,4 +349,4 @@ echo "✅ Response sent to WhatsApp"
 
 ---
 
-**That's it!** Clean, simple, JSON-based communication. No guessing, no parsing logs.
+**One binary. One UI. JSON protocol. No magic.** 🎯
