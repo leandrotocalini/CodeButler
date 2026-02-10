@@ -544,9 +544,19 @@ func (d *Daemon) processBatch(ctx context.Context, msgs []store.Message) {
 	}
 	if strings.TrimSpace(response) != "" {
 		d.sendMessage(chatJID, response)
+	} else if result.NumTurns > 0 && result.SessionID != "" {
+		// Claude did work but returned no text — resume asking for a summary
+		d.log.Warn("Empty result after %d turns — resuming for summary", result.NumTurns)
+		summary, err := d.agent.Run(ctx, "Respondé con un resumen breve de lo que acabás de hacer. No ejecutes más herramientas.", result.SessionID)
+		if err != nil || strings.TrimSpace(summary.Result) == "" {
+			d.log.Warn("Summary retry failed, sending fallback")
+			d.sendMessage(chatJID, "Done ✓")
+		} else {
+			d.log.Info("Summary: %s", summary.Result[:min(len(summary.Result), 200)])
+			d.sendMessage(chatJID, summary.Result)
+		}
 	} else {
-		d.log.Warn("Claude returned empty result (likely all tool-use, no text)")
-		d.log.Warn("Raw JSON: %s", result.RawJSON[:min(len(result.RawJSON), 500)])
+		d.log.Warn("Claude returned empty result with no turns")
 		d.sendMessage(chatJID, "Done ✓")
 	}
 
