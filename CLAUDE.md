@@ -23,7 +23,7 @@ Please:
 I'll wait here...
 ```
 
-3. After setup completes, check if `.claude/mcp.json` was created
+3. After setup completes, check if `.mcp.json` was created
 
 4. Tell the user:
 ```
@@ -115,7 +115,7 @@ Returns:
 ## 🔧 How It Works
 
 1. **Setup phase**: `./butler.sh` runs web UI for QR scanning
-2. **After setup**: Creates `.claude/mcp.json` pointing to `./codebutler --mcp`
+2. **After setup**: Creates `.mcp.json` pointing to `./codebutler --mcp`
 3. **On Claude restart**: Claude connects to MCP server
 4. **Runtime**: Claude uses tools directly, no file polling
 
@@ -125,8 +125,7 @@ Returns:
 CodeButler/
 ├── CLAUDE.md                    # This file
 ├── butler.sh                    # Build & run setup
-├── .claude/
-│   └── mcp.json                 # MCP server config (auto-created)
+├── .mcp.json                    # MCP server config (auto-created)
 │
 ├── ButlerAgent/                 # Go source
 │   └── cmd/codebutler/          # Unified binary
@@ -144,15 +143,20 @@ User sends WhatsApp: "add JWT authentication"
 
 Claude (with MCP tools):
 
-1. Calls get_pending() → sees the message
-2. Processes the task (reads files, writes code)
+1. Calls get_pending() → blocks until a message arrives (up to 30s)
+2. Message arrives → processes the task (reads files, writes code)
 3. Needs clarification → calls ask_question("Which library?", ["jose", "jsonwebtoken"])
 4. User responds "1" in WhatsApp
 5. Continues with jose
 6. Calls send_message("✅ JWT authentication added!")
+7. Calls get_pending() again → waits for next message
 
 All native. No file polling. Direct communication.
 ```
+
+### Message Loop
+
+After completing each task, **always call `get_pending()`** to wait for the next WhatsApp message. This creates an event-driven loop — the call blocks until a message arrives or times out after 30 seconds. If it times out, call `get_pending()` again to keep listening.
 
 ## 🚀 Setup Commands
 
@@ -164,7 +168,7 @@ All native. No file polling. Direct communication.
 
 # This creates:
 # - config.json (WhatsApp config)
-# - .claude/mcp.json (MCP server config)
+# - .mcp.json (MCP server config)
 ```
 
 ### Manual rebuild (if needed):
@@ -183,7 +187,7 @@ go build -o ../codebutler ./cmd/codebutler/
 
 ## ⚙️ MCP Configuration
 
-After setup, `.claude/mcp.json` contains:
+After setup, `.mcp.json` contains:
 
 ```json
 {

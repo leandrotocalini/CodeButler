@@ -232,7 +232,7 @@ func handleSetup(w http.ResponseWriter, r *http.Request) {
 	if err := createMCPConfig(); err != nil {
 		fmt.Fprintf(os.Stderr, "⚠️ Failed to create MCP config: %v\n", err)
 	} else {
-		fmt.Fprintf(os.Stderr, "✅ Created .claude/mcp.json\n")
+		fmt.Fprintf(os.Stderr, "✅ Created .mcp.json\n")
 	}
 
 	// Write setup status
@@ -543,21 +543,22 @@ func runMCPServer() {
 }
 
 func createMCPConfig() error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+
 	mcpConfig := map[string]interface{}{
 		"mcpServers": map[string]interface{}{
 			"codebutler": map[string]interface{}{
-				"command": "./codebutler",
+				"type":    "stdio",
+				"command": filepath.Join(cwd, "codebutler"),
 				"args":    []string{"--mcp"},
 			},
 		},
 	}
 
-	claudeDir := ".claude"
-	if err := os.MkdirAll(claudeDir, 0755); err != nil {
-		return err
-	}
-
-	mcpPath := filepath.Join(claudeDir, "mcp.json")
+	mcpPath := ".mcp.json"
 	data, err := json.MarshalIndent(mcpConfig, "", "  ")
 	if err != nil {
 		return err

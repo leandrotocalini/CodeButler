@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,8 +17,11 @@ import (
 type Server struct {
 	config        *config.Config
 	client        *whatsapp.Client
+	clientReady   bool
+	clientMu      sync.Mutex
 	pendingMsgs   []PendingMessage
 	pendingMu     sync.Mutex
+	msgNotify     chan struct{}
 	answerChan    chan Answer
 	currentChatID string
 }
@@ -60,19 +64,42 @@ func NewServer(cfg *config.Config) *Server {
 	return &Server{
 		config:      cfg,
 		pendingMsgs: []PendingMessage{},
+		msgNotify:   make(chan struct{}, 1),
 		answerChan:  make(chan Answer, 1),
 	}
 }
 
 func (s *Server) Run() error {
-	// Connect to WhatsApp
 	fmt.Fprintf(os.Stderr, "🤖 CodeButler MCP Server starting...\n")
 
+	// Connect to WhatsApp in background so we can handle MCP handshake immediately
+	go s.connectWhatsApp()
+
+	fmt.Fprintf(os.Stderr, "📡 MCP server ready (stdio)\n")
+
+	// Start JSON-RPC loop immediately
+	scanner := bufio.NewScanner(os.Stdin)
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		var req JSONRPCRequest
+		if err := json.Unmarshal([]byte(line), &req); err != nil {
+			s.sendError(nil, -32700, "Parse error")
+			continue
+		}
+
+		s.handleRequest(&req)
+	}
+
+	return nil
+}
+
+func (s *Server) connectWhatsApp() {
 	client, err := whatsapp.Connect(s.config.WhatsApp.SessionPath)
 	if err != nil {
-		return fmt.Errorf("failed to connect to WhatsApp: %w", err)
+		fmt.Fprintf(os.Stderr, "❌ Failed to connect to WhatsApp: %v\n", err)
+		return
 	}
-	s.client = client
 
 	// Register message handler
 	botPrefix := s.config.WhatsApp.BotPrefix
@@ -82,7 +109,7 @@ func (s *Server) Run() error {
 
 	client.OnMessage(func(msg whatsapp.Message) {
 		// Ignore bot messages
-		if len(msg.Content) > 0 && msg.Content[0:len(botPrefix)] == botPrefix {
+		if strings.HasPrefix(msg.Content, botPrefix) {
 			return
 		}
 
@@ -107,33 +134,40 @@ func (s *Server) Run() error {
 		})
 		s.pendingMu.Unlock()
 
+		// Signal that a new message arrived
+		select {
+		case s.msgNotify <- struct{}{}:
+		default:
+		}
+
 		fmt.Fprintf(os.Stderr, "📨 Message received: %s\n", msg.Content)
 	})
 
+	s.clientMu.Lock()
+	s.client = client
+	s.clientReady = true
+	s.clientMu.Unlock()
+
 	fmt.Fprintf(os.Stderr, "✅ WhatsApp connected\n")
-	fmt.Fprintf(os.Stderr, "📡 MCP server ready (stdio)\n")
+}
 
-	// Start JSON-RPC loop
-	scanner := bufio.NewScanner(os.Stdin)
-	for scanner.Scan() {
-		line := scanner.Text()
-
-		var req JSONRPCRequest
-		if err := json.Unmarshal([]byte(line), &req); err != nil {
-			s.sendError(nil, -32700, "Parse error")
-			continue
-		}
-
-		s.handleRequest(&req)
-	}
-
-	return nil
+func (s *Server) isWhatsAppReady() bool {
+	s.clientMu.Lock()
+	defer s.clientMu.Unlock()
+	return s.clientReady && s.client != nil
 }
 
 func (s *Server) handleRequest(req *JSONRPCRequest) {
+	// Notifications have no ID - ignore them silently (MCP protocol)
+	if req.ID == nil && strings.HasPrefix(req.Method, "notifications/") {
+		return
+	}
+
 	switch req.Method {
 	case "initialize":
 		s.handleInitialize(req)
+	case "notifications/initialized":
+		// Client acknowledged initialization - no response needed
 	case "tools/list":
 		s.handleToolsList(req)
 	case "tools/call":
@@ -142,8 +176,10 @@ func (s *Server) handleRequest(req *JSONRPCRequest) {
 		s.handleResourcesList(req)
 	case "resources/read":
 		s.handleResourcesRead(req)
+	case "ping":
+		s.sendResult(req.ID, map[string]interface{}{})
 	default:
-		s.sendError(req.ID, -32601, "Method not found")
+		s.sendError(req.ID, -32601, "Method not found: "+req.Method)
 	}
 }
 
@@ -248,6 +284,11 @@ func (s *Server) handleToolsCall(req *JSONRPCRequest) {
 }
 
 func (s *Server) toolSendMessage(id interface{}, args json.RawMessage) {
+	if !s.isWhatsAppReady() {
+		s.sendError(id, -32000, "WhatsApp not connected yet, please try again in a few seconds")
+		return
+	}
+
 	var params struct {
 		Message string `json:"message"`
 	}
@@ -284,6 +325,11 @@ func (s *Server) toolSendMessage(id interface{}, args json.RawMessage) {
 }
 
 func (s *Server) toolAskQuestion(id interface{}, args json.RawMessage) {
+	if !s.isWhatsAppReady() {
+		s.sendError(id, -32000, "WhatsApp not connected yet, please try again in a few seconds")
+		return
+	}
+
 	var params struct {
 		Question string   `json:"question"`
 		Options  []string `json:"options"`
@@ -349,9 +395,28 @@ func (s *Server) toolAskQuestion(id interface{}, args json.RawMessage) {
 
 func (s *Server) toolGetPending(id interface{}) {
 	s.pendingMu.Lock()
+	if len(s.pendingMsgs) == 0 {
+		s.pendingMu.Unlock()
+
+		// Long-poll: wait for a message or timeout
+		select {
+		case <-s.msgNotify:
+			// Message arrived, re-lock and grab it
+		case <-time.After(30 * time.Second):
+			s.sendResult(id, map[string]interface{}{
+				"content": []map[string]interface{}{
+					{"type": "text", "text": "No pending messages"},
+				},
+			})
+			return
+		}
+
+		s.pendingMu.Lock()
+	}
+
 	msgs := make([]PendingMessage, len(s.pendingMsgs))
 	copy(msgs, s.pendingMsgs)
-	s.pendingMsgs = []PendingMessage{} // Clear pending
+	s.pendingMsgs = []PendingMessage{}
 	s.pendingMu.Unlock()
 
 	if len(msgs) == 0 {
@@ -380,7 +445,7 @@ func (s *Server) toolGetPending(id interface{}) {
 }
 
 func (s *Server) toolGetStatus(id interface{}) {
-	connected := s.client != nil && s.client.IsConnected()
+	connected := s.isWhatsAppReady() && s.client.IsConnected()
 
 	info := "Not connected"
 	if connected {

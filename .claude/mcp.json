@@ -1,10 +1,10 @@
 {
   "mcpServers": {
     "codebutler": {
+      "command": "/Users/romina/Source/CodeButler/codebutler",
       "args": [
         "--mcp"
-      ],
-      "command": "./codebutler"
+      ]
     }
   }
 }

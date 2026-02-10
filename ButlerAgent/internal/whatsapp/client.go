@@ -84,7 +84,7 @@ func Connect(sessionPath string) (*Client, error) {
 			time.Sleep(100 * time.Millisecond)
 		}
 
-		fmt.Println("✅ Connected to WhatsApp")
+		fmt.Fprintln(os.Stderr, "✅ Connected to WhatsApp")
 	}
 
 	return &Client{

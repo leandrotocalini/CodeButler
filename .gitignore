@@ -10,6 +10,7 @@
 
 # Config (secrets)
 config.json
+.mcp.json
 
 # WhatsApp session
 whatsapp-session/
