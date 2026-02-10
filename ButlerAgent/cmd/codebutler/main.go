@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"embed"
 	"encoding/json"
@@ -38,7 +39,8 @@ var (
 	waClient      *whatsapp.Client
 	agentRunning  = false
 	setupMode     = true
-	taskMu        sync.Mutex // Serialize Claude tasks (one at a time)
+	taskMu        sync.Mutex   // Serialize Claude tasks (one at a time)
+	chatSessions  sync.Map     // map[chatJID]string — last session_id per chat
 )
 
 func main() {
@@ -441,8 +443,33 @@ func stopAgent() {
 	fmt.Println("🛑 Agent stopped")
 }
 
-// runClaudeTask spawns the claude CLI with the user's message and sends the result to WhatsApp.
-// Tasks are serialized - only one Claude instance runs at a time.
+// streamEvent represents a line from claude --output-format stream-json
+type streamEvent struct {
+	Type         string          `json:"type"`
+	SessionID    string          `json:"session_id,omitempty"`
+	Result       string          `json:"result,omitempty"`
+	Subtype      string          `json:"subtype,omitempty"`
+	ContentBlock json.RawMessage `json:"content_block,omitempty"`
+	Message      json.RawMessage `json:"message,omitempty"`
+}
+
+type contentBlock struct {
+	Type  string          `json:"type"`
+	Name  string          `json:"name,omitempty"`
+	Input json.RawMessage `json:"input,omitempty"`
+}
+
+type assistantMessage struct {
+	Content []struct {
+		Type string `json:"type"`
+		Text string `json:"text,omitempty"`
+		Name string `json:"name,omitempty"`
+	} `json:"content"`
+}
+
+// runClaudeTask spawns the claude CLI with streaming output, sends progress
+// updates to WhatsApp, and tracks session_id for conversation continuity.
+// Tasks are serialized — only one Claude instance runs at a time.
 func runClaudeTask(content string, chatJID string, client *whatsapp.Client, botPrefix string) {
 	taskMu.Lock()
 	defer taskMu.Unlock()
@@ -468,8 +495,6 @@ func runClaudeTask(content string, chatJID string, client *whatsapp.Client, botP
 	if workDir == "" {
 		workDir = "."
 	}
-
-	// Resolve relative paths
 	if !filepath.IsAbs(workDir) {
 		if abs, err := filepath.Abs(workDir); err == nil {
 			workDir = abs
@@ -482,7 +507,6 @@ func runClaudeTask(content string, chatJID string, client *whatsapp.Client, botP
 		claudeCmd = "claude"
 	}
 
-	// Build command: claude -p "task" --output-format text
 	maxTurns := currentConfig.Claude.MaxTurns
 	if maxTurns == 0 {
 		maxTurns = 10
@@ -502,49 +526,140 @@ func runClaudeTask(content string, chatJID string, client *whatsapp.Client, botP
 	}
 	defer cancel()
 
+	// Build args with streaming output
 	args := []string{
 		"-p", content,
-		"--output-format", "text",
+		"--output-format", "stream-json",
 		"--max-turns", fmt.Sprintf("%d", maxTurns),
+	}
+
+	// Resume previous conversation if one exists for this chat
+	if sessionID, ok := chatSessions.Load(chatJID); ok {
+		args = append(args, "--resume", sessionID.(string))
+		fmt.Printf("   🔄 Resuming session: %s\n", sessionID)
 	}
 
 	cmd := exec.CommandContext(ctx, claudeCmd, args...)
 	cmd.Dir = workDir
 
-	fmt.Printf("   📂 Working dir: %s\n", workDir)
-	fmt.Printf("   ⚙️  Command: %s %s\n", claudeCmd, strings.Join(args, " "))
-
-	start := time.Now()
-	output, err := cmd.CombinedOutput()
-	elapsed := time.Since(start)
-
-	fmt.Printf("   ⏱️  Completed in %s\n", elapsed.Round(time.Second))
-
+	// Set up pipes for streaming
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		errMsg := fmt.Sprintf("❌ Error running Claude: %v", err)
-		if len(output) > 0 {
-			errMsg += "\n" + string(output)
-		}
-		if len(errMsg) > 4000 {
-			errMsg = errMsg[:4000] + "\n...(truncated)"
-		}
-		client.SendMessage(chatJID, botPrefix+" "+errMsg)
-		fmt.Printf("   ❌ Error: %v\n", err)
+		client.SendMessage(chatJID, botPrefix+" ❌ Failed to start Claude: "+err.Error())
 		return
 	}
 
-	result := strings.TrimSpace(string(output))
+	cmd.Stderr = os.Stderr // Let Claude's stderr pass through to agent logs
+
+	fmt.Printf("   📂 Working dir: %s\n", workDir)
+	start := time.Now()
+
+	if err := cmd.Start(); err != nil {
+		client.SendMessage(chatJID, botPrefix+" ❌ Failed to start Claude: "+err.Error())
+		return
+	}
+
+	// Read streaming events
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1MB buffer for large outputs
+
+	var lastUpdate time.Time
+	var toolUses []string
+	var finalResult string
+	var sessionID string
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+
+		var evt streamEvent
+		if err := json.Unmarshal([]byte(line), &evt); err != nil {
+			continue
+		}
+
+		switch evt.Type {
+		case "system":
+			if evt.SessionID != "" {
+				sessionID = evt.SessionID
+			}
+
+		case "content_block_start":
+			// Detect tool use starts
+			var cb contentBlock
+			if err := json.Unmarshal(evt.ContentBlock, &cb); err == nil {
+				if cb.Type == "tool_use" && cb.Name != "" {
+					toolName := formatToolName(cb.Name)
+					toolUses = append(toolUses, toolName)
+					fmt.Printf("   🔧 %s\n", toolName)
+
+					// Send update every 30 seconds or on first tool use
+					if time.Since(lastUpdate) > 30*time.Second || len(toolUses) == 1 {
+						client.SendMessage(chatJID, botPrefix+" 🔧 "+toolName)
+						lastUpdate = time.Now()
+					}
+				}
+			}
+
+		case "result":
+			finalResult = evt.Result
+			if evt.SessionID != "" {
+				sessionID = evt.SessionID
+			}
+		}
+	}
+
+	cmd.Wait()
+	elapsed := time.Since(start)
+	fmt.Printf("   ⏱️  Completed in %s (%d tool uses)\n", elapsed.Round(time.Second), len(toolUses))
+
+	// Save session ID for conversation continuity
+	if sessionID != "" {
+		chatSessions.Store(chatJID, sessionID)
+		fmt.Printf("   💾 Session saved: %s\n", sessionID)
+	}
+
+	// Send final result
+	result := strings.TrimSpace(finalResult)
 	if result == "" {
 		result = "✅ Task completed (no output)"
 	}
 
-	// WhatsApp message limit ~65K, but keep it readable
 	if len(result) > 4000 {
-		result = result[:4000] + "\n\n...(truncated, full output too long for WhatsApp)"
+		result = result[:4000] + "\n\n...(truncated)"
 	}
 
 	client.SendMessage(chatJID, botPrefix+" "+result)
 	fmt.Printf("   📤 Response sent (%d chars)\n", len(result))
+}
+
+// formatToolName makes tool use events human-readable for WhatsApp updates
+func formatToolName(name string) string {
+	switch name {
+	case "Read":
+		return "Reading file..."
+	case "Edit":
+		return "Editing file..."
+	case "Write":
+		return "Writing file..."
+	case "Bash":
+		return "Running command..."
+	case "Glob":
+		return "Searching files..."
+	case "Grep":
+		return "Searching code..."
+	case "WebFetch":
+		return "Fetching web content..."
+	case "WebSearch":
+		return "Searching the web..."
+	case "TodoWrite":
+		return "Updating task list..."
+	case "Task":
+		return "Running subtask..."
+	default:
+		return "Using " + name + "..."
+	}
 }
 
 func transcribeVoice(msg whatsapp.Message) (string, error) {
