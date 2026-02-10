@@ -1,207 +1,118 @@
 # CodeButler - WhatsApp Bridge for Claude Code
 
-> **MCP Server that gives Claude native WhatsApp tools**
+> **WhatsApp agent that invokes Claude Code directly**
 
-## 🤖 What Claude Does on Project Open
+## How It Works
 
-### If NOT configured (no config.json):
+```
+WhatsApp message → Go Agent → exec("claude -p task") → output → WhatsApp
+```
 
-1. Run the setup wizard:
+1. User sends a message in the configured WhatsApp group
+2. Go agent receives it via whatsmeow
+3. Agent spawns `claude -p "the message" --output-format text`
+4. Claude Code runs with full codebase access (reads, edits, runs commands)
+5. Output is sent back to the WhatsApp group
+
+Tasks are serialized — one Claude instance runs at a time.
+
+## Setup
+
+### First time:
+
 ```bash
 ./butler.sh
 ```
 
-2. Tell the user:
-```
-🤖 Opening CodeButler setup at http://localhost:3000
+Opens web UI at `http://localhost:3000`:
+1. Scan QR code with WhatsApp
+2. Configure group name, bot prefix, sources directory
+3. Agent starts automatically
 
-Please:
-1. Scan the QR code with WhatsApp
-2. Fill in the configuration
-3. Click "Complete Setup"
+### Already configured:
 
-I'll wait here...
-```
-
-3. After setup completes, check if `.mcp.json` was created
-
-4. Tell the user:
-```
-✅ CodeButler configured!
-
-To activate WhatsApp tools, please restart Claude:
-  Press Ctrl+C, then run: claude
-
-After restart, I'll have native WhatsApp tools!
+```bash
+./butler.sh
 ```
 
-### If configured (config.json exists):
+Loads `config.json` and starts the agent. Messages flow automatically.
 
-Check if MCP tools are available. If yes, you have these tools:
+## Configuration
 
-- `mcp__codebutler__send_message` - Send message to WhatsApp
-- `mcp__codebutler__ask_question` - Ask user a question with options
-- `mcp__codebutler__get_pending` - Get pending WhatsApp messages
-- `mcp__codebutler__get_status` - Check connection status
-
-Use them naturally when processing WhatsApp tasks!
-
-## 📡 MCP Tools Reference
-
-### send_message
-
-Send a message to WhatsApp.
+`config.json`:
 
 ```json
 {
-  "chat_jid": "120363405395407771@g.us",
-  "message": "✅ Task completed!"
+  "whatsapp": {
+    "sessionPath": "./whatsapp-session",
+    "groupJID": "120363...@g.us",
+    "groupName": "CodeButler Developer",
+    "botPrefix": "[BOT]"
+  },
+  "openai": {
+    "apiKey": "sk-..."
+  },
+  "sources": {
+    "rootPath": "./Sources"
+  },
+  "claude": {
+    "command": "claude",
+    "workDir": "/path/to/project",
+    "maxTurns": 10
+  }
 }
 ```
 
-### ask_question
+### Claude config options
 
-Ask user a question with options. Returns their choice.
+| Field | Default | Description |
+|-------|---------|-------------|
+| `command` | `"claude"` | Path to claude CLI binary |
+| `workDir` | `sources.rootPath` | Directory where Claude runs tasks |
+| `maxTurns` | `10` | Max agentic turns per task |
 
-```json
-{
-  "chat_jid": "120363405395407771@g.us",
-  "question": "Which database?",
-  "options": ["PostgreSQL", "MySQL", "MongoDB"],
-  "timeout": 30
-}
+## MCP Mode (optional)
+
+The agent can also run as an MCP server for when Claude Code is the initiator:
+
+```bash
+./codebutler --mcp
 ```
 
-Returns:
-```json
-{
-  "selected": 1,
-  "text": "PostgreSQL"
-}
-```
+This exposes tools: `send_message`, `ask_question`, `get_pending`, `get_status`.
 
-### get_pending
+Configured via `.mcp.json` (auto-created during setup).
 
-Get pending messages from WhatsApp (not yet processed).
-
-Returns:
-```json
-{
-  "messages": [
-    {
-      "id": "msg_123",
-      "from": "5491234567890@s.whatsapp.net",
-      "chat": "120363405395407771@g.us",
-      "content": "add authentication to API",
-      "timestamp": "2025-02-09T20:00:00Z"
-    }
-  ]
-}
-```
-
-### get_status
-
-Check WhatsApp connection status.
-
-Returns:
-```json
-{
-  "connected": true,
-  "user": "Leandro",
-  "group": "CodeButler Developer"
-}
-```
-
-## 🔧 How It Works
-
-1. **Setup phase**: `./butler.sh` runs web UI for QR scanning
-2. **After setup**: Creates `.mcp.json` pointing to `./codebutler --mcp`
-3. **On Claude restart**: Claude connects to MCP server
-4. **Runtime**: Claude uses tools directly, no file polling
-
-## 📁 Project Structure
+## Project Structure
 
 ```
 CodeButler/
 ├── CLAUDE.md                    # This file
-├── butler.sh                    # Build & run setup
+├── butler.sh                    # Build & run script
 ├── .mcp.json                    # MCP server config (auto-created)
 │
 ├── ButlerAgent/                 # Go source
-│   └── cmd/codebutler/          # Unified binary
-│       ├── main.go              # Web UI + MCP server
-│       └── templates/
+│   ├── cmd/codebutler/          # Unified binary
+│   │   ├── main.go              # Agent + Web UI + MCP server
+│   │   └── templates/
+│   │       ├── setup.html       # Setup wizard
+│   │       └── dashboard.html   # Dashboard
+│   └── internal/
+│       ├── whatsapp/            # WhatsApp client (whatsmeow)
+│       ├── mcp/                 # MCP server implementation
+│       ├── config/              # Config types and persistence
+│       ├── access/              # Group-based access control
+│       ├── audio/               # Voice transcription (OpenAI Whisper)
+│       └── protocol/            # Legacy JSON file protocol
 │
-├── config.json                  # WhatsApp config (gitignored)
-└── whatsapp-session/            # Session data (gitignored)
+├── config.json                  # Runtime config (gitignored)
+├── whatsapp-session/            # WhatsApp session (gitignored)
+└── Sources/                     # User's repos (gitignored)
 ```
 
-## 🎯 Example Workflow
-
-```
-User sends WhatsApp: "add JWT authentication"
-
-Claude (with MCP tools):
-
-1. Calls get_pending() → blocks until a message arrives (up to 30s)
-2. Message arrives → processes the task (reads files, writes code)
-3. Needs clarification → calls ask_question("Which library?", ["jose", "jsonwebtoken"])
-4. User responds "1" in WhatsApp
-5. Continues with jose
-6. Calls send_message("✅ JWT authentication added!")
-7. Calls get_pending() again → waits for next message
-
-All native. No file polling. Direct communication.
-```
-
-### Message Loop
-
-After completing each task, **always call `get_pending()`** to wait for the next WhatsApp message. This creates an event-driven loop — the call blocks until a message arrives or times out after 30 seconds. If it times out, call `get_pending()` again to keep listening.
-
-## 🚀 Setup Commands
-
-### First time (run by Claude automatically):
-
-```bash
-# Build and run web setup
-./butler.sh
-
-# This creates:
-# - config.json (WhatsApp config)
-# - .mcp.json (MCP server config)
-```
-
-### Manual rebuild (if needed):
+## Build
 
 ```bash
 cd ButlerAgent
 go build -o ../codebutler ./cmd/codebutler/
 ```
-
-### Test MCP server:
-
-```bash
-./codebutler --mcp
-# Runs as MCP server (stdio transport)
-```
-
-## ⚙️ MCP Configuration
-
-After setup, `.mcp.json` contains:
-
-```json
-{
-  "mcpServers": {
-    "codebutler": {
-      "command": "./codebutler",
-      "args": ["--mcp"]
-    }
-  }
-}
-```
-
-Claude Code automatically reads this and connects to the MCP server.
-
----
-
-**Native WhatsApp tools for Claude. No hacks. Pure MCP.** 🎯

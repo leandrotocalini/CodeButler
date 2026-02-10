@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -13,16 +14,15 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/leandrotocalini/CodeButler/internal/access"
 	"github.com/leandrotocalini/CodeButler/internal/audio"
 	"github.com/leandrotocalini/CodeButler/internal/config"
 	"github.com/leandrotocalini/CodeButler/internal/mcp"
-	"github.com/leandrotocalini/CodeButler/internal/protocol"
 	"github.com/leandrotocalini/CodeButler/internal/whatsapp"
 )
 
@@ -34,10 +34,11 @@ var upgrader = websocket.Upgrader{
 }
 
 var (
-	currentConfig   *config.Config
-	waClient        *whatsapp.Client
-	agentRunning    = false
-	setupMode       = true
+	currentConfig *config.Config
+	waClient      *whatsapp.Client
+	agentRunning  = false
+	setupMode     = true
+	taskMu        sync.Mutex // Serialize Claude tasks (one at a time)
 )
 
 func main() {
@@ -66,9 +67,6 @@ func main() {
 		fmt.Println("📋 No configuration found - running setup wizard")
 		setupMode = true
 	}
-
-	// Initialize protocol
-	protocol.Initialize()
 
 	// Setup HTTP routes
 	http.HandleFunc("/", serveUI)
@@ -391,15 +389,19 @@ func startAgent() {
 		waClient = client
 	}
 
-	fmt.Println("✅ Agent running")
+	fmt.Println("✅ Agent running - messages will be sent to Claude")
 
 	botPrefix := currentConfig.WhatsApp.BotPrefix
 	if botPrefix == "" {
 		botPrefix = "[BOT]"
 	}
 
-	// Register message handler
+	// Register message handler - invokes Claude on each message
 	waClient.OnMessage(func(msg whatsapp.Message) {
+		if msg.IsFromMe {
+			return
+		}
+
 		if strings.HasPrefix(msg.Content, botPrefix) {
 			return
 		}
@@ -408,36 +410,21 @@ func startAgent() {
 			return
 		}
 
-		fmt.Printf("📨 Message: %s\n", msg.Content)
+		fmt.Printf("📨 Message from %s: %s\n", msg.From, msg.Content)
 
-		// Handle voice
+		// Handle voice transcription
 		content := msg.Content
-		var transcript *string
 		if msg.IsVoice && currentConfig.OpenAI.APIKey != "" {
 			text, err := transcribeVoice(msg)
 			if err == nil {
 				content = text
-				transcript = &text
 				fmt.Printf("   🎤 Transcript: %s\n", text)
 			}
 		}
 
-		// Write incoming
-		protocol.WriteIncoming(&protocol.IncomingMessage{
-			MessageID:  uuid.New().String(),
-			From:       protocol.Contact{JID: msg.From, Name: ""},
-			Chat:       protocol.Contact{JID: msg.Chat, Name: ""},
-			Content:    content,
-			IsVoice:    msg.IsVoice,
-			Transcript: transcript,
-		})
-
-		fmt.Println("   ✅ Written to /tmp/codebutler/incoming.json")
+		// Run Claude task in background (serialized)
+		go runClaudeTask(content, msg.Chat, waClient, botPrefix)
 	})
-
-	// Start monitors
-	go monitorOutgoing(waClient, botPrefix)
-	go monitorQuestions(waClient, botPrefix)
 }
 
 func stopAgent() {
@@ -454,50 +441,99 @@ func stopAgent() {
 	fmt.Println("🛑 Agent stopped")
 }
 
-func monitorOutgoing(client *whatsapp.Client, botPrefix string) {
-	for agentRunning {
-		time.Sleep(1 * time.Second)
+// runClaudeTask spawns the claude CLI with the user's message and sends the result to WhatsApp.
+// Tasks are serialized - only one Claude instance runs at a time.
+func runClaudeTask(content string, chatJID string, client *whatsapp.Client, botPrefix string) {
+	taskMu.Lock()
+	defer taskMu.Unlock()
 
-		if !protocol.FileExists(protocol.OutgoingPath) {
-			continue
-		}
-
-		resp, err := protocol.ReadOutgoing()
-		if err != nil {
-			protocol.DeleteFile(protocol.OutgoingPath)
-			continue
-		}
-
-		message := botPrefix + " " + resp.Content
-		client.SendMessage(resp.ChatJID, message)
-		fmt.Println("📤 Response sent")
-
-		protocol.DeleteFile(protocol.OutgoingPath)
+	if !agentRunning {
+		return
 	}
-}
 
-func monitorQuestions(client *whatsapp.Client, botPrefix string) {
-	for agentRunning {
-		time.Sleep(1 * time.Second)
-
-		if !protocol.FileExists(protocol.QuestionPath) {
-			continue
-		}
-
-		q, err := protocol.ReadQuestion()
-		if err != nil {
-			protocol.DeleteFile(protocol.QuestionPath)
-			continue
-		}
-
-		message := fmt.Sprintf("%s %s\n", botPrefix, q.Text)
-		for i, opt := range q.Options {
-			message += fmt.Sprintf("%d. %s\n", i+1, opt)
-		}
-
-		client.SendMessage(q.ChatJID, message)
-		protocol.DeleteFile(protocol.QuestionPath)
+	// Notify user we're working on it
+	preview := content
+	if len(preview) > 100 {
+		preview = preview[:100] + "..."
 	}
+	client.SendMessage(chatJID, botPrefix+" 🔄 Processing: "+preview)
+
+	fmt.Printf("🤖 Running Claude: %s\n", preview)
+
+	// Determine working directory
+	workDir := currentConfig.Claude.WorkDir
+	if workDir == "" {
+		workDir = currentConfig.Sources.RootPath
+	}
+	if workDir == "" {
+		workDir = "."
+	}
+
+	// Resolve relative paths
+	if !filepath.IsAbs(workDir) {
+		if abs, err := filepath.Abs(workDir); err == nil {
+			workDir = abs
+		}
+	}
+
+	// Determine claude command
+	claudeCmd := currentConfig.Claude.Command
+	if claudeCmd == "" {
+		claudeCmd = "claude"
+	}
+
+	// Build command: claude -p "task" --output-format text
+	maxTurns := currentConfig.Claude.MaxTurns
+	if maxTurns == 0 {
+		maxTurns = 10
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	args := []string{
+		"-p", content,
+		"--output-format", "text",
+		"--max-turns", fmt.Sprintf("%d", maxTurns),
+	}
+
+	cmd := exec.CommandContext(ctx, claudeCmd, args...)
+	cmd.Dir = workDir
+
+	fmt.Printf("   📂 Working dir: %s\n", workDir)
+	fmt.Printf("   ⚙️  Command: %s %s\n", claudeCmd, strings.Join(args, " "))
+
+	start := time.Now()
+	output, err := cmd.CombinedOutput()
+	elapsed := time.Since(start)
+
+	fmt.Printf("   ⏱️  Completed in %s\n", elapsed.Round(time.Second))
+
+	if err != nil {
+		errMsg := fmt.Sprintf("❌ Error running Claude: %v", err)
+		if len(output) > 0 {
+			errMsg += "\n" + string(output)
+		}
+		if len(errMsg) > 4000 {
+			errMsg = errMsg[:4000] + "\n...(truncated)"
+		}
+		client.SendMessage(chatJID, botPrefix+" "+errMsg)
+		fmt.Printf("   ❌ Error: %v\n", err)
+		return
+	}
+
+	result := strings.TrimSpace(string(output))
+	if result == "" {
+		result = "✅ Task completed (no output)"
+	}
+
+	// WhatsApp message limit ~65K, but keep it readable
+	if len(result) > 4000 {
+		result = result[:4000] + "\n\n...(truncated, full output too long for WhatsApp)"
+	}
+
+	client.SendMessage(chatJID, botPrefix+" "+result)
+	fmt.Printf("   📤 Response sent (%d chars)\n", len(result))
 }
 
 func transcribeVoice(msg whatsapp.Message) (string, error) {
