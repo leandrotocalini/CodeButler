@@ -50,7 +50,7 @@ func New(workDir string, cfg config.ClaudeConfig) *Agent {
 
 const whatsAppSystemPrompt = `You are responding via WhatsApp. Important rules:
 - Do NOT use EnterPlanMode. Present plans as normal messages instead.
-- When proposing a plan or architecture, ALWAYS end with: "Respondé *si* para implementar o describí los cambios que querés."
+- When proposing a plan or architecture, ALWAYS end with: "Reply *yes* to implement, or describe the changes you want."
 - ALWAYS include a text response, even when you only performed tool calls. Never return empty output.`
 
 func (a *Agent) Run(ctx context.Context, prompt, sessionID string) (*Result, error) {

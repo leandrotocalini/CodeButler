@@ -28,7 +28,6 @@ func (d *Daemon) startWeb() {
 	d.webPort = port
 
 	go func() {
-		d.log.Info("Web UI: http://localhost:%d", port)
 		if err := http.ListenAndServe(addr, mux); err != nil {
 			d.log.Error("Web server error: %v", err)
 		}
