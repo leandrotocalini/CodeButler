@@ -90,11 +90,6 @@ func (d *Daemon) setBusy(b bool) {
 }
 
 func (d *Daemon) Run() error {
-	repoName := filepath.Base(d.repoDir)
-	d.log.Info("CodeButler starting for %s", repoName)
-	d.log.Info("Repo: %s", d.repoDir)
-	d.log.Info("Group: %s", d.repoCfg.WhatsApp.GroupName)
-
 	// Open store
 	dbPath := filepath.Join(config.RepoDir(d.repoDir), "store.db")
 	st, err := store.New(dbPath)
@@ -103,11 +98,9 @@ func (d *Daemon) Run() error {
 	}
 	d.store = st
 	defer st.Close()
-	d.log.Info("Store opened: %s", dbPath)
 
 	// Create agent
 	d.agent = agent.New(d.repoDir, d.repoCfg.Claude)
-	d.log.Info("Agent ready (maxTurns=%d, timeout=%dm)", d.repoCfg.Claude.MaxTurns, d.repoCfg.Claude.Timeout)
 
 	// Start web server
 	d.startWeb()
@@ -120,7 +113,7 @@ func (d *Daemon) Run() error {
 	// Start watchdog
 	go d.connectionWatchdog()
 
-	d.log.Info("Daemon running. Waiting for messages...")
+	d.log.Header("CodeButler \u00b7 %s \u00b7 http://localhost:%d", d.repoCfg.WhatsApp.GroupName, d.webPort)
 
 	// Start poll loop in background
 	ctx, cancel := context.WithCancel(context.Background())
@@ -133,7 +126,7 @@ func (d *Daemon) Run() error {
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	sig := <-sigCh
 
-	d.log.Info("Received %s, shutting down...", sig)
+	d.log.Status("Received %s, shutting down...", sig)
 	cancel()
 
 	d.clientMu.Lock()
@@ -142,7 +135,7 @@ func (d *Daemon) Run() error {
 	}
 	d.clientMu.Unlock()
 
-	d.log.Info("Goodbye!")
+	d.log.Status("Goodbye!")
 	return nil
 }
 
@@ -166,7 +159,6 @@ func (d *Daemon) connectWhatsApp() error {
 		}
 
 		d.setupClient(client)
-		d.log.Info("WhatsApp connected")
 		return nil
 	}
 	return fmt.Errorf("unreachable")
@@ -180,11 +172,10 @@ func (d *Daemon) setupClient(client *whatsapp.Client) {
 		d.clientMu.Lock()
 		d.connState = state
 		d.clientMu.Unlock()
-		d.log.Info("WhatsApp state: %s", state)
+		if state != whatsapp.StateConnected {
+			d.log.Warn("WhatsApp: %s", state)
+		}
 	})
-
-	d.log.Info("Listening on group: %s (JID: %s)", d.repoCfg.WhatsApp.GroupName, groupJID)
-	d.log.Info("Bot prefix: %q", botPrefix)
 
 	client.OnMessage(func(msg whatsapp.Message) {
 		// Filter by group
@@ -192,11 +183,8 @@ func (d *Daemon) setupClient(client *whatsapp.Client) {
 			return
 		}
 
-		d.log.Debug("Incoming: from=%s fromMe=%v content=%q",
-			msg.From, msg.IsFromMe, msg.Content[:min(len(msg.Content), 60)])
 		// Filter bot's own responses (they start with the prefix)
 		if botPrefix != "" && strings.HasPrefix(msg.Content, botPrefix) {
-			d.log.Debug("Filtered: bot prefix match")
 			return
 		}
 
@@ -271,12 +259,7 @@ func (d *Daemon) setupClient(client *whatsapp.Client) {
 		default:
 		}
 
-		// Truncate for display
-		preview := content
-		if len(preview) > 80 {
-			preview = preview[:80] + "..."
-		}
-		d.log.Info("Message from %s: %s", msg.From, preview)
+		d.log.UserMsg(msg.From, content, time.Now())
 	})
 
 	d.clientMu.Lock()
@@ -407,18 +390,13 @@ func (d *Daemon) handleNewMessages(ctx context.Context) {
 		}
 
 		if len(followUps) > 0 {
-			if len(queued) > 0 {
-				d.log.Info("Conversation active — processing %d follow-up(s), %d queued for later", len(followUps), len(queued))
-			} else {
-				d.log.Info("Conversation active — processing %d follow-up(s)", len(followUps))
-			}
 			d.processBatch(ctx, followUps)
 			return
 		}
 
 		// No follow-ups yet. Wait for user to reply up to ReplyWindow.
 		// If a message arrives during the wait, re-check immediately.
-		d.log.Info("Waiting for user reply (%s timeout, %d queued)...", ReplyWindow, len(queued))
+		d.log.Status("Waiting for reply...")
 		select {
 		case <-ctx.Done():
 			return
@@ -428,7 +406,7 @@ func (d *Daemon) handleNewMessages(ctx context.Context) {
 			return
 		case <-time.After(ReplyWindow):
 			// No reply — conversation is done
-			d.log.Info("No reply in %s — conversation ended", ReplyWindow)
+			d.log.Status("Conversation ended")
 			d.endConversation()
 		}
 
@@ -442,13 +420,13 @@ func (d *Daemon) handleNewMessages(ctx context.Context) {
 			return
 		}
 		// Process all remaining as new cold batch (no accumulation wait — they've waited long enough)
-		d.log.Info("Processing %d queued message(s) from ended conversation", len(msgs))
+		d.log.Status("Processing queued messages...")
 		d.processBatch(ctx, msgs)
 		return
 	}
 
 	// Cold: wait for more messages to accumulate
-	d.log.Info("Accumulating messages (waiting %s)...", AccumulationWindow)
+	d.log.Status("Accumulating messages...")
 	select {
 	case <-ctx.Done():
 		return
@@ -501,10 +479,10 @@ func (d *Daemon) processBatch(ctx context.Context, msgs []store.Message) {
 	// Get existing session for this chat
 	sessionID, _ := d.store.GetSession(chatJID)
 
-	d.log.Info("Spawning Claude (%d message(s))...", len(msgs))
-	d.log.Info("── Input ──\n%s── End Input ──", prompt.String())
 	if sessionID != "" {
-		d.log.Info("Resuming session %s", sessionID[:min(len(sessionID), 12)])
+		d.log.BotStart(fmt.Sprintf("resuming %s\u2026", sessionID[:min(len(sessionID), 8)]))
+	} else {
+		d.log.BotStart("new session")
 	}
 
 	start := time.Now()
@@ -524,40 +502,45 @@ func (d *Daemon) processBatch(ctx context.Context, msgs []store.Message) {
 		return
 	}
 
-	d.log.Info("Claude finished in %s (turns=%d, cost=$%.4f, error=%v, resultLen=%d)",
-		elapsed.Round(time.Second), result.NumTurns, result.CostUSD, result.IsError, len(result.Result))
+	d.log.BotResult(elapsed, result.NumTurns, result.CostUSD)
 	d.startConversation()
 
 	// Save new session
 	if result.SessionID != "" {
 		d.store.SetSession(chatJID, result.SessionID)
-		d.log.Debug("Session saved: %s", result.SessionID[:min(len(result.SessionID), 12)])
 	}
 
 	// Send response
 	response := result.Result
 	if result.IsError {
 		response = "Error: " + response
-		d.log.Warn("Claude returned error:\n%s", response)
-	} else {
-		d.log.Info("── Output ──\n%s\n── End Output ──", response)
+		d.log.BotText("\u26a0 " + response)
 	}
 	if strings.TrimSpace(response) != "" {
+		preview := response
+		if len(preview) > 200 {
+			preview = preview[:200] + "\u2026"
+		}
+		if !result.IsError {
+			d.log.BotText(preview)
+		}
 		d.sendMessage(chatJID, response)
 	} else if result.NumTurns > 0 && result.SessionID != "" {
 		// Claude did work but returned no text — resume asking for a summary
-		d.log.Warn("Empty result after %d turns — resuming for summary", result.NumTurns)
-		summary, err := d.agent.Run(ctx, "Respondé con un resumen breve de lo que acabás de hacer. No ejecutes más herramientas.", result.SessionID)
+		d.log.BotText("\u26a0 Empty result \u2014 retrying for summary\u2026")
+		summary, err := d.agent.Run(ctx, "Reply with a brief summary of what you just did. Do not run any more tools.", result.SessionID)
 		if err != nil || strings.TrimSpace(summary.Result) == "" {
-			d.log.Warn("Summary retry failed, sending fallback")
-			d.sendMessage(chatJID, "Done ✓")
+			d.sendMessage(chatJID, "Done \u2713")
 		} else {
-			d.log.Info("Summary: %s", summary.Result[:min(len(summary.Result), 200)])
+			preview := summary.Result
+			if len(preview) > 200 {
+				preview = preview[:200] + "\u2026"
+			}
+			d.log.BotText(preview)
 			d.sendMessage(chatJID, summary.Result)
 		}
 	} else {
-		d.log.Warn("Claude returned empty result with no turns")
-		d.sendMessage(chatJID, "Done ✓")
+		d.sendMessage(chatJID, "Done \u2713")
 	}
 
 	// Stop "typing..." indicator
@@ -568,7 +551,7 @@ func (d *Daemon) processBatch(ctx context.Context, msgs []store.Message) {
 		d.store.Ack(msg.ID)
 	}
 	d.markRead(msgs)
-	d.log.Info("Acked %d message(s)", len(msgs))
+	d.log.Status("Waiting for reply...")
 }
 
 func (d *Daemon) markRead(msgs []store.Message) {
@@ -604,19 +587,11 @@ func (d *Daemon) sendPresence(chatJID string, composing bool) {
 	d.clientMu.Unlock()
 
 	if client == nil {
-		d.log.Warn("SendPresence: client is nil")
 		return
 	}
 
-	state := "paused"
-	if composing {
-		state = "composing"
-	}
-
 	if err := client.SendPresence(chatJID, composing); err != nil {
-		d.log.Error("SendPresence(%s) failed: %v", state, err)
-	} else {
-		d.log.Info("Presence: %s", state)
+		d.log.Error("SendPresence failed: %v", err)
 	}
 }
 
@@ -649,7 +624,5 @@ func (d *Daemon) sendMessage(chatJID, text string) {
 
 	if err := client.SendMessage(chatJID, message); err != nil {
 		d.log.Error("Failed to send message: %v", err)
-	} else {
-		d.log.Info("Message sent to WhatsApp (%d chars)", len(text))
 	}
 }
