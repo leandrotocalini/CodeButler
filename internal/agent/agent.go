@@ -1,0 +1,89 @@
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os/exec"
+	"time"
+
+	"github.com/leandrotocalini/CodeButler/internal/config"
+)
+
+type Result struct {
+	SessionID string  `json:"session_id"`
+	Result    string  `json:"result"`
+	IsError   bool    `json:"is_error"`
+	CostUSD   float64 `json:"cost_usd"`
+	NumTurns  int     `json:"num_turns"`
+}
+
+type Agent struct {
+	workDir        string
+	maxTurns       int
+	timeout        time.Duration
+	permissionMode string
+}
+
+func New(workDir string, cfg config.ClaudeConfig) *Agent {
+	maxTurns := cfg.MaxTurns
+	if maxTurns == 0 {
+		maxTurns = 10
+	}
+	timeout := time.Duration(cfg.Timeout) * time.Minute
+	if timeout == 0 {
+		timeout = 30 * time.Minute
+	}
+	permissionMode := cfg.PermissionMode
+	if permissionMode == "" {
+		permissionMode = "bypassPermissions"
+	}
+
+	return &Agent{
+		workDir:        workDir,
+		maxTurns:       maxTurns,
+		timeout:        timeout,
+		permissionMode: permissionMode,
+	}
+}
+
+func (a *Agent) Run(ctx context.Context, prompt, sessionID string) (*Result, error) {
+	ctx, cancel := context.WithTimeout(ctx, a.timeout)
+	defer cancel()
+
+	args := []string{
+		"-p", prompt,
+		"--output-format", "json",
+		"--max-turns", fmt.Sprintf("%d", a.maxTurns),
+		"--permission-mode", a.permissionMode,
+	}
+
+	if sessionID != "" {
+		args = append(args, "--resume", sessionID)
+	}
+
+	cmd := exec.CommandContext(ctx, "claude", args...)
+	cmd.Dir = a.workDir
+
+	output, err := cmd.Output()
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return nil, fmt.Errorf("claude timed out after %s", a.timeout)
+		}
+		// Try to parse stderr for details
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return nil, fmt.Errorf("claude exited with code %d: %s", exitErr.ExitCode(), string(exitErr.Stderr))
+		}
+		return nil, fmt.Errorf("claude exec failed: %w", err)
+	}
+
+	var result Result
+	if err := json.Unmarshal(output, &result); err != nil {
+		// If JSON parsing fails, treat raw output as the result
+		return &Result{
+			Result: string(output),
+		}, nil
+	}
+
+	return &result, nil
+}
