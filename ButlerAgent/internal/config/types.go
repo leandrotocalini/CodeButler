@@ -27,4 +27,5 @@ type ClaudeConfig struct {
 	Command  string `json:"command"`  // Path to claude CLI (default: "claude")
 	WorkDir  string `json:"workDir"`  // Working directory for Claude tasks
 	MaxTurns int    `json:"maxTurns"` // Max agentic turns per task (default: 10)
+	Timeout  int    `json:"timeout"`  // Timeout in minutes (default: 30, 0 = no limit)
 }

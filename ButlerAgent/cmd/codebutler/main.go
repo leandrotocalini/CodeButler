@@ -488,7 +488,18 @@ func runClaudeTask(content string, chatJID string, client *whatsapp.Client, botP
 		maxTurns = 10
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	timeoutMin := currentConfig.Claude.Timeout
+	if timeoutMin == 0 {
+		timeoutMin = 30
+	}
+
+	var ctx context.Context
+	var cancel context.CancelFunc
+	if timeoutMin > 0 {
+		ctx, cancel = context.WithTimeout(context.Background(), time.Duration(timeoutMin)*time.Minute)
+	} else {
+		ctx, cancel = context.WithCancel(context.Background())
+	}
 	defer cancel()
 
 	args := []string{
