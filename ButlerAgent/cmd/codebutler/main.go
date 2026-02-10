@@ -181,7 +181,7 @@ func handleSetup(w http.ResponseWriter, r *http.Request) {
 	// Get user info
 	info, _ := waClient.GetInfo()
 
-	// Find group
+	// Find group or create it
 	groups, _ := waClient.GetGroups()
 	var groupJID string
 	for _, g := range groups {
@@ -192,8 +192,15 @@ func handleSetup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if groupJID == "" {
-		http.Error(w, "Group not found", http.StatusNotFound)
-		return
+		// Group not found, create it
+		fmt.Printf("📱 Creating WhatsApp group: %s\n", data.GroupName)
+		jid, err := waClient.CreateGroup(data.GroupName, []string{})
+		if err != nil {
+			http.Error(w, "Failed to create group: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		groupJID = jid
+		fmt.Printf("✅ Group created: %s\n", groupJID)
 	}
 
 	// Create config
@@ -315,8 +322,23 @@ func handleQRWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	// Connect to WhatsApp
-	client, qrChan, err := whatsapp.ConnectWithQR("./whatsapp-session")
+	// Try to reconnect with existing session first
+	client, err := whatsapp.Connect("./whatsapp-session")
+	if err == nil && client.IsConnected() {
+		waClient = client
+		info, _ := client.GetInfo()
+		conn.WriteJSON(map[string]interface{}{
+			"type": "connected",
+			"user": map[string]string{
+				"jid":  info.JID,
+				"name": info.Name,
+			},
+		})
+		return
+	}
+
+	// No existing session, need QR scan
+	client2, qrChan, err := whatsapp.ConnectWithQR("./whatsapp-session")
 	if err != nil {
 		conn.WriteJSON(map[string]interface{}{
 			"type":  "error",
@@ -325,7 +347,7 @@ func handleQRWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	waClient = client
+	waClient = client2
 
 	// Send QR codes
 	for evt := range qrChan {
@@ -337,7 +359,7 @@ func handleQRWebSocket(w http.ResponseWriter, r *http.Request) {
 			})
 
 		case "success":
-			info, _ := client.GetInfo()
+			info, _ := client2.GetInfo()
 			conn.WriteJSON(map[string]interface{}{
 				"type": "connected",
 				"user": map[string]string{
