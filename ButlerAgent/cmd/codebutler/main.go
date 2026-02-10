@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -20,6 +21,7 @@ import (
 	"github.com/leandrotocalini/CodeButler/internal/access"
 	"github.com/leandrotocalini/CodeButler/internal/audio"
 	"github.com/leandrotocalini/CodeButler/internal/config"
+	"github.com/leandrotocalini/CodeButler/internal/mcp"
 	"github.com/leandrotocalini/CodeButler/internal/protocol"
 	"github.com/leandrotocalini/CodeButler/internal/whatsapp"
 )
@@ -39,6 +41,14 @@ var (
 )
 
 func main() {
+	// Check for MCP mode
+	for _, arg := range os.Args[1:] {
+		if arg == "--mcp" {
+			runMCPServer()
+			return
+		}
+	}
+
 	fmt.Println("🤖 CodeButler")
 	fmt.Println()
 
@@ -210,6 +220,13 @@ func handleSetup(w http.ResponseWriter, r *http.Request) {
 
 	currentConfig = cfg
 	setupMode = false
+
+	// Create MCP config for Claude
+	if err := createMCPConfig(); err != nil {
+		fmt.Fprintf(os.Stderr, "⚠️ Failed to create MCP config: %v\n", err)
+	} else {
+		fmt.Fprintf(os.Stderr, "✅ Created .claude/mcp.json\n")
+	}
 
 	// Write setup status
 	status := map[string]interface{}{
@@ -486,4 +503,43 @@ func openBrowser(url string) {
 	if cmd != nil {
 		cmd.Start()
 	}
+}
+
+func runMCPServer() {
+	cfg, err := config.Load("config.json")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "❌ Failed to load config: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Run ./butler.sh first to configure CodeButler\n")
+		os.Exit(1)
+	}
+
+	server := mcp.NewServer(cfg)
+	if err := server.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "❌ MCP server error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func createMCPConfig() error {
+	mcpConfig := map[string]interface{}{
+		"mcpServers": map[string]interface{}{
+			"codebutler": map[string]interface{}{
+				"command": "./codebutler",
+				"args":    []string{"--mcp"},
+			},
+		},
+	}
+
+	claudeDir := ".claude"
+	if err := os.MkdirAll(claudeDir, 0755); err != nil {
+		return err
+	}
+
+	mcpPath := filepath.Join(claudeDir, "mcp.json")
+	data, err := json.MarshalIndent(mcpConfig, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(mcpPath, data, 0644)
 }
