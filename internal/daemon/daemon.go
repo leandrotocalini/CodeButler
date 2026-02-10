@@ -105,6 +105,10 @@ func (d *Daemon) Run() error {
 	// Start web server
 	d.startWeb()
 
+	// Show header
+	d.log.Clear()
+	d.log.Header("CodeButler \u00b7 %s \u00b7 http://localhost:%d", d.repoCfg.WhatsApp.GroupName, d.webPort)
+
 	// Connect WhatsApp
 	if err := d.connectWhatsApp(); err != nil {
 		return fmt.Errorf("connect WhatsApp: %w", err)
@@ -112,8 +116,6 @@ func (d *Daemon) Run() error {
 
 	// Start watchdog
 	go d.connectionWatchdog()
-
-	d.log.Header("CodeButler \u00b7 %s \u00b7 http://localhost:%d", d.repoCfg.WhatsApp.GroupName, d.webPort)
 
 	// Start poll loop in background
 	ctx, cancel := context.WithCancel(context.Background())
@@ -143,15 +145,13 @@ func (d *Daemon) connectWhatsApp() error {
 	sessionPath := config.SessionPath(d.repoDir)
 	whatsapp.SetDeviceName("CodeButler:" + filepath.Base(d.repoDir))
 
+	d.log.Status("WhatsApp: connecting...")
 	for attempt := 1; attempt <= 5; attempt++ {
-		d.log.Info("WhatsApp connecting (attempt %d/5)...", attempt)
-
 		client, err := whatsapp.Connect(sessionPath)
 		if err != nil {
-			d.log.Error("WhatsApp connect attempt %d/5: %v", attempt, err)
+			d.log.Error("WhatsApp attempt %d/5: %v", attempt, err)
 			if attempt < 5 {
 				delay := time.Duration(min(attempt*5, 30)) * time.Second
-				d.log.Info("Retrying in %s...", delay)
 				time.Sleep(delay)
 				continue
 			}
@@ -159,6 +159,7 @@ func (d *Daemon) connectWhatsApp() error {
 		}
 
 		d.setupClient(client)
+		d.log.Status("WhatsApp: connected")
 		return nil
 	}
 	return fmt.Errorf("unreachable")

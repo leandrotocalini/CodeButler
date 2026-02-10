@@ -126,13 +126,21 @@ func (l *Logger) Error(format string, args ...interface{}) { l.log(LevelError, f
 
 // --- TUI methods (stderr only, not ring buffer/web dashboard) ---
 
-// Header prints a bold cyan header line.
+// Clear clears the terminal screen.
+func (l *Logger) Clear() {
+	if l.color {
+		fmt.Fprint(os.Stderr, "\033[2J\033[H")
+	}
+}
+
+// Header prints a bold cyan header line with a separator.
 func (l *Logger) Header(format string, args ...interface{}) {
 	text := fmt.Sprintf(format, args...)
+	sep := strings.Repeat("\u2500", max(len(text), 40))
 	if l.color {
-		fmt.Fprintf(os.Stderr, "\n%s%s%s\n\n", ansiBold+ansiCyan, text, ansiReset)
+		fmt.Fprintf(os.Stderr, "\n%s%s%s\n%s%s%s\n\n", ansiBold+ansiCyan, text, ansiReset, ansiDim, sep, ansiReset)
 	} else {
-		fmt.Fprintf(os.Stderr, "\n%s\n\n", text)
+		fmt.Fprintf(os.Stderr, "\n%s\n%s\n\n", text, sep)
 	}
 }
 
