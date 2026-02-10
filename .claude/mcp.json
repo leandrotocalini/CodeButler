@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "codebutler": {
+      "args": [
+        "--mcp"
+      ],
+      "command": "./codebutler"
+    }
+  }
+}
