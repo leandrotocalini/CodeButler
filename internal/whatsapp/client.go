@@ -160,6 +160,10 @@ func (c *Client) registerConnectionEvents() {
 		switch evt.(type) {
 		case *events.Connected:
 			c.setState(StateConnected)
+			// Mark device as "available" so chat presence (composing) and
+			// read receipts actually work. Without this, WhatsApp treats
+			// the linked device as offline and ignores both.
+			_ = c.wac.SendPresence(context.Background(), types.PresenceAvailable)
 		case *events.Disconnected:
 			// whatsmeow auto-reconnects if EnableAutoReconnect is true (default).
 			// Mark as reconnecting — Connected event will fire when back.

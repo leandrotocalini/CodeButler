@@ -14,8 +14,9 @@ type Result struct {
 	SessionID string  `json:"session_id"`
 	Result    string  `json:"result"`
 	IsError   bool    `json:"is_error"`
-	CostUSD   float64 `json:"cost_usd"`
+	CostUSD   float64 `json:"total_cost_usd"`
 	NumTurns  int     `json:"num_turns"`
+	RawJSON   string  `json:"-"` // raw output from claude -p for debugging
 }
 
 type Agent struct {
@@ -47,6 +48,11 @@ func New(workDir string, cfg config.ClaudeConfig) *Agent {
 	}
 }
 
+const whatsAppSystemPrompt = `You are responding via WhatsApp. Important rules:
+- Do NOT use EnterPlanMode. Present plans as normal messages instead.
+- When proposing a plan or architecture, ALWAYS end with: "Respondé *si* para implementar o describí los cambios que querés."
+- ALWAYS include a text response, even when you only performed tool calls. Never return empty output.`
+
 func (a *Agent) Run(ctx context.Context, prompt, sessionID string) (*Result, error) {
 	ctx, cancel := context.WithTimeout(ctx, a.timeout)
 	defer cancel()
@@ -56,6 +62,7 @@ func (a *Agent) Run(ctx context.Context, prompt, sessionID string) (*Result, err
 		"--output-format", "json",
 		"--max-turns", fmt.Sprintf("%d", a.maxTurns),
 		"--permission-mode", a.permissionMode,
+		"--append-system-prompt", whatsAppSystemPrompt,
 	}
 
 	if sessionID != "" {
@@ -81,9 +88,11 @@ func (a *Agent) Run(ctx context.Context, prompt, sessionID string) (*Result, err
 	if err := json.Unmarshal(output, &result); err != nil {
 		// If JSON parsing fails, treat raw output as the result
 		return &Result{
-			Result: string(output),
+			Result:  string(output),
+			RawJSON: string(output),
 		}, nil
 	}
 
+	result.RawJSON = string(output)
 	return &result, nil
 }

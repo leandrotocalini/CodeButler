@@ -187,14 +187,13 @@ func (d *Daemon) setupClient(client *whatsapp.Client) {
 	d.log.Info("Bot prefix: %q", botPrefix)
 
 	client.OnMessage(func(msg whatsapp.Message) {
-		d.log.Debug("Incoming: chat=%s from=%s fromMe=%v content=%q",
-			msg.Chat, msg.From, msg.IsFromMe, msg.Content[:min(len(msg.Content), 60)])
-
 		// Filter by group
 		if groupJID != "" && msg.Chat != groupJID {
-			d.log.Debug("Filtered: wrong group (got %s, want %s)", msg.Chat, groupJID)
 			return
 		}
+
+		d.log.Debug("Incoming: from=%s fromMe=%v content=%q",
+			msg.From, msg.IsFromMe, msg.Content[:min(len(msg.Content), 60)])
 		// Filter bot's own responses (they start with the prefix)
 		if botPrefix != "" && strings.HasPrefix(msg.Content, botPrefix) {
 			d.log.Debug("Filtered: bot prefix match")
@@ -525,7 +524,8 @@ func (d *Daemon) processBatch(ctx context.Context, msgs []store.Message) {
 		return
 	}
 
-	d.log.Info("Claude finished in %s", elapsed.Round(time.Second))
+	d.log.Info("Claude finished in %s (turns=%d, cost=$%.4f, error=%v, resultLen=%d)",
+		elapsed.Round(time.Second), result.NumTurns, result.CostUSD, result.IsError, len(result.Result))
 	d.startConversation()
 
 	// Save new session
@@ -542,10 +542,12 @@ func (d *Daemon) processBatch(ctx context.Context, msgs []store.Message) {
 	} else {
 		d.log.Info("── Output ──\n%s\n── End Output ──", response)
 	}
-	d.sendMessage(chatJID, response)
-
-	if result.CostUSD > 0 {
-		d.log.Info("Cost: $%.4f (%d turns)", result.CostUSD, result.NumTurns)
+	if strings.TrimSpace(response) != "" {
+		d.sendMessage(chatJID, response)
+	} else {
+		d.log.Warn("Claude returned empty result (likely all tool-use, no text)")
+		d.log.Warn("Raw JSON: %s", result.RawJSON[:min(len(result.RawJSON), 500)])
+		d.sendMessage(chatJID, "Done ✓")
 	}
 
 	// Stop "typing..." indicator
