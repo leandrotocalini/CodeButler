@@ -39,15 +39,27 @@ WhatsApp Group ←→ CodeButler (Go) ←→ Claude Code CLI (per-repo)
 
 ## Quick Start
 
-### First Time Setup
+### One Command
 
 ```bash
-# 1. Clone the repo
+# Clone and run
 git clone https://github.com/leandrotocalini/CodeButler.git
 cd CodeButler
+./butler.sh
+```
 
-# 2. Run the setup script (does everything automatically)
-./setup.sh
+This:
+1. Builds CodeButler
+2. Opens web UI at http://localhost:3000
+3. Shows setup wizard (first time) or dashboard (configured)
+
+### First Time Setup
+
+1. Browser opens automatically
+2. Scan QR code with WhatsApp
+3. Fill in configuration (4 fields)
+4. Click "Complete Setup"
+5. Done! Agent starts automatically
 ```
 
 The setup script will:

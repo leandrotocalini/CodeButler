@@ -2,21 +2,41 @@
 
 > **Instructions for Claude Code when working in this project**
 
-## 🚀 Quick Start
+## 🤖 What Claude Should Do on Project Open
 
-**Single command to rule them all:**
+**ALWAYS run this immediately when project opens:**
 
 ```bash
-./setup.sh
+./butler.sh
 ```
 
-This:
-1. Builds the CodeButler binary
-2. Opens web UI at `http://localhost:3000`
-3. If no config → shows setup wizard
-4. If config exists → shows dashboard + starts agent
+This single command:
+- Builds CodeButler binary
+- Opens web UI at http://localhost:3000
+- Shows setup wizard (if first time) OR dashboard (if configured)
+- Runs in background
 
-**That's it. One binary, one UI, everything unified.**
+**Then tell the user:**
+
+```
+🤖 CodeButler is running at http://localhost:3000
+
+[First time]
+→ Open the browser and complete the 3-step setup
+→ I'll monitor for WhatsApp messages automatically
+
+[Already configured]
+→ Dashboard is open - agent is running
+→ Send messages from your WhatsApp group
+```
+
+## 🚀 Quick Start (for users reading this)
+
+```bash
+./butler.sh
+```
+
+That's it. One command.
 
 ## 📡 JSON Protocol (Agent ↔ Claude)
 
@@ -113,7 +133,7 @@ All communication happens via JSON files in `/tmp/codebutler/`:
 ### Run CodeButler
 
 ```bash
-./setup.sh
+./butler.sh
 ```
 
 - First time: Opens wizard → scan QR → configure → starts agent
@@ -184,7 +204,7 @@ rm /tmp/codebutler/answer.json
 # Check if configured
 if [ ! -f config.json ]; then
   echo "👋 Welcome to CodeButler! Running setup..."
-  ./setup.sh
+  ./butler.sh
   # → Opens browser
   # → User completes setup
   # → Returns when done
@@ -198,7 +218,7 @@ else
   echo "   Web UI: http://localhost:3000"
 
   # Optionally start if not running
-  ./setup.sh &
+  ./butler.sh &
 fi
 ```
 
@@ -235,7 +255,7 @@ fi
 ```
 CodeButler/
 ├── CLAUDE.md                    # This file
-├── setup.sh                     # Build & run script
+├── butler.sh                    # Build & run script
 │
 ├── ButlerAgent/                 # Go source
 │   ├── cmd/codebutler/          # Unified binary (setup + agent + web UI)
@@ -299,7 +319,7 @@ git clone github.com:leandrotocalini/CodeButler.git
 cd CodeButler
 
 # User (or Claude) runs setup
-./setup.sh
+./butler.sh
 # → Browser opens at http://localhost:3000
 # → Shows setup wizard (no config.json)
 # → User scans QR
