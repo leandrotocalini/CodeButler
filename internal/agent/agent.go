@@ -51,7 +51,8 @@ func New(workDir string, cfg config.ClaudeConfig) *Agent {
 const whatsAppSystemPrompt = `You are responding via WhatsApp. Important rules:
 - Do NOT use EnterPlanMode. Present plans as normal messages instead.
 - When proposing a plan or architecture, ALWAYS end with: "Reply *yes* to implement, or describe the changes you want."
-- ALWAYS include a text response, even when you only performed tool calls. Never return empty output.`
+- ALWAYS include a text response, even when you only performed tool calls. Never return empty output.
+- When you see <attached-image path="...">, use the Read tool to view the image file at that path.`
 
 func (a *Agent) Run(ctx context.Context, prompt, sessionID string) (*Result, error) {
 	ctx, cancel := context.WithTimeout(ctx, a.timeout)

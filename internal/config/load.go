@@ -23,6 +23,11 @@ func SessionPath(dir string) string {
 	return filepath.Join(RepoDir(dir), sessionDir)
 }
 
+// TmpPath returns the path to <dir>/.codebutler/tmp/
+func TmpPath(dir string) string {
+	return filepath.Join(RepoDir(dir), "tmp")
+}
+
 // Exists checks if a repo has been configured (has .codebutler/config.json).
 func Exists(dir string) bool {
 	path := filepath.Join(RepoDir(dir), repoConfig)

@@ -89,7 +89,7 @@ func (l *Logger) log(level LogLevel, format string, args ...interface{}) {
 
 	// Print to stderr
 	if l.color {
-		ts := ansiGray + entry.Time.Format("15:04:05") + ansiReset
+		ts := ansiGray + entry.Time.Format("2006-01-02 15:04:05") + ansiReset
 		var msg string
 		switch level {
 		case LevelDebug:
@@ -105,7 +105,7 @@ func (l *Logger) log(level LogLevel, format string, args ...interface{}) {
 		}
 		fmt.Fprintf(os.Stderr, "%s %s\n", ts, msg)
 	} else {
-		fmt.Fprintf(os.Stderr, "%s %s %s\n", entry.Time.Format("15:04:05"), level.String(), entry.Message)
+		fmt.Fprintf(os.Stderr, "%s %s %s\n", entry.Time.Format("2006-01-02 15:04:05"), level.String(), entry.Message)
 	}
 
 	// Notify subscribers (non-blocking)
@@ -119,41 +119,71 @@ func (l *Logger) log(level LogLevel, format string, args ...interface{}) {
 	l.subMu.Unlock()
 }
 
-func (l *Logger) Debug(format string, args ...interface{}) { l.log(LevelDebug, format, args...) }
+func (l *Logger) Debug(format string, args ...interface{}) { l.log(LevelInfo, format, args...) }
 func (l *Logger) Info(format string, args ...interface{})  { l.log(LevelInfo, format, args...) }
 func (l *Logger) Warn(format string, args ...interface{})  { l.log(LevelWarn, format, args...) }
 func (l *Logger) Error(format string, args ...interface{}) { l.log(LevelError, format, args...) }
 
 // --- TUI methods (stderr only, not ring buffer/web dashboard) ---
 
-// Clear clears the terminal screen.
+// Clear clears the terminal screen and resets any scroll region.
 func (l *Logger) Clear() {
 	if l.color {
-		fmt.Fprint(os.Stderr, "\033[2J\033[H")
+		fmt.Fprint(os.Stderr, "\033[r\033[2J\033[H")
 	}
 }
 
-// Header prints a bold cyan header line with a separator.
+// Header prints a bold cyan header line with a separator, then sets up
+// an ANSI scroll region so the header stays fixed at the top.
 func (l *Logger) Header(format string, args ...interface{}) {
 	text := fmt.Sprintf(format, args...)
 	sep := strings.Repeat("\u2500", max(len(text), 40))
 	if l.color {
+		// Row 1: blank, Row 2: header, Row 3: separator, Row 4: blank → cursor at row 5
 		fmt.Fprintf(os.Stderr, "\n%s%s%s\n%s%s%s\n\n", ansiBold+ansiCyan, text, ansiReset, ansiDim, sep, ansiReset)
+		// Set scroll region from row 5 to bottom; move cursor there
+		fmt.Fprint(os.Stderr, "\033[5;9999r\033[5;1H")
 	} else {
 		fmt.Fprintf(os.Stderr, "\n%s\n%s\n\n", text, sep)
 	}
 }
 
-// UserMsg prints an incoming user message with green arrow prefix.
-func (l *Logger) UserMsg(from, content string, t time.Time) {
-	ts := t.Format("15:04:05")
+// Cleanup resets the scroll region and moves the cursor to the bottom.
+// Call on exit so the terminal returns to normal.
+func (l *Logger) Cleanup() {
 	if l.color {
-		fmt.Fprintf(os.Stderr, "%s%s\u25b6 %s%s (%s)\n", ansiBold, ansiGreen, from, ansiReset, ts)
-	} else {
-		fmt.Fprintf(os.Stderr, "> %s (%s)\n", from, ts)
+		fmt.Fprint(os.Stderr, "\033[r\033[9999;1H\n")
 	}
-	for _, line := range strings.Split(content, "\n") {
-		fmt.Fprintf(os.Stderr, "  %s\n", line)
+}
+
+// UserMsg prints an incoming user message notification and the processed prompt.
+func (l *Logger) UserMsg(from, content string, t time.Time, isVoice, isImage bool) {
+	ts := t.Format("2006-01-02 15:04:05")
+
+	// Determine message type description
+	msgType := "text"
+	switch {
+	case isImage && strings.Contains(content, "</attached-image>"):
+		msgType = "image + caption"
+	case isImage:
+		msgType = "image"
+	case isVoice:
+		msgType = "voice"
+	}
+
+	// Truncate prompt preview
+	preview := content
+	if len(preview) > 150 {
+		preview = preview[:150] + "\u2026"
+	}
+
+	if l.color {
+		fmt.Fprintf(os.Stderr, "%s%s\u25b6 WhatsApp User%s %s(%s \u00b7 %s)%s\n",
+			ansiBold, ansiGreen, ansiReset, ansiGray, ts, msgType, ansiReset)
+		fmt.Fprintf(os.Stderr, "%s  \u2192 %s%s\n", ansiDim, preview, ansiReset)
+	} else {
+		fmt.Fprintf(os.Stderr, "> WhatsApp User (%s · %s)\n", ts, msgType)
+		fmt.Fprintf(os.Stderr, "  -> %s\n", preview)
 	}
 }
 

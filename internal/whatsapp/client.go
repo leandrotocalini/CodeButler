@@ -198,11 +198,8 @@ func (c *Client) setState(state ConnectionState) {
 	handler := c.onConnEvent
 	c.connMu.Unlock()
 
-	if old != state {
-		fmt.Fprintf(os.Stderr, "📡 WhatsApp: %s → %s\n", old, state)
-		if handler != nil {
-			handler(state)
-		}
+	if old != state && handler != nil {
+		handler(state)
 	}
 }
 

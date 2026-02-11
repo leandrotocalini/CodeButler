@@ -61,6 +61,11 @@ type Daemon struct {
 	// Message notification channel
 	msgNotify chan struct{}
 
+	// Track bot's own messages so we can mark old ones as read
+	botMsgMu     sync.Mutex
+	botMsgIDs    []string // message IDs sent by the bot (oldest first)
+	botMsgChat   string   // chat JID for those messages
+
 	// Web server
 	webPort   int
 	startTime time.Time
@@ -98,6 +103,9 @@ func (d *Daemon) Run() error {
 	}
 	d.store = st
 	defer st.Close()
+
+	// Clean up old tmp files from previous runs
+	os.RemoveAll(config.TmpPath(d.repoDir))
 
 	// Create agent
 	d.agent = agent.New(d.repoDir, d.repoCfg.Claude)
@@ -138,6 +146,7 @@ func (d *Daemon) Run() error {
 	d.clientMu.Unlock()
 
 	d.log.Status("Goodbye!")
+	d.log.Cleanup()
 	return nil
 }
 
@@ -171,9 +180,15 @@ func (d *Daemon) setupClient(client *whatsapp.Client) {
 
 	client.OnConnectionEvent(func(state whatsapp.ConnectionState) {
 		d.clientMu.Lock()
+		prev := d.connState
 		d.connState = state
 		d.clientMu.Unlock()
-		if state != whatsapp.StateConnected {
+		switch {
+		case state == whatsapp.StateConnected && prev != whatsapp.StateConnected:
+			d.log.Status("WhatsApp: reconnected")
+		case state == whatsapp.StateLoggedOut:
+			d.log.Warn("WhatsApp: logged out")
+		case state != whatsapp.StateConnected && prev == whatsapp.StateConnected:
 			d.log.Warn("WhatsApp: %s", state)
 		}
 	})
@@ -203,6 +218,16 @@ func (d *Daemon) setupClient(client *whatsapp.Client) {
 		if d.imgHandler.IsConfirmationReply(msg.Chat, msg.Content) {
 			go d.HandleImageConfirmation(msg)
 			return
+		}
+
+		// User is engaged — mark old bot messages as read
+		d.markAllBotMessages()
+
+		// Mark as read immediately so the sender sees blue ticks
+		if msg.ID != "" {
+			if err := client.MarkRead(msg.Chat, msg.From, []string{msg.ID}); err != nil {
+				d.log.Warn("MarkRead failed: %v", err)
+			}
 		}
 
 		content := msg.Content
@@ -238,6 +263,33 @@ func (d *Daemon) setupClient(client *whatsapp.Client) {
 			}
 		}
 
+		// Download image messages
+		if msg.IsImage {
+			imgData, err := client.DownloadImageFromMessage(msg)
+			if err != nil {
+				d.log.Error("Failed to download image: %v", err)
+				content = "[Image — download failed]"
+			} else {
+				tmpDir := config.TmpPath(d.repoDir)
+				os.MkdirAll(tmpDir, 0755)
+				imgPath := filepath.Join(tmpDir, fmt.Sprintf("image-%s.jpg", uuid.New().String()[:8]))
+				if err := os.WriteFile(imgPath, imgData, 0644); err != nil {
+					d.log.Error("Failed to save image: %v", err)
+					content = "[Image — save failed]"
+				} else {
+					caption := msg.Content
+					if caption == "[Image]" {
+						caption = ""
+					}
+					if caption != "" {
+						content = fmt.Sprintf("<attached-image path=\"%s\">%s</attached-image>", imgPath, caption)
+					} else {
+						content = fmt.Sprintf("<attached-image path=\"%s\" />", imgPath)
+					}
+				}
+			}
+		}
+
 		// Persist message
 		pending := store.Message{
 			ID:         uuid.New().String(),
@@ -260,7 +312,7 @@ func (d *Daemon) setupClient(client *whatsapp.Client) {
 		default:
 		}
 
-		d.log.UserMsg(msg.From, content, time.Now())
+		d.log.UserMsg(msg.From, content, time.Now(), msg.IsVoice, msg.IsImage)
 	})
 
 	d.clientMu.Lock()
@@ -577,7 +629,7 @@ func (d *Daemon) markRead(msgs []store.Message) {
 
 	for sender, ids := range bySender {
 		if err := client.MarkRead(chatJID, sender, ids); err != nil {
-			d.log.Debug("MarkRead failed: %v", err)
+			d.log.Warn("MarkRead failed: %v", err)
 		}
 	}
 }
@@ -620,10 +672,64 @@ func (d *Daemon) sendMessage(chatJID, text string) {
 		return
 	}
 
+	// Mark previous bot messages as read before sending a new one
+	d.markOldBotMessages(client, chatJID)
+
 	botPrefix := d.repoCfg.WhatsApp.BotPrefix
 	message := botPrefix + " " + text
 
-	if err := client.SendMessage(chatJID, message); err != nil {
+	msgID, err := client.SendMessage(chatJID, message)
+	if err != nil {
 		d.log.Error("Failed to send message: %v", err)
+		return
+	}
+
+	// Track this message so we can mark it as read later
+	d.botMsgMu.Lock()
+	d.botMsgIDs = append(d.botMsgIDs, msgID)
+	d.botMsgChat = chatJID
+	d.botMsgMu.Unlock()
+}
+
+// markOldBotMessages marks all tracked bot messages as read (clears old notifications).
+func (d *Daemon) markOldBotMessages(client *whatsapp.Client, chatJID string) {
+	d.botMsgMu.Lock()
+	ids := d.botMsgIDs
+	d.botMsgIDs = nil
+	d.botMsgMu.Unlock()
+
+	if len(ids) == 0 {
+		return
+	}
+
+	ownJID := client.GetJID().String()
+	if err := client.MarkRead(chatJID, ownJID, ids); err != nil {
+		d.log.Warn("MarkRead (bot msgs): %v", err)
+	}
+}
+
+// markAllBotMessages marks all tracked bot messages as read (user is engaged).
+func (d *Daemon) markAllBotMessages() {
+	d.clientMu.Lock()
+	client := d.client
+	d.clientMu.Unlock()
+
+	if client == nil {
+		return
+	}
+
+	d.botMsgMu.Lock()
+	ids := d.botMsgIDs
+	chat := d.botMsgChat
+	d.botMsgIDs = nil
+	d.botMsgMu.Unlock()
+
+	if len(ids) == 0 {
+		return
+	}
+
+	ownJID := client.GetJID().String()
+	if err := client.MarkRead(chat, ownJID, ids); err != nil {
+		d.log.Warn("MarkRead (bot msgs): %v", err)
 	}
 }

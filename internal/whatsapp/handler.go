@@ -89,16 +89,16 @@ func (c *Client) parseMessage(evt *events.Message) *Message {
 	return msg
 }
 
-// SendMessage sends a text message to a chat
-func (c *Client) SendMessage(chatJID string, text string) error {
+// SendMessage sends a text message to a chat and returns the message ID.
+func (c *Client) SendMessage(chatJID string, text string) (string, error) {
 	if !c.IsConnected() {
-		return fmt.Errorf("not connected to WhatsApp")
+		return "", fmt.Errorf("not connected to WhatsApp")
 	}
 
 	// Parse JID
 	jid, err := types.ParseJID(chatJID)
 	if err != nil {
-		return fmt.Errorf("invalid JID: %w", err)
+		return "", fmt.Errorf("invalid JID: %w", err)
 	}
 
 	// Send message
@@ -106,12 +106,12 @@ func (c *Client) SendMessage(chatJID string, text string) error {
 		Conversation: proto.String(text),
 	}
 
-	_, err = c.wac.SendMessage(context.Background(), jid, msg)
+	resp, err := c.wac.SendMessage(context.Background(), jid, msg)
 	if err != nil {
-		return fmt.Errorf("failed to send message: %w", err)
+		return "", fmt.Errorf("failed to send message: %w", err)
 	}
 
-	return nil
+	return resp.ID, nil
 }
 
 // DownloadAudio downloads a voice message and returns the local file path
