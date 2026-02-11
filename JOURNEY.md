@@ -234,3 +234,89 @@ the rest on the way out. It's a post-processing step, not an interaction.
 else, `SendImage` now uses `http.DetectContentType` to sniff the first bytes and
 pick the right mimetype automatically. If detection fails, it falls back to JPEG
 (the most common format for screenshots and photos).
+
+---
+
+## 2026-02-11 — Coding from the beach: the self-improving daemon
+
+### The setup: three daemons, one phone
+
+Picture this. You're going on vacation. Back home, your Mac has three CodeButler
+daemons running — one for your iOS app, one for your backend API, and one for the
+CodeButler repo itself. Each daemon has its own WhatsApp group, its own database,
+its own Claude sessions. Three terminals in a `while true` loop, three WhatsApp
+groups on your phone.
+
+From the beach, you message the "iOS app" group: "add haptic feedback to the
+purchase button." Claude builds it, runs the tests, sends you screenshots. You
+switch to the "API" group: "add rate limiting to the auth endpoint." Done.
+
+Then you hit a wall. You ask Claude to run the UI tests and send you the failure
+screenshots, but the images arrive in reverse order — screenshot 6 first,
+screenshot 1 last. Annoying, but not a bug in your project. It's a bug in Butler.
+
+This is where things get interesting.
+
+### The self-improvement loop
+
+You switch to the third WhatsApp group — the one connected to the CodeButler repo.
+You say: "fix the image send order, they arrive reversed." The CodeButler daemon
+running on its own codebase receives the message, Claude finds the bug (images were
+processed in reverse to keep string indices valid during removal), fixes it, creates
+a PR. You merge it from your phone.
+
+Now you need the fix to reach the other two daemons. You message the CodeButler
+group: "install the new version." Claude runs `go install`, the new binary lands
+in `$PATH`. Then you send `/exit` to all three groups.
+
+Each daemon says "Bye!", exits, and the `while true` loop restarts it with the
+fresh binary. Each one announces: "I am back. I am version 8." You go back to the
+iOS app group, ask for the screenshots again, and this time they arrive in order.
+
+The whole cycle — discover a limitation, fix it in Butler, deploy, continue working
+— happened from a phone on the beach. You never opened a laptop.
+
+### `/exit` and the respawn loop
+
+The deployment model is deliberately primitive:
+
+```bash
+while true; do codebutler; sleep 2; done
+```
+
+No systemd, no Docker, no process manager. When you want to deploy, you just need
+the process to die. The loop restarts it with whatever binary is in `$PATH`.
+
+`/exit` is the WhatsApp command that triggers this. The daemon sends "Bye!", cleans
+up the terminal, and calls `os.Exit(0)`. Two seconds later, it's back. On startup
+it announces "I am back. I am version N" — only on the initial connection, not on
+WiFi reconnects, so you don't get spammed every time the network hiccups.
+
+### Version = PR number
+
+The version number is just the PR number. PR #7 merged? Version 7. PR #12?
+Version 12. It's monotonically increasing, maps directly to a GitHub URL
+(`/pull/7`), and tells you exactly how many changes have landed.
+
+The version is baked into the binary with `go:embed`:
+
+```go
+//go:embed VERSION
+var Version string
+```
+
+This was a deliberate choice over `-ldflags`. Ldflags require the builder to pass
+the right flag — which works locally but breaks for `go install github.com/...@latest`.
+With `go:embed`, the version is part of the source. Anyone who builds the binary,
+from anywhere, gets the correct version.
+
+### Why this matters
+
+The interesting thing isn't any single feature here. It's the closed loop. When
+you're coding on a project through Butler and you run into something Butler can't
+do — maybe you need it to handle a new file format, or you want a new command, or
+the output is confusing — you don't have to stop, open a laptop, fix Butler, rebuild,
+and redeploy. You just switch to the Butler group, describe what you need, and the
+tool improves itself. Then you restart all instances and keep going.
+
+The tool and the workflow evolve together, from the same interface.
