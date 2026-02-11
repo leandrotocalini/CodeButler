@@ -50,7 +50,7 @@ type chatResponse struct {
 // Chat sends messages to the Kimi API and returns the assistant response.
 func (c *Client) Chat(ctx context.Context, messages []Message) (string, error) {
 	reqBody := chatRequest{
-		Model:    "kimi-k2",
+		Model:    "moonshot-v1-32k",
 		Messages: messages,
 	}
 
