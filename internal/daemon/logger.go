@@ -67,6 +67,7 @@ type Logger struct {
 	outMu     sync.Mutex // protects cursor management during output
 	inputMode bool       // true when terminal supports input row
 	termRows  int        // terminal height in rows
+	inputBuf  string     // current text being typed (protected by outMu)
 }
 
 func NewLogger(maxSize int) *Logger {
@@ -121,12 +122,28 @@ func (l *Logger) DrawPrompt() {
 	l.drawPromptLocked()
 }
 
-// drawPromptLocked redraws the prompt; caller must hold outMu.
+// drawPromptLocked redraws the prompt with current input text; caller must hold outMu.
 func (l *Logger) drawPromptLocked() {
 	if !l.inputMode || l.termRows == 0 {
 		return
 	}
-	fmt.Fprintf(os.Stderr, "\033[%d;1H\033[2K%s> %s", l.termRows, ansiDim, ansiReset)
+	fmt.Fprintf(os.Stderr, "\033[%d;1H\033[2K%s> %s%s", l.termRows, ansiDim, ansiReset, l.inputBuf)
+}
+
+// UpdateInput sets the current input text and redraws the prompt.
+func (l *Logger) UpdateInput(text string) {
+	l.outMu.Lock()
+	defer l.outMu.Unlock()
+	l.inputBuf = text
+	l.drawPromptLocked()
+}
+
+// ClearInput clears the input buffer and redraws the prompt.
+func (l *Logger) ClearInput() {
+	l.outMu.Lock()
+	defer l.outMu.Unlock()
+	l.inputBuf = ""
+	l.drawPromptLocked()
 }
 
 func (l *Logger) log(level LogLevel, format string, args ...interface{}) {

@@ -3,6 +3,7 @@ package whatsapp
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"sync"
 	"time"
@@ -148,7 +149,6 @@ func Connect(sessionPath string) (*Client, error) {
 			time.Sleep(100 * time.Millisecond)
 		}
 
-		fmt.Fprintln(os.Stderr, "✅ Connected to WhatsApp")
 	}
 
 	return client, nil
@@ -288,7 +288,8 @@ func (c *Client) SendPresence(chatJID string, composing bool) error {
 }
 
 // SendImage uploads and sends an image message to a chat.
-func (c *Client) SendImage(chatJID string, pngData []byte, caption string) error {
+// Mimetype is auto-detected from the image data.
+func (c *Client) SendImage(chatJID string, imgData []byte, caption string) error {
 	if !c.IsConnected() {
 		return fmt.Errorf("not connected to WhatsApp")
 	}
@@ -298,17 +299,22 @@ func (c *Client) SendImage(chatJID string, pngData []byte, caption string) error
 		return fmt.Errorf("invalid JID: %w", err)
 	}
 
-	uploadResp, err := c.wac.Upload(context.Background(), pngData, whatsmeow.MediaImage)
+	uploadResp, err := c.wac.Upload(context.Background(), imgData, whatsmeow.MediaImage)
 	if err != nil {
 		return fmt.Errorf("failed to upload image: %w", err)
 	}
 
-	fileLen := uint64(len(pngData))
+	mime := http.DetectContentType(imgData)
+	if mime == "application/octet-stream" {
+		mime = "image/jpeg" // fallback
+	}
+
+	fileLen := uint64(len(imgData))
 	imgMsg := &waProto.ImageMessage{
 		URL:           proto.String(uploadResp.URL),
 		DirectPath:    proto.String(uploadResp.DirectPath),
 		MediaKey:      uploadResp.MediaKey,
-		Mimetype:      proto.String("image/png"),
+		Mimetype:      proto.String(mime),
 		Caption:       proto.String(caption),
 		FileEncSHA256: uploadResp.FileEncSHA256,
 		FileSHA256:    uploadResp.FileSHA256,

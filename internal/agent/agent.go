@@ -65,12 +65,16 @@ const whatsAppSystemPrompt = `You are responding via WhatsApp. Important rules:
 const imageInstruction = `
 - When you see <attached-image path="...">, use the Read tool to view the image file at that path.`
 
+const sendImageInstruction = `
+- To send the user an image file, wrap the absolute path in your response: <send-image path="/absolute/path/to/file.png">optional caption</send-image>
+  You can include multiple images. Text around the tags is sent as a normal message.`
+
 func (a *Agent) Run(ctx context.Context, prompt, sessionID string) (*Result, error) {
 	ctx, cancel := context.WithTimeout(ctx, a.timeout)
 	defer cancel()
 
 	// Build system prompt dynamically — only add instructions relevant to this prompt
-	sysPrompt := whatsAppSystemPrompt
+	sysPrompt := whatsAppSystemPrompt + sendImageInstruction
 	if strings.Contains(prompt, "<attached-image") {
 		sysPrompt += imageInstruction
 	}
