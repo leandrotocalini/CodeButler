@@ -957,33 +957,48 @@ func (d *Daemon) compactSession(ctx context.Context, chatJID string) {
 var sendImageRe = regexp.MustCompile(`(?s)<send-image\s+path="([^"]+)"(?:\s*/>|>(.*?)</send-image>)`)
 
 // processResponseImages extracts <send-image> tags from the response, sends each
-// image via WhatsApp, and returns the remaining text with tags removed.
+// image via WhatsApp in order with a 1-second delay between them, and returns
+// the remaining text with all tags removed.
 func (d *Daemon) processResponseImages(chatJID, response string) string {
 	matches := sendImageRe.FindAllStringSubmatchIndex(response, -1)
 	if len(matches) == 0 {
 		return response
 	}
 
-	// Process in reverse so indices stay valid after removal
-	for i := len(matches) - 1; i >= 0; i-- {
-		m := matches[i]
+	// Collect images in document order before modifying the string
+	type pendingImage struct {
+		path    string
+		caption string
+	}
+	var images []pendingImage
+	for _, m := range matches {
 		imgPath := response[m[2]:m[3]]
 		caption := ""
 		if m[4] >= 0 {
 			caption = response[m[4]:m[5]]
 		}
+		images = append(images, pendingImage{imgPath, caption})
+	}
 
-		imgData, err := os.ReadFile(imgPath)
+	// Strip all tags (reverse order so indices stay valid)
+	for i := len(matches) - 1; i >= 0; i-- {
+		m := matches[i]
+		response = response[:m[0]] + response[m[1]:]
+	}
+
+	// Send images in order with a 1-second gap
+	for i, img := range images {
+		imgData, err := os.ReadFile(img.path)
 		if err != nil {
-			d.log.Error("send-image: read %s: %v", imgPath, err)
-			response = response[:m[0]] + response[m[1]:]
+			d.log.Error("send-image: read %s: %v", img.path, err)
 			continue
 		}
 
-		d.sendImage(chatJID, imgData, caption)
-		d.log.Info("Sent image: %s (%d bytes)", imgPath, len(imgData))
-
-		response = response[:m[0]] + response[m[1]:]
+		if i > 0 {
+			time.Sleep(1 * time.Second)
+		}
+		d.sendImage(chatJID, imgData, img.caption)
+		d.log.Info("Sent image: %s (%d bytes)", img.path, len(imgData))
 	}
 
 	return strings.TrimSpace(response)
