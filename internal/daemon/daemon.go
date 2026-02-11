@@ -1,16 +1,17 @@
 package daemon
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/leandrotocalini/CodeButler/internal/agent"
@@ -18,6 +19,7 @@ import (
 	"github.com/leandrotocalini/CodeButler/internal/store"
 	"github.com/leandrotocalini/CodeButler/internal/transcribe"
 	"github.com/leandrotocalini/CodeButler/internal/whatsapp"
+	"golang.org/x/term"
 )
 
 const (
@@ -151,8 +153,13 @@ func (d *Daemon) Run() error {
 	go d.compactWatchdog(ctx)
 
 	// Start TUI input if terminal supports it
+	var inputDone chan struct{}
 	if d.log.InputMode() {
-		go d.startInput(ctx)
+		inputDone = make(chan struct{})
+		go func() {
+			d.startInput(ctx)
+			close(inputDone)
+		}()
 	}
 
 	// Wait for signal
@@ -162,6 +169,14 @@ func (d *Daemon) Run() error {
 
 	d.log.Status("Received %s, shutting down...", sig)
 	cancel()
+
+	// Wait for input goroutine to restore terminal state before Cleanup writes to stderr
+	if inputDone != nil {
+		select {
+		case <-inputDone:
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
 
 	d.clientMu.Lock()
 	if d.client != nil {
@@ -641,6 +656,9 @@ func (d *Daemon) processBatch(ctx context.Context, msgs []store.Message) {
 		}
 		response = strings.TrimSpace(response)
 
+		// Extract and send any <send-image> tags as WhatsApp images
+		response = d.processResponseImages(chatJID, response)
+
 		// Send partial or final response
 		if response != "" {
 			preview := response
@@ -910,59 +928,201 @@ func (d *Daemon) compactSession(ctx context.Context, chatJID string) {
 	d.log.Status("Session compacted ($%.2f)", result.CostUSD)
 }
 
-// startInput reads lines from stdin and processes them as local messages.
+// sendImageRe matches <send-image path="...">caption</send-image> or self-closing <send-image path="..." />.
+var sendImageRe = regexp.MustCompile(`(?s)<send-image\s+path="([^"]+)"(?:\s*/>|>(.*?)</send-image>)`)
+
+// processResponseImages extracts <send-image> tags from the response, sends each
+// image via WhatsApp, and returns the remaining text with tags removed.
+func (d *Daemon) processResponseImages(chatJID, response string) string {
+	matches := sendImageRe.FindAllStringSubmatchIndex(response, -1)
+	if len(matches) == 0 {
+		return response
+	}
+
+	// Process in reverse so indices stay valid after removal
+	for i := len(matches) - 1; i >= 0; i-- {
+		m := matches[i]
+		imgPath := response[m[2]:m[3]]
+		caption := ""
+		if m[4] >= 0 {
+			caption = response[m[4]:m[5]]
+		}
+
+		imgData, err := os.ReadFile(imgPath)
+		if err != nil {
+			d.log.Error("send-image: read %s: %v", imgPath, err)
+			response = response[:m[0]] + response[m[1]:]
+			continue
+		}
+
+		d.sendImage(chatJID, imgData, caption)
+		d.log.Info("Sent image: %s (%d bytes)", imgPath, len(imgData))
+
+		response = response[:m[0]] + response[m[1]:]
+	}
+
+	return strings.TrimSpace(response)
+}
+
+// startInput reads from stdin in raw mode and processes input as local messages.
+// Raw mode disables terminal echo and line buffering, giving us full control
+// over what appears on screen — typed characters are echoed at the prompt row
+// via the Logger, preventing them from corrupting the scroll region.
 func (d *Daemon) startInput(ctx context.Context) {
-	scanner := bufio.NewScanner(os.Stdin)
-	for scanner.Scan() {
+	fd := int(os.Stdin.Fd())
+	oldState, err := term.MakeRaw(fd)
+	if err != nil {
+		d.log.Warn("Raw mode unavailable: %v", err)
+		return
+	}
+	defer term.Restore(fd, oldState)
+
+	var line []byte
+
+	// Reader goroutine — reads stdin in background so we can select on ctx.Done
+	readCh := make(chan []byte, 1)
+	go func() {
+		buf := make([]byte, 256)
+		for {
+			n, err := os.Stdin.Read(buf)
+			if n > 0 {
+				data := make([]byte, n)
+				copy(data, buf[:n])
+				readCh <- data
+			}
+			if err != nil {
+				close(readCh)
+				return
+			}
+		}
+	}()
+
+	for {
 		select {
 		case <-ctx.Done():
 			return
-		default:
-		}
+		case data, ok := <-readCh:
+			if !ok {
+				return
+			}
 
-		text := strings.TrimSpace(scanner.Text())
-		if text == "" {
-			d.log.DrawPrompt()
-			continue
-		}
+			i := 0
+			for i < len(data) {
+				b := data[i]
 
-		chatJID := d.repoCfg.WhatsApp.GroupJID
-		botPrefix := d.repoCfg.WhatsApp.BotPrefix
+				switch {
+				case b == 3: // Ctrl+C
+					term.Restore(fd, oldState)
+					p, _ := os.FindProcess(os.Getpid())
+					p.Signal(syscall.SIGINT)
+					return
 
-		// Echo to WhatsApp so the conversation is visible there
-		d.clientMu.Lock()
-		client := d.client
-		d.clientMu.Unlock()
-		if client != nil && chatJID != "" {
-			echoMsg := fmt.Sprintf("%s [TUI] %s", botPrefix, text)
-			if _, err := client.SendMessage(chatJID, echoMsg); err != nil {
-				d.log.Warn("TUI echo to WhatsApp failed: %v", err)
+				case b == 4: // Ctrl+D — quit if line empty
+					if len(line) == 0 {
+						term.Restore(fd, oldState)
+						p, _ := os.FindProcess(os.Getpid())
+						p.Signal(syscall.SIGINT)
+						return
+					}
+					i++
+
+				case b == 13 || b == 10: // Enter
+					text := strings.TrimSpace(string(line))
+					line = nil
+					d.log.ClearInput()
+					if text != "" {
+						d.handleTUIInput(text)
+					}
+					i++
+
+				case b == 21: // Ctrl+U — clear line
+					line = nil
+					d.log.UpdateInput("")
+					i++
+
+				case b == 23: // Ctrl+W — delete word
+					s := strings.TrimRight(string(line), " ")
+					if idx := strings.LastIndex(s, " "); idx >= 0 {
+						line = []byte(s[:idx+1])
+					} else {
+						line = nil
+					}
+					d.log.UpdateInput(string(line))
+					i++
+
+				case b == 127 || b == 8: // Backspace
+					if len(line) > 0 {
+						_, size := utf8.DecodeLastRune(line)
+						line = line[:len(line)-size]
+						d.log.UpdateInput(string(line))
+					}
+					i++
+
+				case b == 27: // ESC — skip escape sequences (arrow keys, etc.)
+					i++
+					if i < len(data) && data[i] == '[' {
+						i++
+						for i < len(data) && ((data[i] >= '0' && data[i] <= '9') || data[i] == ';') {
+							i++
+						}
+						if i < len(data) {
+							i++ // skip final byte (letter or ~)
+						}
+					}
+
+				case b >= 32: // Printable character (ASCII + UTF-8 multi-byte)
+					rn, size := utf8.DecodeRune(data[i:])
+					if rn != utf8.RuneError && size > 0 {
+						line = append(line, data[i:i+size]...)
+						i += size
+					} else {
+						i++ // skip invalid byte
+					}
+					d.log.UpdateInput(string(line))
+
+				default:
+					i++ // skip unknown control characters
+				}
 			}
 		}
+	}
+}
 
-		// Insert into store as a regular message
-		msg := store.Message{
-			ID:        uuid.New().String(),
-			From:      "TUI",
-			Chat:      chatJID,
-			Content:   text,
-			Timestamp: time.Now().Format(time.RFC3339),
+// handleTUIInput processes a submitted line from TUI input.
+func (d *Daemon) handleTUIInput(text string) {
+	chatJID := d.repoCfg.WhatsApp.GroupJID
+	botPrefix := d.repoCfg.WhatsApp.BotPrefix
+
+	// Echo to WhatsApp so the conversation is visible there
+	d.clientMu.Lock()
+	client := d.client
+	d.clientMu.Unlock()
+	if client != nil && chatJID != "" {
+		echoMsg := fmt.Sprintf("%s [TUI] %s", botPrefix, text)
+		if _, err := client.SendMessage(chatJID, echoMsg); err != nil {
+			d.log.Warn("TUI echo to WhatsApp failed: %v", err)
 		}
-		if err := d.store.Insert(msg); err != nil {
-			d.log.Error("Failed to store TUI message: %v", err)
-			d.log.DrawPrompt()
-			continue
-		}
+	}
 
-		// Log and notify poll loop
-		d.log.UserMsg("TUI", text, time.Now(), false, false)
-		d.signalActivity()
+	// Insert into store as a regular message
+	msg := store.Message{
+		ID:        uuid.New().String(),
+		From:      "TUI",
+		Chat:      chatJID,
+		Content:   text,
+		Timestamp: time.Now().Format(time.RFC3339),
+	}
+	if err := d.store.Insert(msg); err != nil {
+		d.log.Error("Failed to store TUI message: %v", err)
+		return
+	}
 
-		select {
-		case d.msgNotify <- struct{}{}:
-		default:
-		}
+	// Log and notify poll loop
+	d.log.UserMsg("TUI", text, time.Now(), false, false)
+	d.signalActivity()
 
-		d.log.DrawPrompt()
+	select {
+	case d.msgNotify <- struct{}{}:
+	default:
 	}
 }
