@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"regexp"
@@ -1001,9 +1002,9 @@ func (d *Daemon) compactSession(ctx context.Context, chatJID string) {
 // sendImageRe matches <send-image path="...">caption</send-image> or self-closing <send-image path="..." />.
 var sendImageRe = regexp.MustCompile(`(?s)<send-image\s+path="([^"]+)"(?:\s*/>|>(.*?)</send-image>)`)
 
-// processResponseImages extracts <send-image> tags from the response, sends each
-// image via WhatsApp in order with a 1-second delay between them, and returns
-// the remaining text with all tags removed.
+// processResponseImages extracts <send-image> tags from the response.
+// Single image: sent as a WhatsApp image. Multiple images: combined into
+// a slideshow video (5s per image) via ffmpeg and sent as a video.
 func (d *Daemon) processResponseImages(chatJID, response string) string {
 	matches := sendImageRe.FindAllStringSubmatchIndex(response, -1)
 	if len(matches) == 0 {
@@ -1011,18 +1012,14 @@ func (d *Daemon) processResponseImages(chatJID, response string) string {
 	}
 
 	// Collect images in document order before modifying the string
-	type pendingImage struct {
-		path    string
-		caption string
-	}
-	var images []pendingImage
+	var images []responseImage
 	for _, m := range matches {
 		imgPath := response[m[2]:m[3]]
 		caption := ""
 		if m[4] >= 0 {
 			caption = response[m[4]:m[5]]
 		}
-		images = append(images, pendingImage{imgPath, caption})
+		images = append(images, responseImage{imgPath, caption})
 	}
 
 	// Strip all tags (reverse order so indices stay valid)
@@ -1031,22 +1028,136 @@ func (d *Daemon) processResponseImages(chatJID, response string) string {
 		response = response[:m[0]] + response[m[1]:]
 	}
 
-	// Send images in order with a 1-second gap
+	if len(images) == 1 {
+		// Single image — send as image
+		imgData, err := os.ReadFile(images[0].path)
+		if err != nil {
+			d.log.Error("send-image: read %s: %v", images[0].path, err)
+		} else {
+			d.sendImage(chatJID, imgData, images[0].caption)
+			d.log.Info("Sent image: %s (%d bytes)", images[0].path, len(imgData))
+		}
+	} else {
+		// Multiple images — create slideshow video
+		d.sendImageSlideshow(chatJID, images)
+	}
+
+	return strings.TrimSpace(response)
+}
+
+// sendImageSlideshow creates a video slideshow from multiple images using ffmpeg
+// (5 seconds per image) and sends it as a WhatsApp video.
+type responseImage struct {
+	path    string
+	caption string
+}
+
+func (d *Daemon) sendImageSlideshow(chatJID string, images []responseImage) {
+	tmpDir := config.TmpPath(d.repoDir)
+	os.MkdirAll(tmpDir, 0755)
+
+	// Build ffmpeg concat input file
+	inputFile := filepath.Join(tmpDir, fmt.Sprintf("slideshow-input-%s.txt", uuid.New().String()[:8]))
+	outputFile := filepath.Join(tmpDir, fmt.Sprintf("slideshow-%s.mp4", uuid.New().String()[:8]))
+
+	var inputContent strings.Builder
+	for _, img := range images {
+		// ffmpeg concat format: file 'path'\nduration 5\n
+		inputContent.WriteString(fmt.Sprintf("file '%s'\nduration 1\n", img.path))
+	}
+	// Repeat last image to ensure it shows for the full duration
+	if len(images) > 0 {
+		inputContent.WriteString(fmt.Sprintf("file '%s'\n", images[len(images)-1].path))
+	}
+
+	if err := os.WriteFile(inputFile, []byte(inputContent.String()), 0644); err != nil {
+		d.log.Error("slideshow: write input file: %v", err)
+		d.sendImagesFallback(chatJID, images)
+		return
+	}
+	defer os.Remove(inputFile)
+
+	// Run ffmpeg
+	d.log.Info("Creating slideshow from %d images...", len(images))
+	cmd := exec.Command("ffmpeg",
+		"-y",
+		"-f", "concat",
+		"-safe", "0",
+		"-i", inputFile,
+		"-vf", "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:black",
+		"-c:v", "libx264",
+		"-r", "30",
+		"-pix_fmt", "yuv420p",
+		"-preset", "fast",
+		outputFile,
+	)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		d.log.Error("slideshow: ffmpeg failed: %v\n%s", err, string(output))
+		// Fallback: send images individually
+		d.sendImagesFallback(chatJID, images)
+		return
+	}
+	defer os.Remove(outputFile)
+
+	videoData, err := os.ReadFile(outputFile)
+	if err != nil {
+		d.log.Error("slideshow: read output: %v", err)
+		d.sendImagesFallback(chatJID, images)
+		return
+	}
+
+	// Build caption from all image captions
+	var captions []string
+	for i, img := range images {
+		if img.caption != "" {
+			captions = append(captions, fmt.Sprintf("%d. %s", i+1, img.caption))
+		}
+	}
+	caption := strings.Join(captions, "\n")
+	if caption == "" {
+		caption = fmt.Sprintf("%d images", len(images))
+	}
+
+	d.sendVideo(chatJID, videoData, caption)
+	d.log.Info("Sent slideshow video: %d images, %d bytes", len(images), len(videoData))
+}
+
+// sendImagesFallback sends images individually (used when ffmpeg is unavailable).
+func (d *Daemon) sendImagesFallback(chatJID string, images []responseImage) {
+	d.log.Warn("Falling back to individual image sends")
 	for i, img := range images {
 		imgData, err := os.ReadFile(img.path)
 		if err != nil {
 			d.log.Error("send-image: read %s: %v", img.path, err)
 			continue
 		}
-
 		if i > 0 {
 			time.Sleep(1 * time.Second)
 		}
 		d.sendImage(chatJID, imgData, img.caption)
 		d.log.Info("Sent image: %s (%d bytes)", img.path, len(imgData))
 	}
+}
 
-	return strings.TrimSpace(response)
+// sendVideo sends a video message to WhatsApp with the bot prefix.
+func (d *Daemon) sendVideo(chatJID string, videoData []byte, caption string) {
+	d.clientMu.Lock()
+	client := d.client
+	d.clientMu.Unlock()
+
+	if client == nil {
+		d.log.Error("Can't send video: WhatsApp not connected")
+		return
+	}
+
+	botPrefix := d.repoCfg.WhatsApp.BotPrefix
+	fullCaption := botPrefix + " " + caption
+
+	if err := client.SendVideo(chatJID, videoData, fullCaption); err != nil {
+		d.log.Error("Failed to send video: %v", err)
+	}
 }
 
 // startInput reads from stdin in raw mode and processes input as local messages.

@@ -333,6 +333,46 @@ func (c *Client) SendImage(chatJID string, imgData []byte, caption string) error
 	return nil
 }
 
+// SendVideo uploads and sends a video message to a chat.
+func (c *Client) SendVideo(chatJID string, videoData []byte, caption string) error {
+	if !c.IsConnected() {
+		return fmt.Errorf("not connected to WhatsApp")
+	}
+
+	jid, err := types.ParseJID(chatJID)
+	if err != nil {
+		return fmt.Errorf("invalid JID: %w", err)
+	}
+
+	uploadResp, err := c.wac.Upload(context.Background(), videoData, whatsmeow.MediaVideo)
+	if err != nil {
+		return fmt.Errorf("failed to upload video: %w", err)
+	}
+
+	fileLen := uint64(len(videoData))
+	vidMsg := &waProto.VideoMessage{
+		URL:           proto.String(uploadResp.URL),
+		DirectPath:    proto.String(uploadResp.DirectPath),
+		MediaKey:      uploadResp.MediaKey,
+		Mimetype:      proto.String("video/mp4"),
+		Caption:       proto.String(caption),
+		FileEncSHA256: uploadResp.FileEncSHA256,
+		FileSHA256:    uploadResp.FileSHA256,
+		FileLength:    &fileLen,
+	}
+
+	msg := &waProto.Message{
+		VideoMessage: vidMsg,
+	}
+
+	_, err = c.wac.SendMessage(context.Background(), jid, msg)
+	if err != nil {
+		return fmt.Errorf("failed to send video: %w", err)
+	}
+
+	return nil
+}
+
 // ConnectWithQR returns the client and QR channel for web-based setup.
 func ConnectWithQR(sessionPath string) (*Client, <-chan whatsmeow.QRChannelItem, error) {
 	if err := os.MkdirAll(sessionPath, 0755); err != nil {
