@@ -129,3 +129,8 @@ go test ./...                                # run tests
 ```
 
 All code and comments are in English. PRs only to `main` (direct push disabled).
+
+## Documentation
+
+- `JOURNEY.md` — Detailed log of architecture decisions, features, and reasoning.
+  Use `/self-document` to add new entries after implementing features.

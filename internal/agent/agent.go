@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/leandrotocalini/CodeButler/internal/config"
@@ -29,7 +30,7 @@ type Agent struct {
 func New(workDir string, cfg config.ClaudeConfig) *Agent {
 	maxTurns := cfg.MaxTurns
 	if maxTurns == 0 {
-		maxTurns = 10
+		maxTurns = 5
 	}
 	timeout := time.Duration(cfg.Timeout) * time.Minute
 	if timeout == 0 {
@@ -48,21 +49,38 @@ func New(workDir string, cfg config.ClaudeConfig) *Agent {
 	}
 }
 
+// ContinuationMarker is the string Claude appends when it hits max turns and has more work to do.
+const ContinuationMarker = "[CONTINUING]"
+
+// NeedInputMarker is the string Claude appends when it needs user confirmation or input to proceed.
+const NeedInputMarker = "[NEED_USER_INPUT]"
+
 const whatsAppSystemPrompt = `You are responding via WhatsApp. Important rules:
 - Do NOT use EnterPlanMode. Present plans as normal messages instead.
 - When proposing a plan or architecture, ALWAYS end with: "Reply *yes* to implement, or describe the changes you want."
-- ALWAYS include a text response, even when you only performed tool calls. Never return empty output.`
+- ALWAYS include a text response, even when you only performed tool calls. Never return empty output.
+- You have a limited number of tool-use turns per invocation. If you are stopped because you hit the turn limit and still have more work to do, summarize what you accomplished so far and what you will do next, then end your message with exactly: ` + ContinuationMarker + `
+- When you need user confirmation, a decision, or any input before you can proceed, end your message with exactly: ` + NeedInputMarker
+
+const imageInstruction = `
+- When you see <attached-image path="...">, use the Read tool to view the image file at that path.`
 
 func (a *Agent) Run(ctx context.Context, prompt, sessionID string) (*Result, error) {
 	ctx, cancel := context.WithTimeout(ctx, a.timeout)
 	defer cancel()
+
+	// Build system prompt dynamically — only add instructions relevant to this prompt
+	sysPrompt := whatsAppSystemPrompt
+	if strings.Contains(prompt, "<attached-image") {
+		sysPrompt += imageInstruction
+	}
 
 	args := []string{
 		"-p", prompt,
 		"--output-format", "json",
 		"--max-turns", fmt.Sprintf("%d", a.maxTurns),
 		"--permission-mode", a.permissionMode,
-		"--append-system-prompt", whatsAppSystemPrompt,
+		"--append-system-prompt", sysPrompt,
 	}
 
 	if sessionID != "" {
