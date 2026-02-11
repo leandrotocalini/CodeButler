@@ -1062,8 +1062,8 @@ func (d *Daemon) sendImageSlideshow(chatJID string, images []responseImage) {
 
 	var inputContent strings.Builder
 	for _, img := range images {
-		// ffmpeg concat format: file 'path'\nduration 5\n
-		inputContent.WriteString(fmt.Sprintf("file '%s'\nduration 5\n", img.path))
+		// ffmpeg concat format: file 'path'\nduration N\n
+		inputContent.WriteString(fmt.Sprintf("file '%s'\nduration 1\n", img.path))
 	}
 	// Repeat last image to ensure it shows for the full duration
 	if len(images) > 0 {
