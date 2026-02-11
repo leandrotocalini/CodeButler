@@ -3,9 +3,10 @@ package config
 // RepoConfig lives in <repo>/.codebutler/config.json
 // Everything is per-repo: WhatsApp session, group, Claude settings.
 type RepoConfig struct {
-	WhatsApp WhatsAppConfig `json:"whatsapp"`
-	Claude   ClaudeConfig   `json:"claude"`
-	OpenAI   OpenAIConfig   `json:"openai,omitempty"`
+	WhatsApp  WhatsAppConfig  `json:"whatsapp"`
+	Claude    ClaudeConfig    `json:"claude"`
+	OpenAI    OpenAIConfig    `json:"openai,omitempty"`
+	Moonshot  MoonshotConfig  `json:"moonshot,omitempty"`
 }
 
 type WhatsAppConfig struct {
@@ -22,4 +23,8 @@ type ClaudeConfig struct {
 
 type OpenAIConfig struct {
 	APIKey string `json:"apiKey"` // for Whisper transcription
+}
+
+type MoonshotConfig struct {
+	APIKey string `json:"apiKey"` // for Kimi draft mode
 }

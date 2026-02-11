@@ -320,3 +320,107 @@ and redeploy. You just switch to the Butler group, describe what you need, and t
 tool improves itself. Then you restart all instances and keep going.
 
 The tool and the workflow evolve together, from the same interface.
+
+---
+
+## 2026-02-11 — Cheap thinking before expensive doing
+
+### The cost of a messy prompt
+
+Here's something that happens when you're coding from your phone: you send Claude
+a stream-of-consciousness message. "Add a thing where when I write stuff it doesn't
+go to Claude yet, like a draft, and then some AI cleans it up, and then I choose
+whether to send it or not." Claude Opus receives this, parses it, thinks about it,
+asks clarifying questions, and burns through tokens — all because the prompt was
+sloppy. The intent was clear, but the expression wasn't.
+
+This is expensive. Claude Opus costs real money per token, and most of that cost
+is in the *understanding* phase — figuring out what you actually want. If the prompt
+were clearer, Claude would spend fewer turns asking questions and more turns building.
+
+The idea: what if a cheaper, faster model could clean up your thinking *before*
+Claude sees it? You brain-dump freely, a lightweight model restructures it into a
+proper prompt, and Claude gets a clean, actionable request on the first try.
+
+### Draft mode: a buffer between you and Claude
+
+The implementation is `/draft-mode` — a WhatsApp command that creates a buffer.
+While draft mode is active, your messages accumulate locally. Nothing goes to Claude.
+You can ramble, contradict yourself, think out loud. The daemon just stores each
+message in a list.
+
+When you're done thinking, you send `/draft-done`. The daemon concatenates all your
+messages and sends them to Kimi (Moonshot AI's model, via their OpenAI-compatible
+API at `api.moonshot.ai`). Kimi's system prompt is focused: "You're a prompt
+engineer. Take these raw notes and turn them into a clear, structured, actionable
+prompt for a coding assistant. Preserve intent, eliminate ambiguity, output only the
+refined prompt."
+
+Kimi responds with the cleaned-up version, and Butler presents it with three options:
+
+> **1** — Send to Claude
+> **2** — Iterate (give feedback, Kimi refines again)
+> **3** — Discard
+
+Option 2 is the interesting one. If the refinement missed something or went in the
+wrong direction, you send feedback. Kimi gets the full conversation history — the
+original draft, its first attempt, and your correction — and produces a new version.
+You can iterate as many times as you want. When you're satisfied, option 1 injects
+the refined prompt into the message store as if you'd typed it directly, and the
+daemon's normal poll loop picks it up and sends it to Claude.
+
+### Why Kimi and not Claude itself?
+
+The obvious question: why not just use Claude to refine the prompt and then use
+Claude again to execute it? Two reasons.
+
+First, cost. Moonshot's `moonshot-v1-32k` model costs a fraction of what Claude
+Opus charges. The refinement step is pure text transformation — no tool use, no
+file access, no code execution. You don't need the most powerful model in the world
+to restructure a paragraph.
+
+Second, separation of concerns. The refinement model doesn't need repo context,
+Claude sessions, or permission modes. It's a stateless HTTP call with a system
+prompt and user text. Keeping it outside the Claude pipeline means draft mode
+doesn't touch sessions, doesn't affect the conversation state machine, and can't
+accidentally trigger tools or file changes.
+
+### The model name saga
+
+An amusing debugging story: the first version used `kimi-k2` as the model name,
+because that's what most documentation sites listed. The API returned a 404:
+"Not found the model kimi-k2 or Permission denied." Turns out the Moonshot API
+doesn't use the marketing model names. The actual model identifiers are
+`moonshot-v1-8k`, `moonshot-v1-32k`, and `moonshot-v1-128k` — named after context
+window size, not the model generation. The 32k variant is plenty for prompt
+refinement.
+
+### Architecture: following the pattern
+
+Draft mode follows the same pattern as `/create-image`: a handler struct with a
+mutex-protected map of pending states per chat, command detection functions checked
+before messages reach the normal pipeline, and numeric confirmations (1/2/3) that
+are intercepted only when there's a pending state for that chat.
+
+The key integration point is in `setupClient()`, where incoming messages are
+filtered. Draft mode checks happen after image commands but before messages reach
+the store. If draft mode is active, messages are accumulated instead of persisted —
+they never enter the queue that feeds Claude. This is important: draft messages
+don't trigger the poll loop, don't affect the conversation state machine, and don't
+show up as pending messages. They exist only in memory until the user decides what
+to do with them.
+
+### Voice messages in draft mode: an ordering bug
+
+The first version had a subtle bug: voice messages sent during draft mode wouldn't
+get transcribed. The reason was the message processing order in `setupClient()`.
+Voice transcription happened *after* the draft mode interceptor, so when the draft
+check saw an incoming voice message, it accumulated the raw audio placeholder
+instead of the transcribed text.
+
+The fix was to move voice transcription earlier in the pipeline — right after the
+command checks but before draft mode. Now the flow is: filter commands → transcribe
+audio → check draft mode → normal pipeline. This means voice notes in draft mode
+arrive as clean text, exactly like typed messages. The same Whisper transcription
+that works in normal mode works in draft mode, because the draft handler never
+sees the difference — it just receives a string.
