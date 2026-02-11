@@ -409,3 +409,18 @@ they never enter the queue that feeds Claude. This is important: draft messages
 don't trigger the poll loop, don't affect the conversation state machine, and don't
 show up as pending messages. They exist only in memory until the user decides what
 to do with them.
+
+### Voice messages in draft mode: an ordering bug
+
+The first version had a subtle bug: voice messages sent during draft mode wouldn't
+get transcribed. The reason was the message processing order in `setupClient()`.
+Voice transcription happened *after* the draft mode interceptor, so when the draft
+check saw an incoming voice message, it accumulated the raw audio placeholder
+instead of the transcribed text.
+
+The fix was to move voice transcription earlier in the pipeline — right after the
+command checks but before draft mode. Now the flow is: filter commands → transcribe
+audio → check draft mode → normal pipeline. This means voice notes in draft mode
+arrive as clean text, exactly like typed messages. The same Whisper transcription
+that works in normal mode works in draft mode, because the draft handler never
+sees the difference — it just receives a string.
