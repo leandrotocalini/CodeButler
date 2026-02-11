@@ -280,57 +280,9 @@ func (d *Daemon) setupClient(client *whatsapp.Client) {
 			go d.HandleImageConfirmation(msg)
 			return
 		}
-		// Intercept /draft-mode command
-		if IsDraftModeCommand(msg.Content) {
-			go d.StartDraft(msg.Chat)
-			return
-		}
-		// Intercept /draft-done command
-		if IsDraftDoneCommand(msg.Content) {
-			go d.FinishDraft(msg.Chat)
-			return
-		}
-		// Intercept /draft-discard command
-		if IsDraftDiscardCommand(msg.Content) {
-			go d.DiscardDraft(msg.Chat)
-			return
-		}
-		// Intercept draft confirmation (1/2/3) when Kimi has refined a draft
-		if d.draftHandler.IsDraftConfirmation(msg.Chat, msg.Content) {
-			go d.HandleDraftConfirmation(msg.Chat, msg.Content)
-			return
-		}
-		// In draft mode: accumulate messages instead of sending to Claude
-		if d.draftHandler.IsInDraftMode(msg.Chat) {
-			// Check if Kimi already refined and user is iterating (has history)
-			d.draftHandler.mu.Lock()
-			state := d.draftHandler.pending[msg.Chat]
-			hasHistory := state != nil && len(state.history) > 0
-			d.draftHandler.mu.Unlock()
-
-			if hasHistory {
-				// User is providing feedback for iteration
-				go d.HandleDraftIteration(msg.Chat, msg.Content)
-			} else {
-				// Still accumulating raw messages
-				d.AccumulateDraft(msg.Chat, msg.Content)
-			}
-			return
-		}
-
-		// User is engaged — mark old bot messages as read
-		d.markAllBotMessages()
-
-		// Mark as read immediately so the sender sees blue ticks
-		if msg.ID != "" {
-			if err := client.MarkRead(msg.Chat, msg.From, []string{msg.ID}); err != nil {
-				d.log.Warn("MarkRead failed: %v", err)
-			}
-		}
-
+		// Transcribe voice messages early so draft mode and all handlers
+		// receive the transcribed text instead of raw audio references.
 		content := msg.Content
-
-		// Transcribe voice messages
 		if msg.IsVoice {
 			apiKey := d.repoCfg.OpenAI.APIKey
 			if apiKey == "" {
@@ -358,6 +310,54 @@ func (d *Daemon) setupClient(client *whatsapp.Client) {
 					}
 					os.Remove(audioPath)
 				}
+			}
+		}
+
+		// Intercept /draft-mode command
+		if IsDraftModeCommand(content) {
+			go d.StartDraft(msg.Chat)
+			return
+		}
+		// Intercept /draft-done command
+		if IsDraftDoneCommand(content) {
+			go d.FinishDraft(msg.Chat)
+			return
+		}
+		// Intercept /draft-discard command
+		if IsDraftDiscardCommand(content) {
+			go d.DiscardDraft(msg.Chat)
+			return
+		}
+		// Intercept draft confirmation (1/2/3) when Kimi has refined a draft
+		if d.draftHandler.IsDraftConfirmation(msg.Chat, content) {
+			go d.HandleDraftConfirmation(msg.Chat, content)
+			return
+		}
+		// In draft mode: accumulate messages instead of sending to Claude
+		if d.draftHandler.IsInDraftMode(msg.Chat) {
+			// Check if Kimi already refined and user is iterating (has history)
+			d.draftHandler.mu.Lock()
+			state := d.draftHandler.pending[msg.Chat]
+			hasHistory := state != nil && len(state.history) > 0
+			d.draftHandler.mu.Unlock()
+
+			if hasHistory {
+				// User is providing feedback for iteration
+				go d.HandleDraftIteration(msg.Chat, content)
+			} else {
+				// Still accumulating raw messages
+				d.AccumulateDraft(msg.Chat, content)
+			}
+			return
+		}
+
+		// User is engaged — mark old bot messages as read
+		d.markAllBotMessages()
+
+		// Mark as read immediately so the sender sees blue ticks
+		if msg.ID != "" {
+			if err := client.MarkRead(msg.Chat, msg.From, []string{msg.ID}); err != nil {
+				d.log.Warn("MarkRead failed: %v", err)
 			}
 		}
 
