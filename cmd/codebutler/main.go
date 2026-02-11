@@ -21,8 +21,8 @@ import (
 //go:embed templates/setup.html
 var templates embed.FS
 
-// Version is set at build time via -ldflags -X main.Version=...
-var Version = "dev"
+//go:embed VERSION
+var Version string
 
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
@@ -85,7 +85,7 @@ func main() {
 		fmt.Println()
 	}
 
-	d := daemon.New(repoCfg, repoDir, Version)
+	d := daemon.New(repoCfg, repoDir, strings.TrimSpace(Version))
 	if err := d.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "❌ Daemon error: %v\n", err)
 		os.Exit(1)
