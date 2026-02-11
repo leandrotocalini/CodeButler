@@ -81,12 +81,16 @@ type Daemon struct {
 	// Web server
 	webPort   int
 	startTime time.Time
+
+	// Version string, set at build time
+	version string
 }
 
-func New(repoCfg *config.RepoConfig, repoDir string) *Daemon {
+func New(repoCfg *config.RepoConfig, repoDir, version string) *Daemon {
 	return &Daemon{
 		repoCfg:        repoCfg,
 		repoDir:        repoDir,
+		version:        version,
 		log:            NewLogger(500),
 		imgHandler:     newImageCommandHandler(),
 		msgNotify:      make(chan struct{}, 1),
@@ -208,6 +212,10 @@ func (d *Daemon) connectWhatsApp() error {
 
 		d.setupClient(client)
 		d.log.Status("WhatsApp: connected")
+
+		// Announce startup (only on initial connect, not reconnects)
+		d.sendMessage(d.repoCfg.WhatsApp.GroupJID, fmt.Sprintf("I am back. I am version %s", d.version))
+
 		return nil
 	}
 	return fmt.Errorf("unreachable")
@@ -243,6 +251,11 @@ func (d *Daemon) setupClient(client *whatsapp.Client) {
 			return
 		}
 
+		// Intercept /exit command
+		if isExitCommand(msg.Content) {
+			d.handleExit(msg.Chat)
+			return
+		}
 		// Intercept /help command
 		if isHelpCommand(msg.Content) {
 			go d.handleHelp(msg.Chat)
@@ -763,15 +776,27 @@ func isCleanSessionCommand(text string) bool {
 	return cmd == "/cleanSession" || cmd == "/cleansession"
 }
 
+func isExitCommand(text string) bool {
+	return strings.TrimSpace(text) == "/exit"
+}
+
 func (d *Daemon) handleHelp(chatJID string) {
 	help := "*Butler Commands*\n\n" +
 		"/help — Show this message\n" +
+		"/exit — Restart the daemon\n" +
 		"/cleanSession — Clear session and context (fresh start)\n" +
 		"/create-image <prompt> — Generate an image\n" +
 		"/create-image <prompt> <url> — Edit image from URL\n" +
 		"Photo + caption /create-image <prompt> — Edit attached image\n\n" +
 		"All other /commands (/compact, /new, /think, etc.) and messages are passed directly to Claude."
 	d.sendMessage(chatJID, help)
+}
+
+func (d *Daemon) handleExit(chatJID string) {
+	d.sendMessage(chatJID, "Bye!")
+	d.log.Status("Exit requested, shutting down...")
+	d.log.Cleanup()
+	os.Exit(0)
 }
 
 func (d *Daemon) handleCleanSession(chatJID string) {
