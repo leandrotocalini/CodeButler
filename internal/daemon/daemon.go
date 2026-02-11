@@ -81,12 +81,16 @@ type Daemon struct {
 	// Web server
 	webPort   int
 	startTime time.Time
+
+	// Version string, set at build time
+	version string
 }
 
-func New(repoCfg *config.RepoConfig, repoDir string) *Daemon {
+func New(repoCfg *config.RepoConfig, repoDir, version string) *Daemon {
 	return &Daemon{
 		repoCfg:        repoCfg,
 		repoDir:        repoDir,
+		version:        version,
 		log:            NewLogger(500),
 		imgHandler:     newImageCommandHandler(),
 		msgNotify:      make(chan struct{}, 1),
@@ -210,7 +214,7 @@ func (d *Daemon) connectWhatsApp() error {
 		d.log.Status("WhatsApp: connected")
 
 		// Announce startup (only on initial connect, not reconnects)
-		d.sendMessage(d.repoCfg.WhatsApp.GroupJID, "I am back")
+		d.sendMessage(d.repoCfg.WhatsApp.GroupJID, fmt.Sprintf("I am back. I am version %s", d.version))
 
 		return nil
 	}
