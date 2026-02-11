@@ -66,6 +66,7 @@ func main() {
 	}
 
 	// Check for missing optional config
+	needSave := false
 	if repoCfg.OpenAI.APIKey == "" {
 		fmt.Println("⚙️  OpenAI API key not configured (needed for voice messages)")
 		fmt.Print("   Enter key (or press Enter to skip): ")
@@ -74,15 +75,34 @@ func main() {
 		key := strings.TrimSpace(scanner.Text())
 		if key != "" {
 			repoCfg.OpenAI.APIKey = key
-			if err := config.SaveRepo(repoDir, repoCfg); err != nil {
-				fmt.Fprintf(os.Stderr, "⚠️  Failed to save config: %v\n", err)
-			} else {
-				fmt.Println("   ✅ OpenAI key saved")
-			}
+			needSave = true
+			fmt.Println("   ✅ OpenAI key set")
 		} else {
 			fmt.Println("   Skipped — voice messages won't be transcribed")
 		}
 		fmt.Println()
+	}
+
+	if repoCfg.Moonshot.APIKey == "" {
+		fmt.Println("⚙️  Moonshot API key not configured (needed for /draft-mode with Kimi)")
+		fmt.Print("   Enter key (or press Enter to skip): ")
+		scanner := bufio.NewScanner(os.Stdin)
+		scanner.Scan()
+		key := strings.TrimSpace(scanner.Text())
+		if key != "" {
+			repoCfg.Moonshot.APIKey = key
+			needSave = true
+			fmt.Println("   ✅ Moonshot key set")
+		} else {
+			fmt.Println("   Skipped — /draft-mode won't be available")
+		}
+		fmt.Println()
+	}
+
+	if needSave {
+		if err := config.SaveRepo(repoDir, repoCfg); err != nil {
+			fmt.Fprintf(os.Stderr, "⚠️  Failed to save config: %v\n", err)
+		}
 	}
 
 	d := daemon.New(repoCfg, repoDir, strings.TrimSpace(Version))
@@ -212,6 +232,11 @@ func interactiveSetup(repoDir string) error {
 	scanner.Scan()
 	openaiKey := strings.TrimSpace(scanner.Text())
 
+	// Ask for Moonshot key (optional, for draft mode with Kimi)
+	fmt.Print("Moonshot API key (for /draft-mode with Kimi, or skip): ")
+	scanner.Scan()
+	moonshotKey := strings.TrimSpace(scanner.Text())
+
 	// Save repo config
 	repoCfg := &config.RepoConfig{
 		WhatsApp: config.WhatsAppConfig{
@@ -225,6 +250,9 @@ func interactiveSetup(repoDir string) error {
 		},
 		OpenAI: config.OpenAIConfig{
 			APIKey: openaiKey,
+		},
+		Moonshot: config.MoonshotConfig{
+			APIKey: moonshotKey,
 		},
 	}
 

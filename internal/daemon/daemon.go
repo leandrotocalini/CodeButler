@@ -67,6 +67,9 @@ type Daemon struct {
 	// Image generation command handler
 	imgHandler *imageCommandHandler
 
+	// Draft mode handler (Kimi prompt refinement)
+	draftHandler *draftHandler
+
 	// Message notification channel
 	msgNotify chan struct{}
 
@@ -93,6 +96,7 @@ func New(repoCfg *config.RepoConfig, repoDir, version string) *Daemon {
 		version:        version,
 		log:            NewLogger(500),
 		imgHandler:     newImageCommandHandler(),
+		draftHandler:   newDraftHandler(),
 		msgNotify:      make(chan struct{}, 1),
 		activityNotify: make(chan struct{}, 1),
 		startTime:      time.Now(),
@@ -274,6 +278,43 @@ func (d *Daemon) setupClient(client *whatsapp.Client) {
 		// Intercept image confirmation (1/2) when there's a pending image
 		if d.imgHandler.IsConfirmationReply(msg.Chat, msg.Content) {
 			go d.HandleImageConfirmation(msg)
+			return
+		}
+		// Intercept /draft-mode command
+		if IsDraftModeCommand(msg.Content) {
+			go d.StartDraft(msg.Chat)
+			return
+		}
+		// Intercept /draft-done command
+		if IsDraftDoneCommand(msg.Content) {
+			go d.FinishDraft(msg.Chat)
+			return
+		}
+		// Intercept /draft-discard command
+		if IsDraftDiscardCommand(msg.Content) {
+			go d.DiscardDraft(msg.Chat)
+			return
+		}
+		// Intercept draft confirmation (1/2/3) when Kimi has refined a draft
+		if d.draftHandler.IsDraftConfirmation(msg.Chat, msg.Content) {
+			go d.HandleDraftConfirmation(msg.Chat, msg.Content)
+			return
+		}
+		// In draft mode: accumulate messages instead of sending to Claude
+		if d.draftHandler.IsInDraftMode(msg.Chat) {
+			// Check if Kimi already refined and user is iterating (has history)
+			d.draftHandler.mu.Lock()
+			state := d.draftHandler.pending[msg.Chat]
+			hasHistory := state != nil && len(state.history) > 0
+			d.draftHandler.mu.Unlock()
+
+			if hasHistory {
+				// User is providing feedback for iteration
+				go d.HandleDraftIteration(msg.Chat, msg.Content)
+			} else {
+				// Still accumulating raw messages
+				d.AccumulateDraft(msg.Chat, msg.Content)
+			}
 			return
 		}
 
@@ -788,6 +829,10 @@ func (d *Daemon) handleHelp(chatJID string) {
 		"/create-image <prompt> — Generate an image\n" +
 		"/create-image <prompt> <url> — Edit image from URL\n" +
 		"Photo + caption /create-image <prompt> — Edit attached image\n\n" +
+		"*Draft Mode (Kimi):*\n" +
+		"/draft-mode — Start drafting (messages go to buffer, not Claude)\n" +
+		"/draft-done — Send buffer to Kimi for prompt refinement\n" +
+		"/draft-discard — Cancel draft mode\n\n" +
 		"All other /commands (/compact, /new, /think, etc.) and messages are passed directly to Claude."
 	d.sendMessage(chatJID, help)
 }
