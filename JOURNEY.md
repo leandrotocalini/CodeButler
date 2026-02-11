@@ -142,3 +142,95 @@ sessions (
 ```
 
 `ResetSession()` clears only `session_id`. `ClearSession()` deletes the entire row.
+
+---
+
+## 2026-02-11 — Why the terminal couldn't handle typing, and teaching Claude to send photos
+
+### The TUI input was broken in a way that looked correct
+
+The previous entry described a TUI with a scroll region and a `> ` prompt pinned to
+the bottom row. It sounded great on paper. In practice, typing "Test" and pressing
+Enter did nothing — the text appeared in the middle of the screen, never reached
+WhatsApp, and Claude never saw it.
+
+Two things were broken, and they conspired to make debugging confusing:
+
+**The rogue print.** Deep inside `whatsapp/client.go`, the `Connect()` function had
+a `fmt.Fprintln(os.Stderr, "✅ Connected to WhatsApp")` — a leftover from early
+development. This single line bypassed the Logger's scroll region management and
+wrote directly to the prompt row (the last terminal row). The trailing newline then
+scrolled the *entire* screen by one line, shifting the scroll region out of alignment.
+Every subsequent `printLines` call wrote to positions that no longer matched what was
+on screen. The prompt was being redrawn, but at a row that was now invisible.
+
+**Cooked mode fundamentally can't work here.** Even without the rogue print, the
+standard terminal line discipline (cooked mode) echoes typed characters at whatever
+position the cursor happens to be. If a log line arrives while you're typing, the
+cursor jumps to the scroll region, and your next keystroke echoes there instead of
+the prompt. Worse: pressing Enter at the last row of the screen generates a newline
+that scrolls everything — the header, the scroll region, all of it. Each Enter press
+would degrade the layout further.
+
+The fix was to switch to **raw mode** (`term.MakeRaw`). This disables terminal echo
+entirely — no character appears on screen unless we explicitly draw it. Each keystroke
+goes through the Logger's cursor management, protected by the same mutex that handles
+log output. The prompt, the typed text, and the log lines never fight over cursor
+position.
+
+The implementation handles backspace (with proper UTF-8 multi-byte awareness),
+Ctrl+U (clear line), Ctrl+W (delete word), Ctrl+C/D (shutdown), and silently
+swallows escape sequences from arrow keys. It's not readline — there's no cursor
+movement within the line, no history — but it's solid enough for sending prompts
+to Claude.
+
+One subtlety: raw mode disables signal generation, so Ctrl+C no longer produces
+SIGINT automatically. The input handler catches byte `0x03`, restores the terminal
+state, and sends SIGINT to itself. This preserves the existing signal-based shutdown
+flow without special-casing raw mode in the daemon.
+
+---
+
+### Claude can now send you images over WhatsApp
+
+Until now, the communication between Claude and WhatsApp was text-only in the
+outbound direction. Claude could *receive* images (via `<attached-image>`), but
+if it wanted to share something visual — a screenshot, a chart, a test result —
+it had no way to do it. The response was always plain text.
+
+This matters more than it sounds. Consider: you ask Claude to run your test suite,
+and it finds failures with visual diffs. Or it generates a diagram to explain an
+architecture decision. Or it takes a screenshot of a UI it just modified. Without
+image support, it has to *describe* what it sees instead of just showing you.
+
+The solution is a symmetric counterpart to the existing `<attached-image>` tag.
+Claude's system prompt now includes an instruction:
+
+> To send the user an image file, wrap the absolute path in your response:
+> `<send-image path="/absolute/path/to/file.png">optional caption</send-image>`
+
+When the daemon receives Claude's response, before sending it as text, it scans for
+`<send-image>` tags with a regex. For each match, it reads the file at the given
+path, sends it to WhatsApp as an image message (with the caption, if any), and strips
+the tag from the text. Whatever text remains gets sent as a normal message. If the
+response was *only* an image tag with no surrounding text, no text message is sent
+at all — just the image.
+
+This means Claude can now do things like:
+
+- Run tests, take a screenshot of the failure, and send it alongside a summary
+- Generate a diagram with a tool and send it directly
+- Show you what a UI looks like after a change
+- Send multiple images in one response, interleaved with explanations
+
+**Why a tag instead of a tool?** Claude already has tool access to the filesystem —
+it could write files. But it has no "send to WhatsApp" tool. The tag approach
+is lighter: no MCP extension needed, no new tool registration, no extra round trips.
+Claude just includes the tag in its normal text response, and the daemon handles
+the rest on the way out. It's a post-processing step, not an interaction.
+
+**Mimetype detection.** The original `SendImage` in the WhatsApp client hardcoded
+`image/png` as the mimetype. Since Claude might reference JPEGs, PNGs, or anything
+else, `SendImage` now uses `http.DetectContentType` to sniff the first bytes and
+pick the right mimetype automatically. If detection fails, it falls back to JPEG
+(the most common format for screenshots and photos).
