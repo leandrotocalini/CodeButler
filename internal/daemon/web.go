@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/leandrotocalini/CodeButler/internal/whatsapp"
+	"github.com/leandrotocalini/CodeButler/internal/messenger"
 )
 
 func (d *Daemon) startWeb() {
@@ -46,15 +46,16 @@ func (d *Daemon) findAvailablePort(from, to int) int {
 }
 
 func (d *Daemon) handleAPIStatus(w http.ResponseWriter, r *http.Request) {
-	d.clientMu.Lock()
+	d.msgerMu.Lock()
 	connState := d.connState
-	d.clientMu.Unlock()
+	d.msgerMu.Unlock()
 
 	status := map[string]interface{}{
 		"repo":       filepath.Base(d.repoDir),
 		"repoDir":    d.repoDir,
-		"group":      d.repoCfg.WhatsApp.GroupName,
-		"whatsapp":   connState.String(),
+		"group":      d.groupName,
+		"messenger":  d.msger.Name(),
+		"connection": connState.String(),
 		"claudeBusy":    d.isBusy(),
 		"conversationActive": d.isConversationActive(),
 		"port":       d.webPort,
@@ -120,9 +121,9 @@ func (d *Daemon) handleAPILogsStream(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Daemon) handleDashboard(w http.ResponseWriter, r *http.Request) {
-	d.clientMu.Lock()
+	d.msgerMu.Lock()
 	connState := d.connState
-	d.clientMu.Unlock()
+	d.msgerMu.Unlock()
 
 	repoName := filepath.Base(d.repoDir)
 
@@ -159,7 +160,7 @@ func (d *Daemon) handleDashboard(w http.ResponseWriter, r *http.Request) {
 <div class="status">
   <div class="badge"><div class="label">Repo</div><div class="value">%s</div></div>
   <div class="badge"><div class="label">Group</div><div class="value">%s</div></div>
-  <div class="badge"><div class="label">WhatsApp</div><div class="value" id="wa-status" class="%s">%s</div></div>
+  <div class="badge"><div class="label">Messenger</div><div class="value" id="wa-status" class="%s">%s</div></div>
   <div class="badge"><div class="label">Claude</div><div class="value" id="claude-status">—</div></div>
   <div class="badge"><div class="label">Session</div><div class="value" id="session-status">—</div></div>
 </div>
@@ -187,8 +188,8 @@ setInterval(async () => {
     const r = await fetch('/api/status');
     const s = await r.json();
     const waEl = document.getElementById('wa-status');
-    waEl.textContent = s.whatsapp;
-    waEl.className = s.whatsapp === 'connected' ? 'connected' : 'disconnected';
+    waEl.textContent = s.messenger + ': ' + s.connection;
+    waEl.className = s.connection === 'connected' ? 'connected' : 'disconnected';
     const clEl = document.getElementById('claude-status');
     clEl.textContent = s.claudeBusy ? 'Working...' : 'Idle';
     clEl.className = s.claudeBusy ? 'busy' : 'idle';
@@ -210,8 +211,8 @@ function addLog(log) {
 		connStateClass(connState), connState.String())
 }
 
-func connStateClass(state whatsapp.ConnectionState) string {
-	if state == whatsapp.StateConnected {
+func connStateClass(state messenger.ConnectionState) string {
+	if state == messenger.StateConnected {
 		return "connected"
 	}
 	return "disconnected"

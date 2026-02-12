@@ -73,6 +73,27 @@ func SaveRepo(dir string, cfg *RepoConfig) error {
 	return saveJSON(path, cfg)
 }
 
+// LoadSlack reads ~/.codebutler/slack.json (global Slack tokens).
+func LoadSlack() (*SlackGlobalConfig, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("get home dir: %w", err)
+	}
+
+	path := filepath.Join(home, ".codebutler", "slack.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read slack config: %w", err)
+	}
+
+	var cfg SlackGlobalConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("parse slack config: %w", err)
+	}
+
+	return &cfg, nil
+}
+
 func saveJSON(path string, v interface{}) error {
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {

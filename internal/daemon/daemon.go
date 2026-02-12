@@ -17,9 +17,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/leandrotocalini/CodeButler/internal/agent"
 	"github.com/leandrotocalini/CodeButler/internal/config"
+	"github.com/leandrotocalini/CodeButler/internal/messenger"
 	"github.com/leandrotocalini/CodeButler/internal/store"
 	"github.com/leandrotocalini/CodeButler/internal/transcribe"
-	"github.com/leandrotocalini/CodeButler/internal/whatsapp"
 	"golang.org/x/term"
 )
 
@@ -46,12 +46,17 @@ type Daemon struct {
 	repoCfg *config.RepoConfig
 	repoDir string
 	store     *store.Store
-	client    *whatsapp.Client
+	msger     messenger.Messenger
 	agent     *agent.Agent
 	log       *Logger
 
-	clientMu  sync.Mutex
-	connState whatsapp.ConnectionState
+	// Resolved chat target — WhatsApp groupJID or Slack channelID
+	chatID    string
+	botPrefix string
+	groupName string
+
+	msgerMu   sync.Mutex
+	connState messenger.ConnectionState
 
 	// Claude busy state
 	busyMu sync.Mutex
@@ -90,11 +95,15 @@ type Daemon struct {
 	version string
 }
 
-func New(repoCfg *config.RepoConfig, repoDir, version string) *Daemon {
+func New(repoCfg *config.RepoConfig, repoDir, version string, m messenger.Messenger, chatID, botPrefix, groupName string) *Daemon {
 	return &Daemon{
 		repoCfg:        repoCfg,
 		repoDir:        repoDir,
 		version:        version,
+		msger:          m,
+		chatID:         chatID,
+		botPrefix:      botPrefix,
+		groupName:      groupName,
 		log:            NewLogger(500),
 		imgHandler:     newImageCommandHandler(),
 		draftHandler:   newDraftHandler(),
@@ -144,11 +153,11 @@ func (d *Daemon) Run() error {
 
 	// Show header
 	d.log.Clear()
-	d.log.Header("CodeButler \u00b7 %s \u00b7 http://localhost:%d", d.repoCfg.WhatsApp.GroupName, d.webPort)
+	d.log.Header("CodeButler \u00b7 %s \u00b7 http://localhost:%d", d.groupName, d.webPort)
 
-	// Connect WhatsApp
-	if err := d.connectWhatsApp(); err != nil {
-		return fmt.Errorf("connect WhatsApp: %w", err)
+	// Connect messenger
+	if err := d.connectMessenger(); err != nil {
+		return fmt.Errorf("connect %s: %w", d.msger.Name(), err)
 	}
 
 	// Start watchdog
@@ -187,26 +196,23 @@ func (d *Daemon) Run() error {
 		}
 	}
 
-	d.clientMu.Lock()
-	if d.client != nil {
-		d.client.Disconnect()
+	d.msgerMu.Lock()
+	if d.msger != nil {
+		d.msger.Disconnect()
 	}
-	d.clientMu.Unlock()
+	d.msgerMu.Unlock()
 
 	d.log.Status("Goodbye!")
 	d.log.Cleanup()
 	return nil
 }
 
-func (d *Daemon) connectWhatsApp() error {
-	sessionPath := config.SessionPath(d.repoDir)
-	whatsapp.SetDeviceName("CodeButler:" + filepath.Base(d.repoDir))
-
-	d.log.Status("WhatsApp: connecting...")
+func (d *Daemon) connectMessenger() error {
+	name := d.msger.Name()
+	d.log.Status("%s: connecting...", name)
 	for attempt := 1; attempt <= 5; attempt++ {
-		client, err := whatsapp.Connect(sessionPath)
-		if err != nil {
-			d.log.Error("WhatsApp attempt %d/5: %v", attempt, err)
+		if err := d.msger.Connect(); err != nil {
+			d.log.Error("%s attempt %d/5: %v", name, attempt, err)
 			if attempt < 5 {
 				delay := time.Duration(min(attempt*5, 30)) * time.Second
 				time.Sleep(delay)
@@ -215,38 +221,39 @@ func (d *Daemon) connectWhatsApp() error {
 			return fmt.Errorf("all connection attempts failed")
 		}
 
-		d.setupClient(client)
-		d.log.Status("WhatsApp: connected")
+		d.setupMessenger()
+		d.log.Status("%s: connected", name)
 
 		// Announce startup (only on initial connect, not reconnects)
-		d.sendMessage(d.repoCfg.WhatsApp.GroupJID, fmt.Sprintf("I am back. I am version %s", d.version))
+		d.sendMessage(d.chatID, fmt.Sprintf("I am back. I am version %s", d.version))
 
 		return nil
 	}
 	return fmt.Errorf("unreachable")
 }
 
-func (d *Daemon) setupClient(client *whatsapp.Client) {
-	botPrefix := d.repoCfg.WhatsApp.BotPrefix
-	groupJID := d.repoCfg.WhatsApp.GroupJID
+func (d *Daemon) setupMessenger() {
+	botPrefix := d.botPrefix
+	groupJID := d.chatID
 
-	client.OnConnectionEvent(func(state whatsapp.ConnectionState) {
-		d.clientMu.Lock()
+	d.msger.OnConnectionEvent(func(state messenger.ConnectionState) {
+		d.msgerMu.Lock()
 		prev := d.connState
 		d.connState = state
-		d.clientMu.Unlock()
+		d.msgerMu.Unlock()
+		name := d.msger.Name()
 		switch {
-		case state == whatsapp.StateConnected && prev != whatsapp.StateConnected:
-			d.log.Status("WhatsApp: reconnected")
-		case state == whatsapp.StateLoggedOut:
-			d.log.Warn("WhatsApp: logged out")
-		case state != whatsapp.StateConnected && prev == whatsapp.StateConnected:
-			d.log.Warn("WhatsApp: %s", state)
+		case state == messenger.StateConnected && prev != messenger.StateConnected:
+			d.log.Status("%s: reconnected", name)
+		case state == messenger.StateLoggedOut:
+			d.log.Warn("%s: logged out", name)
+		case state != messenger.StateConnected && prev == messenger.StateConnected:
+			d.log.Warn("%s: %s", name, state)
 		}
 	})
 
-	client.OnMessage(func(msg whatsapp.Message) {
-		// Filter by group
+	d.msger.OnMessage(func(msg messenger.Message) {
+		// Filter by group/channel
 		if groupJID != "" && msg.Chat != groupJID {
 			return
 		}
@@ -290,7 +297,7 @@ func (d *Daemon) setupClient(client *whatsapp.Client) {
 				d.log.Warn("Voice message received but no OpenAI API key configured")
 				content = "[Voice message — no OpenAI key for transcription]"
 			} else {
-				audioPath, err := client.DownloadAudioFromMessage(msg)
+				audioPath, err := d.msger.DownloadAudio(msg)
 				if err != nil {
 					d.log.Error("Failed to download audio: %v", err)
 					content = "[Voice message — download failed]"
@@ -357,14 +364,14 @@ func (d *Daemon) setupClient(client *whatsapp.Client) {
 
 		// Mark as read immediately so the sender sees blue ticks
 		if msg.ID != "" {
-			if err := client.MarkRead(msg.Chat, msg.From, []string{msg.ID}); err != nil {
+			if err := d.msger.MarkRead(msg.Chat, msg.From, []string{msg.ID}); err != nil {
 				d.log.Warn("MarkRead failed: %v", err)
 			}
 		}
 
 		// Download image messages
 		if msg.IsImage {
-			imgData, err := client.DownloadImageFromMessage(msg)
+			imgData, err := d.msger.DownloadImage(msg)
 			if err != nil {
 				d.log.Error("Failed to download image: %v", err)
 				content = "[Image — download failed]"
@@ -412,13 +419,12 @@ func (d *Daemon) setupClient(client *whatsapp.Client) {
 		}
 
 		d.signalActivity()
-		d.log.UserMsg("WhatsApp", content, time.Now(), msg.IsVoice, msg.IsImage)
+		d.log.UserMsg(d.msger.Name(), content, time.Now(), msg.IsVoice, msg.IsImage)
 	})
 
-	d.clientMu.Lock()
-	d.client = client
-	d.connState = client.GetState()
-	d.clientMu.Unlock()
+	d.msgerMu.Lock()
+	d.connState = d.msger.GetState()
+	d.msgerMu.Unlock()
 }
 
 func (d *Daemon) connectionWatchdog() {
@@ -426,35 +432,30 @@ func (d *Daemon) connectionWatchdog() {
 	defer ticker.Stop()
 
 	disconnectedAt := time.Time{}
+	name := d.msger.Name()
 
 	for range ticker.C {
-		d.clientMu.Lock()
+		d.msgerMu.Lock()
 		state := d.connState
-		client := d.client
-		d.clientMu.Unlock()
+		d.msgerMu.Unlock()
 
 		switch state {
-		case whatsapp.StateConnected:
+		case messenger.StateConnected:
 			disconnectedAt = time.Time{}
 
-		case whatsapp.StateLoggedOut:
-			d.log.Warn("WhatsApp logged out — run codebutler --setup to re-scan QR")
+		case messenger.StateLoggedOut:
+			d.log.Warn("%s logged out — run codebutler --setup to reconfigure", name)
 			return
 
-		case whatsapp.StateDisconnected, whatsapp.StateReconnecting:
+		case messenger.StateDisconnected, messenger.StateReconnecting:
 			if disconnectedAt.IsZero() {
 				disconnectedAt = time.Now()
-				d.log.Warn("WhatsApp disconnected, watching...")
+				d.log.Warn("%s disconnected, watching...", name)
 			} else if time.Since(disconnectedAt) > 2*time.Minute {
 				d.log.Warn("Disconnected >2min, forcing reconnect...")
-				if client != nil {
-					client.Disconnect()
-				}
-				d.clientMu.Lock()
-				d.client = nil
-				d.clientMu.Unlock()
+				d.msger.Disconnect()
 
-				if err := d.connectWhatsApp(); err != nil {
+				if err := d.connectMessenger(); err != nil {
 					d.log.Error("Reconnect failed: %v", err)
 				}
 				return
@@ -769,14 +770,6 @@ func (d *Daemon) processBatch(ctx context.Context, msgs []store.Message) {
 }
 
 func (d *Daemon) markRead(msgs []store.Message) {
-	d.clientMu.Lock()
-	client := d.client
-	d.clientMu.Unlock()
-
-	if client == nil {
-		return
-	}
-
 	// Group by sender for correct read receipts
 	bySender := make(map[string][]string)
 	chatJID := ""
@@ -789,22 +782,14 @@ func (d *Daemon) markRead(msgs []store.Message) {
 	}
 
 	for sender, ids := range bySender {
-		if err := client.MarkRead(chatJID, sender, ids); err != nil {
+		if err := d.msger.MarkRead(chatJID, sender, ids); err != nil {
 			d.log.Warn("MarkRead failed: %v", err)
 		}
 	}
 }
 
 func (d *Daemon) sendPresence(chatJID string, composing bool) {
-	d.clientMu.Lock()
-	client := d.client
-	d.clientMu.Unlock()
-
-	if client == nil {
-		return
-	}
-
-	if err := client.SendPresence(chatJID, composing); err != nil {
+	if err := d.msger.SendPresence(chatJID, composing); err != nil {
 		d.log.Error("SendPresence failed: %v", err)
 	}
 }
@@ -857,22 +842,13 @@ func (d *Daemon) handleCleanSession(chatJID string) {
 }
 
 func (d *Daemon) sendMessage(chatJID, text string) {
-	d.clientMu.Lock()
-	client := d.client
-	d.clientMu.Unlock()
-
-	if client == nil {
-		d.log.Error("Can't send: WhatsApp not connected")
-		return
-	}
-
 	// Mark previous bot messages as read before sending a new one
-	d.markOldBotMessages(client, chatJID)
+	d.markOldBotMessages(chatJID)
 
-	botPrefix := d.repoCfg.WhatsApp.BotPrefix
+	botPrefix := d.botPrefix
 	message := botPrefix + " " + text
 
-	msgID, err := client.SendMessage(chatJID, message)
+	msgID, err := d.msger.SendMessage(chatJID, message)
 	if err != nil {
 		d.log.Error("Failed to send message: %v", err)
 		return
@@ -886,7 +862,7 @@ func (d *Daemon) sendMessage(chatJID, text string) {
 }
 
 // markOldBotMessages marks all tracked bot messages as read (clears old notifications).
-func (d *Daemon) markOldBotMessages(client *whatsapp.Client, chatJID string) {
+func (d *Daemon) markOldBotMessages(chatJID string) {
 	d.botMsgMu.Lock()
 	ids := d.botMsgIDs
 	d.botMsgIDs = nil
@@ -896,22 +872,14 @@ func (d *Daemon) markOldBotMessages(client *whatsapp.Client, chatJID string) {
 		return
 	}
 
-	ownJID := client.GetJID().String()
-	if err := client.MarkRead(chatJID, ownJID, ids); err != nil {
+	ownJID := d.msger.GetOwnID()
+	if err := d.msger.MarkRead(chatJID, ownJID, ids); err != nil {
 		d.log.Warn("MarkRead (bot msgs): %v", err)
 	}
 }
 
 // markAllBotMessages marks all tracked bot messages as read (user is engaged).
 func (d *Daemon) markAllBotMessages() {
-	d.clientMu.Lock()
-	client := d.client
-	d.clientMu.Unlock()
-
-	if client == nil {
-		return
-	}
-
 	d.botMsgMu.Lock()
 	ids := d.botMsgIDs
 	chat := d.botMsgChat
@@ -922,8 +890,8 @@ func (d *Daemon) markAllBotMessages() {
 		return
 	}
 
-	ownJID := client.GetJID().String()
-	if err := client.MarkRead(chat, ownJID, ids); err != nil {
+	ownJID := d.msger.GetOwnID()
+	if err := d.msger.MarkRead(chat, ownJID, ids); err != nil {
 		d.log.Warn("MarkRead (bot msgs): %v", err)
 	}
 }
@@ -958,7 +926,7 @@ func (d *Daemon) compactWatchdog(ctx context.Context) {
 			continue
 		}
 
-		chatJID := d.repoCfg.WhatsApp.GroupJID
+		chatJID := d.chatID
 		sessionID, _ := d.store.GetSession(chatJID)
 		if sessionID == "" {
 			continue
@@ -1141,21 +1109,12 @@ func (d *Daemon) sendImagesFallback(chatJID string, images []responseImage) {
 	}
 }
 
-// sendVideo sends a video message to WhatsApp with the bot prefix.
+// sendVideo sends a video message with the bot prefix.
 func (d *Daemon) sendVideo(chatJID string, videoData []byte, caption string) {
-	d.clientMu.Lock()
-	client := d.client
-	d.clientMu.Unlock()
-
-	if client == nil {
-		d.log.Error("Can't send video: WhatsApp not connected")
-		return
-	}
-
-	botPrefix := d.repoCfg.WhatsApp.BotPrefix
+	botPrefix := d.botPrefix
 	fullCaption := botPrefix + " " + caption
 
-	if err := client.SendVideo(chatJID, videoData, fullCaption); err != nil {
+	if err := d.msger.SendVideo(chatJID, videoData, fullCaption); err != nil {
 		d.log.Error("Failed to send video: %v", err)
 	}
 }
@@ -1286,17 +1245,14 @@ func (d *Daemon) startInput(ctx context.Context) {
 
 // handleTUIInput processes a submitted line from TUI input.
 func (d *Daemon) handleTUIInput(text string) {
-	chatJID := d.repoCfg.WhatsApp.GroupJID
-	botPrefix := d.repoCfg.WhatsApp.BotPrefix
+	chatJID := d.chatID
+	botPrefix := d.botPrefix
 
-	// Echo to WhatsApp so the conversation is visible there
-	d.clientMu.Lock()
-	client := d.client
-	d.clientMu.Unlock()
-	if client != nil && chatJID != "" {
+	// Echo to messenger so the conversation is visible there
+	if chatJID != "" {
 		echoMsg := fmt.Sprintf("%s [TUI] %s", botPrefix, text)
-		if _, err := client.SendMessage(chatJID, echoMsg); err != nil {
-			d.log.Warn("TUI echo to WhatsApp failed: %v", err)
+		if _, err := d.msger.SendMessage(chatJID, echoMsg); err != nil {
+			d.log.Warn("TUI echo failed: %v", err)
 		}
 	}
 

@@ -15,6 +15,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/leandrotocalini/CodeButler/internal/config"
 	"github.com/leandrotocalini/CodeButler/internal/daemon"
+	"github.com/leandrotocalini/CodeButler/internal/messenger"
 	"github.com/leandrotocalini/CodeButler/internal/whatsapp"
 )
 
@@ -105,7 +106,75 @@ func main() {
 		}
 	}
 
-	d := daemon.New(repoCfg, repoDir, strings.TrimSpace(Version))
+	// Build messenger(s)
+	var backends []messenger.BackendChat
+
+	// WhatsApp — always try if config exists
+	if repoCfg.WhatsApp.GroupJID != "" {
+		sessionPath := config.SessionPath(repoDir)
+		deviceName := "CodeButler:" + filepath.Base(repoDir)
+		wa := messenger.NewWhatsApp(sessionPath, deviceName)
+		backends = append(backends, messenger.BackendChat{Backend: wa, ChatID: repoCfg.WhatsApp.GroupJID})
+	}
+
+	// Slack — try if global tokens exist
+	slackCfg, slackErr := config.LoadSlack()
+	if slackErr == nil && slackCfg.BotToken != "" && slackCfg.AppToken != "" {
+		botPrefix := repoCfg.WhatsApp.BotPrefix
+		if botPrefix == "" {
+			botPrefix = "[BOT]"
+		}
+		channelID := repoCfg.Slack.ChannelID
+		sl := messenger.NewSlack(slackCfg.BotToken, slackCfg.AppToken, channelID, botPrefix)
+
+		if channelID == "" {
+			// Auto-find or create channel using "repoName hostname" pattern
+			repoName := filepath.Base(repoDir)
+			hostname, _ := os.Hostname()
+			suggestedName := repoName + " " + hostname
+
+			fmt.Printf("🔍 Slack: looking for channel %q...\n", suggestedName)
+			chID, err := sl.FindOrCreateChannel(suggestedName)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "⚠️  Slack channel setup failed: %v\n", err)
+				fmt.Println("   Slack will be skipped — WhatsApp only")
+			} else {
+				fmt.Printf("✅ Slack channel: %s\n", chID)
+				// Save channel ID so we don't search next time
+				repoCfg.Slack.ChannelID = chID
+				config.SaveRepo(repoDir, repoCfg)
+				backends = append(backends, messenger.BackendChat{Backend: sl, ChatID: chID})
+			}
+		} else {
+			backends = append(backends, messenger.BackendChat{Backend: sl, ChatID: channelID})
+		}
+	}
+
+	if len(backends) == 0 {
+		fmt.Fprintf(os.Stderr, "❌ No messenger configured\n")
+		fmt.Fprintf(os.Stderr, "Run codebutler --setup for WhatsApp, or create ~/.codebutler/slack.json for Slack\n")
+		os.Exit(1)
+	}
+
+	// Build the messenger: single or multi
+	var msger messenger.Messenger
+	chatID := backends[0].ChatID
+	if len(backends) == 1 {
+		msger = backends[0].Backend
+	} else {
+		msger = messenger.NewMulti(backends...)
+	}
+
+	botPrefix := repoCfg.WhatsApp.BotPrefix
+	if botPrefix == "" {
+		botPrefix = "[BOT]"
+	}
+	groupName := repoCfg.WhatsApp.GroupName
+	if groupName == "" {
+		groupName = filepath.Base(repoDir)
+	}
+
+	d := daemon.New(repoCfg, repoDir, strings.TrimSpace(Version), msger, chatID, botPrefix, groupName)
 	if err := d.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "❌ Daemon error: %v\n", err)
 		os.Exit(1)

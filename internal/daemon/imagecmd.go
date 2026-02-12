@@ -11,7 +11,7 @@ import (
 
 	"github.com/leandrotocalini/CodeButler/internal/config"
 	"github.com/leandrotocalini/CodeButler/internal/imagegen"
-	"github.com/leandrotocalini/CodeButler/internal/whatsapp"
+	"github.com/leandrotocalini/CodeButler/internal/messenger"
 )
 
 type pendingImage struct {
@@ -53,7 +53,7 @@ func (h *imageCommandHandler) IsConfirmationReply(chatJID, text string) bool {
 // HandleCreateImage orchestrates image generation: parse prompt, download
 // reference images (attachment + URLs), call OpenAI API, send preview,
 // store pending state for confirmation.
-func (d *Daemon) HandleCreateImage(msg whatsapp.Message) {
+func (d *Daemon) HandleCreateImage(msg messenger.Message) {
 	text := strings.TrimSpace(msg.Content)
 	prompt := strings.TrimSpace(strings.TrimPrefix(text, "/create-image"))
 
@@ -75,18 +75,12 @@ func (d *Daemon) HandleCreateImage(msg whatsapp.Message) {
 
 	// 1. Image attachment
 	if msg.IsImage {
-		d.clientMu.Lock()
-		client := d.client
-		d.clientMu.Unlock()
-
-		if client != nil {
-			imgData, err := client.DownloadImageFromMessage(msg)
-			if err != nil {
-				d.log.Error("Failed to download image attachment: %v", err)
-			} else {
-				refImages = append(refImages, imgData)
-				d.log.Info("Downloaded image attachment (%d bytes)", len(imgData))
-			}
+		imgData, err := d.msger.DownloadImage(msg)
+		if err != nil {
+			d.log.Error("Failed to download image attachment: %v", err)
+		} else {
+			refImages = append(refImages, imgData)
+			d.log.Info("Downloaded image attachment (%d bytes)", len(imgData))
 		}
 	}
 
@@ -165,7 +159,7 @@ func (d *Daemon) HandleCreateImage(msg whatsapp.Message) {
 }
 
 // HandleImageConfirmation handles "1" (save) or "2" (discard) replies.
-func (d *Daemon) HandleImageConfirmation(msg whatsapp.Message) {
+func (d *Daemon) HandleImageConfirmation(msg messenger.Message) {
 	text := strings.TrimSpace(msg.Content)
 
 	d.imgHandler.mu.Lock()
@@ -203,22 +197,13 @@ func (d *Daemon) HandleImageConfirmation(msg whatsapp.Message) {
 }
 
 func (d *Daemon) sendImage(chatJID string, pngData []byte, caption string) {
-	d.clientMu.Lock()
-	client := d.client
-	d.clientMu.Unlock()
-
-	if client == nil {
-		d.log.Error("Can't send image: WhatsApp not connected")
-		return
-	}
-
-	botPrefix := d.repoCfg.WhatsApp.BotPrefix
+	botPrefix := d.botPrefix
 	fullCaption := botPrefix + " " + caption
 
-	if err := client.SendImage(chatJID, pngData, fullCaption); err != nil {
+	if err := d.msger.SendImage(chatJID, pngData, fullCaption); err != nil {
 		d.log.Error("Failed to send image: %v", err)
 	} else {
-		d.log.Info("Image sent to WhatsApp (%d bytes)", len(pngData))
+		d.log.Info("Image sent (%d bytes)", len(pngData))
 	}
 }
 

@@ -8,7 +8,9 @@ require (
 	github.com/mattn/go-isatty v0.0.20
 	github.com/mattn/go-sqlite3 v1.14.33
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
+	github.com/slack-go/slack v0.17.3
 	go.mau.fi/whatsmeow v0.0.0-20260129212019-7787ab952245
+	golang.org/x/term v0.40.0
 	google.golang.org/protobuf v1.36.11
 )
 
@@ -27,6 +29,5 @@ require (
 	golang.org/x/exp v0.0.0-20260112195511-716be5621a96 // indirect
 	golang.org/x/net v0.50.0 // indirect
 	golang.org/x/sys v0.41.0 // indirect
-	golang.org/x/term v0.40.0 // indirect
 	golang.org/x/text v0.34.0 // indirect
 )
