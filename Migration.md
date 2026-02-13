@@ -1,0 +1,449 @@
+# Migration: WhatsApp → Slack
+
+Plan de migración de CodeButler de WhatsApp a Slack.
+
+**Estado**: Planificación (no se ha empezado a implementar)
+
+---
+
+## 1. Motivación
+
+Migrar el messaging backend de WhatsApp (whatsmeow) a Slack, manteniendo
+la misma lógica core: daemon que monitorea un canal y spawna `claude -p`.
+
+---
+
+## 2. Mapping de Conceptos
+
+| WhatsApp | Slack | Notas |
+|----------|-------|-------|
+| Group JID (`...@g.us`) | Channel ID (`C0123ABCDEF`) | Identificador del canal |
+| User JID (`...@s.whatsapp.net`) | User ID (`U0123ABCDEF`) | Identificador del usuario |
+| QR code pairing | OAuth App + Bot Token | Autenticación |
+| whatsmeow events | Slack Socket Mode / Events API | Recepción de mensajes |
+| `SendMessage(jid, text)` | `chat.postMessage(channel, text)` | Envío de texto |
+| `SendImage(jid, png, caption)` | `files.upload` + message | Envío de imágenes |
+| Read receipts (`MarkRead`) | No equivalente directo | Se puede omitir o usar reactions |
+| Typing indicator (`SendPresence`) | No hay typing nativo en bots | Se puede omitir |
+| Voice messages (Whisper) | Audio files en Slack → Whisper | Mismo flow, distinta descarga |
+| Bot prefix `[BOT]` | Bot messages tienen `bot_id` | Slack filtra bots nativamente |
+| Linked Devices (device name) | App name en workspace | Visible en Apps |
+| `whatsapp-session/session.db` | Bot token (string) | No hay sesión persistente |
+| Group creation | `conversations.create` | Channel privado/público |
+
+---
+
+## 3. Arquitectura Actual vs Propuesta
+
+### Actual
+```
+WhatsApp <-> whatsmeow <-> Go daemon <-> spawns claude -p <-> repo context
+                               |
+                           SQLite DB
+                      (messages + sessions)
+```
+
+### Propuesta
+```
+Slack <-> slack-go SDK <-> Go daemon <-> spawns claude -p <-> repo context
+                               |
+                           SQLite DB
+                      (messages + sessions)
+```
+
+---
+
+## 4. Dependencias
+
+### Eliminar
+- `go.mau.fi/whatsmeow` (y todas sus subdependencias: protobuf, signal protocol, etc.)
+- `github.com/skip2/go-qrcode` (QR ya no se necesita)
+- `github.com/mdp/qrterminal/v3` (QR terminal)
+
+### Agregar
+- `github.com/slack-go/slack` — SDK oficial de Slack para Go
+  - Socket Mode (WebSocket, no necesita endpoint público)
+  - Events API
+  - Web API (chat.postMessage, files.upload, etc.)
+
+---
+
+## 5. Slack App Setup (pre-requisitos)
+
+Antes de que el daemon funcione, el usuario necesita crear una Slack App:
+
+1. Ir a https://api.slack.com/apps → Create New App
+2. Configurar Bot Token Scopes (OAuth & Permissions):
+   - `channels:history` — leer mensajes de canales públicos
+   - `channels:read` — listar canales
+   - `chat:write` — enviar mensajes
+   - `files:read` — descargar archivos adjuntos (audio, imágenes)
+   - `files:write` — subir archivos (imágenes generadas)
+   - `groups:history` — leer mensajes de canales privados
+   - `groups:read` — listar canales privados
+   - `reactions:write` — (opcional) confirmar lectura con reaction
+   - `users:read` — resolver nombres de usuario
+3. Habilitar Socket Mode (Settings → Socket Mode → Enable)
+   - Genera un App-Level Token (`xapp-...`)
+4. Habilitar Events (Event Subscriptions → Enable):
+   - Subscribe to bot events: `message.channels`, `message.groups`
+5. Install to Workspace → copiar Bot Token (`xoxb-...`)
+
+### Tokens necesarios
+- **Bot Token** (`xoxb-...`): operaciones de API (enviar, leer, etc.)
+- **App Token** (`xapp-...`): conexión Socket Mode (WebSocket)
+
+---
+
+## 6. Config Changes
+
+### Actual (`config.json`)
+```json
+{
+  "whatsapp": { "groupJID": "...@g.us", "groupName": "...", "botPrefix": "[BOT]" },
+  "claude":   { "maxTurns": 10, "timeout": 30, "permissionMode": "bypassPermissions" },
+  "openai":   { "apiKey": "sk-..." }
+}
+```
+
+### Propuesta (`config.json`)
+```json
+{
+  "slack": {
+    "botToken": "xoxb-...",
+    "appToken": "xapp-...",
+    "channelID": "C0123ABCDEF",
+    "channelName": "codebutler-myrepo"
+  },
+  "claude":   { "maxTurns": 10, "timeout": 30, "permissionMode": "bypassPermissions" },
+  "openai":   { "apiKey": "sk-..." }
+}
+```
+
+**Cambios:**
+- `whatsapp` → `slack`
+- `groupJID` → `channelID`
+- `groupName` → `channelName`
+- `botPrefix` → **eliminado** (Slack identifica bots por `bot_id`, no necesita prefijo)
+- Nuevos: `botToken`, `appToken`
+
+---
+
+## 7. Storage Changes
+
+### Directorio `.codebutler/`
+
+```
+.codebutler/
+  config.json                    # channelID, tokens, Claude settings, OpenAI key
+  store.db                       # Messages + Claude session IDs (SQLite) — SIN CAMBIOS
+  images/                        # Generated images — SIN CAMBIOS
+  whatsapp-session/session.db    # ELIMINAR (no hay sesión persistente en Slack)
+```
+
+### SQLite `messages` table
+
+```sql
+-- Actual
+CREATE TABLE messages (
+    id          TEXT PRIMARY KEY,
+    from_jid    TEXT NOT NULL,        -- → renombrar a from_id
+    chat        TEXT NOT NULL,        -- → renombrar a channel_id
+    content     TEXT NOT NULL,
+    timestamp   TEXT NOT NULL,
+    is_voice    INTEGER DEFAULT 0,
+    acked       INTEGER DEFAULT 0,
+    wa_msg_id   TEXT DEFAULT ''       -- → renombrar a platform_msg_id
+);
+```
+
+**Cambios mínimos**: renombrar columnas para ser platform-agnostic, o dejarlas
+como están internamente y solo cambiar el código que las llena.
+
+### SQLite `sessions` table
+
+```sql
+-- Actual
+CREATE TABLE sessions (
+    chat_jid   TEXT PRIMARY KEY,      -- → channel_id (misma semántica)
+    session_id TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+```
+
+---
+
+## 8. Archivos a Modificar/Crear/Eliminar
+
+### Eliminar
+| Archivo | Razón |
+|---------|-------|
+| `internal/whatsapp/client.go` | Reemplazado por cliente Slack |
+| `internal/whatsapp/handler.go` | Reemplazado por event handler Slack |
+| `internal/whatsapp/groups.go` | Reemplazado por channel operations |
+| `internal/whatsapp/auth.go` | QR no aplica, Slack usa tokens |
+
+### Crear
+| Archivo | Propósito |
+|---------|-----------|
+| `internal/slack/client.go` | Conexión Socket Mode, estado, desconexión |
+| `internal/slack/handler.go` | Parseo de eventos, envío de mensajes/imágenes |
+| `internal/slack/channels.go` | Listar/crear canales, obtener info |
+
+### Modificar
+| Archivo | Cambios |
+|---------|---------|
+| `cmd/codebutler/main.go` | Setup wizard: pedir tokens en vez de QR, seleccionar canal en vez de grupo |
+| `internal/config/types.go` | `WhatsAppConfig` → `SlackConfig` con nuevos campos |
+| `internal/config/load.go` | Cargar/guardar nueva estructura |
+| `internal/daemon/daemon.go` | Reemplazar `whatsapp.Client` por `slack.Client`, adaptar filtros |
+| `internal/daemon/imagecmd.go` | `SendImage` → Slack `files.upload` |
+| `internal/daemon/web.go` | Cambiar "WhatsApp state" por "Slack state" en status API |
+| `internal/store/store.go` | (Opcional) renombrar columnas |
+| `go.mod` / `go.sum` | Nuevas dependencias |
+
+### Sin cambios
+| Archivo | Razón |
+|---------|-------|
+| `internal/agent/agent.go` | Claude spawn es independiente del messaging |
+| `internal/imagegen/generate.go` | OpenAI API es independiente |
+| `internal/transcribe/whisper.go` | Whisper API es independiente |
+| `internal/store/sessions.go` | Semántica idéntica (channel_id en vez de chat_jid) |
+| `internal/daemon/logger.go` | Logger es independiente |
+
+---
+
+## 9. Nuevo `internal/slack/` — Diseño de Interfaces
+
+### `client.go`
+
+```go
+package slack
+
+type ConnectionState int
+
+const (
+    StateDisconnected ConnectionState = iota
+    StateConnecting
+    StateConnected
+)
+
+type Client struct {
+    api       *slack.Client        // Web API (xoxb token)
+    socket    *socketmode.Client   // Socket Mode (xapp token)
+    state     ConnectionState
+    botUserID string               // Bot's own user ID (para filtrar sus mensajes)
+}
+
+// Connect inicia Socket Mode y espera conexión
+func Connect(botToken, appToken string) (*Client, error)
+
+// Disconnect cierra la conexión
+func (c *Client) Disconnect()
+
+// GetState devuelve el estado actual
+func (c *Client) GetState() ConnectionState
+
+// IsConnected devuelve true si conectado
+func (c *Client) IsConnected() bool
+
+// GetBotUserID devuelve el user ID del bot
+func (c *Client) GetBotUserID() string
+```
+
+### `handler.go`
+
+```go
+// Message es la abstracción de mensaje (equivalente a whatsapp.Message)
+type Message struct {
+    ID        string
+    From      string    // User ID
+    FromName  string    // Display name (resuelto via users.info)
+    Channel   string    // Channel ID
+    Content   string
+    Timestamp string    // Slack ts (e.g., "1234567890.123456")
+    IsFromMe  bool      // Es del bot
+    IsVoice   bool      // Audio file adjunto
+    IsImage   bool      // Image file adjunto
+    FileURL   string    // URL del archivo (si hay)
+    ThreadTS  string    // Thread timestamp (para responder en thread)
+}
+
+type MessageHandler func(Message)
+
+// OnMessage registra callback para mensajes nuevos
+func (c *Client) OnMessage(handler MessageHandler)
+
+// SendMessage envía texto a un canal
+func (c *Client) SendMessage(channelID, text string) error
+
+// SendImage sube y envía imagen a un canal
+func (c *Client) SendImage(channelID string, pngData []byte, caption string) error
+
+// DownloadFile descarga un archivo de Slack
+func (c *Client) DownloadFile(fileURL string) ([]byte, error)
+```
+
+### `channels.go`
+
+```go
+type Channel struct {
+    ID   string
+    Name string
+}
+
+// GetChannels lista canales donde el bot está presente
+func (c *Client) GetChannels() ([]Channel, error)
+
+// CreateChannel crea un canal nuevo
+func (c *Client) CreateChannel(name string) (string, error)
+
+// GetChannelInfo obtiene info de un canal
+func (c *Client) GetChannelInfo(channelID string) (*Channel, error)
+```
+
+---
+
+## 10. Setup Wizard — Nuevo Flow
+
+### Actual (WhatsApp)
+```
+1. Show QR code
+2. User scans with phone
+3. List groups → select or create
+4. Set bot prefix
+5. (Optional) OpenAI API key
+6. Save config
+```
+
+### Propuesto (Slack)
+```
+1. Prompt: "Bot Token (xoxb-...):"
+2. Prompt: "App Token (xapp-...):"
+3. Validate tokens (api.AuthTest)
+4. Connect Socket Mode
+5. List channels → select or create
+6. (Optional) OpenAI API key
+7. Save config
+```
+
+**Diferencia clave**: no hay QR, no hay `botPrefix`. La autenticación es
+por tokens que el usuario copia de la Slack App config page.
+
+---
+
+## 11. Message Flow — Nuevo
+
+### Recepción
+```
+Slack WebSocket (Socket Mode)
+    ↓ socketmode.EventTypeEventsAPI
+    ↓ EventTypeMessageChannels
+Parse: user, channel, text, files
+    ↓
+Filter: channel match, not from bot
+    ↓
+Audio file? → Download → Whisper transcribe
+    ↓
+store.Insert(Message)
+    ↓
+Signal msgNotify channel
+    ↓
+(conversation state machine — SIN CAMBIOS)
+```
+
+### Envío
+```
+agent.Run() result
+    ↓
+slack.Client.SendMessage(channelID, text)
+    ↓ api.PostMessage(channelID, slack.MsgOptionText(text, false))
+Slack API
+```
+
+### Filtrado de mensajes propios
+```
+// WhatsApp actual: compara botPrefix en el contenido
+if strings.HasPrefix(msg.Content, cfg.WhatsApp.BotPrefix) { skip }
+
+// Slack nuevo: compara bot user ID
+if msg.BotID != "" || msg.User == c.botUserID { skip }
+```
+
+**Ventaja**: Slack identifica bots nativamente, no necesitamos prefijo.
+
+---
+
+## 12. Features que Cambian
+
+### Bot Prefix → Eliminado
+- WhatsApp necesitaba `[BOT]` para filtrar mensajes propios
+- Slack identifica bots por `bot_id` en el evento
+- Los mensajes del bot se envían sin prefijo (más limpio)
+
+### Read Receipts → Reactions (opcional)
+- WhatsApp: `MarkRead()` muestra ticks azules
+- Slack: no hay equivalente directo
+- Opción: agregar reaction (ej: `eyes` 👀) cuando se empieza a procesar
+
+### Typing Indicator → Eliminado
+- WhatsApp: `SendPresence(composing=true)` muestra "typing..."
+- Slack: bots no pueden mostrar typing indicator
+- Se puede omitir sin impacto funcional
+
+### Threads (nuevo en Slack)
+- Los mensajes en Slack pueden estar en threads
+- **Decisión pendiente**: ¿responder en thread o en el canal principal?
+- Opción A: siempre responder en el canal (como WhatsApp)
+- Opción B: si el mensaje viene de un thread, responder en ese thread
+- **Recomendación**: Opción B — más natural en Slack
+
+### Voice Messages
+- WhatsApp: voz inline, descarga con `DownloadAudio()`
+- Slack: audio como file attachment, descarga con `files.info` + HTTP GET con auth
+- Mismo pipeline de Whisper después de la descarga
+
+### Image Messages
+- WhatsApp: imagen inline con `DownloadImage()`
+- Slack: imagen como file attachment
+- Envío: `files.upload` en vez de protobuf con media upload
+
+---
+
+## 13. Decisiones Pendientes
+
+- [ ] **Threads**: ¿responder en thread o canal? (recomiendo thread)
+- [ ] **Reactions**: ¿usar reactions como indicador de "procesando"?
+- [ ] **Nombres de columnas en SQLite**: ¿renombrar `from_jid`/`chat`/`wa_msg_id` o dejar como están?
+- [ ] **Múltiples canales**: ¿soportar más de un canal por repo? (WhatsApp era 1 grupo)
+- [ ] **Mention del bot**: ¿requerir `@CodeButler` para activar, o responder a todo?
+- [ ] **Markdown**: Slack usa mrkdwn (distinto de Markdown standard). ¿Convertir output de Claude?
+- [ ] **Rate limiting**: Slack tiene rate limits estrictos (1 msg/s por canal). ¿Cómo manejar respuestas largas?
+- [ ] **Message length**: Slack limita a 4000 chars por mensaje. ¿Splitear respuestas largas?
+
+---
+
+## 14. Orden de Implementación
+
+1. **Config**: `SlackConfig` + load/save
+2. **Slack client**: conexión Socket Mode, estado
+3. **Slack handler**: recibir mensajes, enviar texto
+4. **Daemon integration**: reemplazar whatsapp.Client por slack.Client
+5. **Setup wizard**: flujo de tokens + selección de canal
+6. **Image support**: `files.upload` para `/create-image`
+7. **Voice support**: descarga de audio files → Whisper
+8. **Cleanup**: eliminar `internal/whatsapp/`, actualizar `go.mod`
+9. **Testing**: test manual end-to-end
+10. **Docs**: actualizar CLAUDE.md
+
+---
+
+## 15. Riesgos
+
+| Riesgo | Mitigación |
+|--------|------------|
+| Rate limiting de Slack (1 msg/s) | Implementar queue con backoff |
+| Mensajes > 4000 chars | Splitear en múltiples mensajes |
+| Socket Mode requiere app-level token | Documentar bien en setup |
+| Files API cambió en 2024+ | Usar SDK actualizado |
+| Bot no puede ver mensajes sin invitar al canal | Documentar en setup wizard |
