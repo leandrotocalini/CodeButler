@@ -228,6 +228,7 @@ CREATE TABLE sessions (
 | `internal/slack/handler.go` | Event parsing, send messages/images |
 | `internal/slack/channels.go` | List/create channels, get info |
 | `internal/slack/snippets.go` | Code block extraction, smart formatting, file upload |
+| `internal/history/history.go` | PR detection, thread fetch, summary generation, commit |
 
 ### Modify
 | File | Changes |
@@ -558,6 +559,7 @@ This is the **central architectural decision** of CodeButler2.
 - [x] **Code snippets**: short (<20 lines) inline, long (>=20 lines) as file upload
 - [x] **Knowledge sharing**: CLAUDE.md committed to branches, shared via PR merge
 - [x] **memory.md coexistence**: local memory.md (Kimi) + shared CLAUDE.md (git) both exist
+- [x] **Thread history**: auto-generate `history/<threadId>.md` when PR is opened, committed to the PR branch
 
 ---
 
@@ -1124,3 +1126,152 @@ v2 naturally supports teams:
 | Code complexity | ~630 lines daemon.go | ~200 lines estimated |
 | Authentication | QR code + phone linking | Bot token (one-time setup) |
 | Setup per repo | QR scan + group create | Just pick a channel |
+
+---
+
+## 23. Thread History — Development Journal per PR
+
+When Claude opens a PR from a thread, it generates a summary of the entire
+thread conversation and commits it as `history/<threadId>.md`. This file
+is part of the PR, giving reviewers full visibility into the development
+process: what was asked, what was tried, what decisions were made.
+
+### The Flow
+
+```
+Thread 1732456789.123456: "fix the login bug"
+    ↓ user: "fix the login bug"
+    ↓ claude: "I see the issue, the session check..."
+    ↓ user: "also check the remember me checkbox"
+    ↓ claude: "Done. Opening PR..."
+    ↓
+Daemon detects PR creation in Claude's output
+    ↓
+Generate thread summary (via Kimi or Claude)
+    ↓
+Write to: history/1732456789.123456.md
+    ↓
+git add + amend into PR commit (or new commit)
+    ↓
+File is now part of the PR ✓
+```
+
+### File Format
+
+```markdown
+<!-- history/1732456789.123456.md -->
+# Fix login bug and remember-me checkbox
+
+**Thread**: 1732456789.123456
+**Channel**: #codebutler-backend
+**Date**: 2026-02-14
+**PR**: #42
+
+## Conversation
+
+**leandro** (15:04): fix the login bug
+
+**claude** (15:04): I found the issue in `auth/session.go`. The session
+validation was checking expiry with `time.Now()` but the stored timestamp
+was in UTC while the comparison used local time...
+
+**leandro** (15:06): also check the remember me checkbox
+
+**claude** (15:07): The remember-me checkbox wasn't persisting because
+the cookie `MaxAge` was set to 0 (session cookie) instead of 30 days...
+
+## Changes Made
+
+- `auth/session.go`: Fixed timezone comparison in session validation
+- `auth/login.go`: Set cookie MaxAge to 30 days when remember-me is checked
+- `auth/session_test.go`: Added test for UTC vs local time edge case
+
+## Decisions
+
+- Used 30 days for remember-me duration (standard practice)
+- Kept session cookies (MaxAge=0) for non-remember-me logins
+```
+
+### Detection: When to Generate
+
+The daemon watches Claude's response for PR creation signals:
+
+```go
+// Detect PR URL in Claude's response
+prURLPattern := regexp.MustCompile(`https://github\.com/[^/]+/[^/]+/pull/(\d+)`)
+
+// Or detect `gh pr create` in Claude's tool calls
+ghPRPattern := regexp.MustCompile(`gh pr create`)
+```
+
+When detected:
+1. Fetch full thread history from Slack (`conversations.replies`)
+2. Generate summary (Kimi for cost, or Claude for quality)
+3. Write `history/<threadTS>.md`
+4. Commit and push to the PR branch
+
+### Summary Generation Prompt
+
+```
+You are writing a development journal entry for a PR.
+
+Given a Slack thread conversation between a developer and an AI assistant,
+produce a markdown document with:
+
+1. **Title**: one-line summary of what was done
+2. **Conversation**: key exchanges (skip noise, keep decisions and reasoning)
+3. **Changes Made**: list of files changed and what was done to each
+4. **Decisions**: architectural or implementation decisions made during the thread
+
+Keep it concise but useful for a PR reviewer who wants to understand
+the "why" behind the changes.
+
+Thread:
+---
+{thread messages}
+---
+```
+
+### Directory Structure
+
+```
+history/
+  1732456789.123456.md    # Thread: fix login bug → PR #42
+  1732460000.654321.md    # Thread: add password reset → PR #43
+  1732470000.111111.md    # Thread: refactor API → PR #44
+```
+
+### Why This Is Useful
+
+1. **PR reviewers** see the full development context — not just the diff,
+   but the conversation that led to the decisions
+2. **Future developers** can search `history/` to understand why something
+   was built a certain way
+3. **Onboarding** — new team members can read through history to understand
+   the project's evolution
+4. **Accountability** — every change has a traceable conversation thread
+5. **Post-mortems** — if a bug is introduced, trace back to the thread
+   that created it
+
+### Relationship to Other Knowledge Features
+
+```
+history/<threadId>.md  →  "What happened" (conversation + decisions)
+CLAUDE.md              →  "What we know" (codebase conventions, shared knowledge)
+.codebutler/memory.md  →  "What the bot remembers" (local operational memory)
+```
+
+Three complementary layers:
+- **history/**: per-PR development journal (committed, part of the PR)
+- **CLAUDE.md**: distilled codebase knowledge (committed, shared via merge)
+- **memory.md**: ephemeral operational memory (gitignored, local)
+
+### Implementation
+
+- **File**: `internal/history/history.go`
+- **Functions**:
+  - `DetectPR(claudeResponse string) (prNumber int, found bool)`
+  - `FetchThread(slackClient, channelID, threadTS string) []Message`
+  - `GenerateSummary(messages []Message, prNumber int) string`
+  - `WriteAndCommit(repoDir, threadTS, summary string) error`
+- **Integration**: called in daemon after `processBatch` when PR is detected
