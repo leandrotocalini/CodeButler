@@ -1241,6 +1241,24 @@ history/
   1732470000.111111.md    # Thread: refactor API → PR #44
 ```
 
+### Not Loaded by Default
+
+History files are **not injected into Claude's context**. They exist for
+humans, not for the AI:
+
+- Claude already has full context via `--resume` within a thread
+- Loading history into the prompt would bloat context with past conversations
+- The `history/` folder can grow large over time (one file per PR)
+
+**When history IS useful**:
+- A user asks in Slack: "why did we change the auth flow?" → a human (or
+  Claude, if asked) can `grep history/ -l "auth"` to find the relevant thread
+- PR reviewers click into `history/` in the PR diff to understand the conversation
+- Post-mortems: trace a bug back to the thread + decisions that introduced it
+- Onboarding: new devs browse `history/` to understand project evolution
+
+The history folder is a **passive archive** — always there, never in the way.
+
 ### Why This Is Useful
 
 1. **PR reviewers** see the full development context — not just the diff,
@@ -1256,15 +1274,18 @@ history/
 ### Relationship to Other Knowledge Features
 
 ```
-history/<threadId>.md  →  "What happened" (conversation + decisions)
-CLAUDE.md              →  "What we know" (codebase conventions, shared knowledge)
-.codebutler/memory.md  →  "What the bot remembers" (local operational memory)
+history/<threadId>.md  →  "What happened" (passive archive, for humans)
+CLAUDE.md              →  "What we know" (loaded by Claude, shared knowledge)
+.codebutler/memory.md  →  "What the bot remembers" (loaded by Claude, local)
 ```
 
-Three complementary layers:
-- **history/**: per-PR development journal (committed, part of the PR)
-- **CLAUDE.md**: distilled codebase knowledge (committed, shared via merge)
-- **memory.md**: ephemeral operational memory (gitignored, local)
+Three complementary layers with different audiences:
+
+| Layer | Loaded by Claude | Audience | Purpose |
+|---|---|---|---|
+| `history/` | No (passive) | Humans: reviewers, devs, onboarding | What happened and why |
+| `CLAUDE.md` | Yes (auto) | Claude + humans | Codebase conventions, shared knowledge |
+| `memory.md` | Yes (auto) | Claude only | Operational memory, local learnings |
 
 ### Implementation
 
