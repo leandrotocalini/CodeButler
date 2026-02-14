@@ -118,7 +118,8 @@ solo lo específico del canal. Per-repo puede override valores globales.
     "botToken": "xoxb-...",
     "appToken": "xapp-..."
   },
-  "openai": { "apiKey": "sk-..." }
+  "openai": { "apiKey": "sk-..." },
+  "kimi":   { "apiKey": "..." }
 }
 ```
 
@@ -143,6 +144,7 @@ Si per-repo define `slack.botToken`, usa ese en vez del global.
 - `botPrefix` → **eliminado** (Slack identifica bots por `bot_id`)
 - Nuevos: `botToken`, `appToken` (en global)
 - `openai.apiKey` se mueve a global (compartido entre repos)
+- Nuevo: `kimi.apiKey` en global
 
 ---
 
@@ -343,10 +345,11 @@ func (c *Client) GetChannelInfo(channelID string) (*Channel, error)
 2. Prompt: "App Token (xapp-...):"
 3. Validate tokens (api.AuthTest)
 4. (Optional) Prompt: "OpenAI API key:"
-5. Save → ~/.codebutler/config.json (global)
-6. Connect Socket Mode
-7. List channels → select or create
-8. Save → <repo>/.codebutler/config.json (per-repo)
+5. (Optional) Prompt: "Kimi API key:"
+6. Save → ~/.codebutler/config.json (global)
+7. Connect Socket Mode
+8. List channels → select or create
+9. Save → <repo>/.codebutler/config.json (per-repo)
 ```
 
 **Repos siguientes (global ya existe):**
