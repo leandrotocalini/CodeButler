@@ -419,7 +419,7 @@ if msg.BotID != "" || msg.User == c.botUserID { skip }
 - [x] **Message length**: splitear en múltiples mensajes de ~4000 chars en el thread
 
 ### Pendientes
-- [ ] **Markdown**: Slack usa mrkdwn (distinto de Markdown standard). ¿Convertir output de Claude?
+- [x] **Markdown**: Convertir output de Claude (Markdown standard) a mrkdwn de Slack antes de enviar
 
 ---
 
