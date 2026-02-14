@@ -235,7 +235,7 @@ CREATE TABLE sessions (
 | `internal/slack/handler.go` | Event parsing, send messages/images |
 | `internal/slack/channels.go` | List/create channels, get info |
 | `internal/slack/snippets.go` | Code block extraction, smart formatting, file upload |
-| `internal/history/history.go` | PR detection, thread fetch, summary generation, commit |
+| `internal/github/github.go` | PR detection, merge polling, PR description updates via `gh` |
 | `internal/llm/client.go` | OpenAI-compatible client for cheap models (Kimi, GPT-4o-mini, DeepSeek) |
 | `internal/preflight/preflight.go` | Pre-Claude enrichment: grep repo, read files, build focused prompt |
 | `internal/router/router.go` | Message classifier: question vs code_task vs clarify |
@@ -571,7 +571,7 @@ This is the **central architectural decision** of CodeButler2.
 - [x] **Code snippets**: short (<20 lines) inline, long (>=20 lines) as file upload
 - [x] **Knowledge sharing**: CLAUDE.md committed to branches, shared via PR merge
 - [x] **memory.md coexistence**: local memory.md (Kimi) + shared CLAUDE.md (git) both exist
-- [x] **Thread history**: auto-generate `history/<threadId>.md` when PR is opened, committed to the PR branch
+- [x] **PR as journal**: thread summary goes in PR description (via `gh pr edit`), no files committed
 - [x] **Multi-model**: Claude executes code, cheap models (Kimi/GPT-4o-mini) orchestrate around it
 - [x] **Smart routing**: Kimi classifies messages — questions answered directly, code tasks go to Claude
 - [x] **Pre-flight enrichment**: Kimi scans repo + memory before Claude runs, builds focused prompt
@@ -1162,12 +1162,11 @@ v2 naturally supports teams:
 
 ---
 
-## 23. Thread History — Development Journal per PR
+## 23. PR Description as Development Journal
 
-When Claude opens a PR from a thread, it generates a summary of the entire
-thread conversation and commits it as `history/<threadId>.md`. This file
-is part of the PR, giving reviewers full visibility into the development
-process: what was asked, what was tried, what decisions were made.
+No extra files. No `history/` folder. The **PR description IS the history**.
+When a PR is created, the daemon generates a summary of the Slack thread
+and puts it in the PR body via `gh pr edit`. GitHub keeps it forever.
 
 ### The Flow
 
@@ -1180,69 +1179,47 @@ Thread 1732456789.123456: "fix the login bug"
     ↓
 Daemon detects PR creation in Claude's output
     ↓
-Generate thread summary (via Kimi or Claude)
+Fetch thread messages (conversations.replies)
     ↓
-Write to: history/1732456789.123456.md
+Kimi generates summary (~$0.002)
     ↓
-git add + amend into PR commit (or new commit)
+gh pr edit #42 --body "$(updated description)"
     ↓
-File is now part of the PR ✓
+PR description now has: summary + thread link + decisions ✓
 ```
 
-### File Format
-
-```markdown
-<!-- history/1732456789.123456.md -->
-# Fix login bug and remember-me checkbox
-
-**Thread**: 1732456789.123456
-**Channel**: #codebutler-backend
-**Date**: 2026-02-14
-**PR**: #42
-
-## Conversation
-
-**leandro** (15:04): fix the login bug
-
-**claude** (15:04): I found the issue in `auth/session.go`. The session
-validation was checking expiry with `time.Now()` but the stored timestamp
-was in UTC while the comparison used local time...
-
-**leandro** (15:06): also check the remember me checkbox
-
-**claude** (15:07): The remember-me checkbox wasn't persisting because
-the cookie `MaxAge` was set to 0 (session cookie) instead of 30 days...
-
-## Changes Made
-
-- `auth/session.go`: Fixed timezone comparison in session validation
-- `auth/login.go`: Set cookie MaxAge to 30 days when remember-me is checked
-- `auth/session_test.go`: Added test for UTC vs local time edge case
-
-## Decisions
-
-- Used 30 days for remember-me duration (standard practice)
-- Kept session cookies (MaxAge=0) for non-remember-me logins
-```
-
-### PR Description — Thread Link
-
-When Claude creates a PR via `gh pr create`, the sandbox prompt instructs
-it to include the Slack thread URL in the description. The daemon injects
-`{slack_thread_url}` into the prompt, so Claude has it available.
-
-The result: every PR links back to its Slack thread.
+### PR Description Format
 
 ```markdown
 ## Summary
 Fixed timezone comparison in session validation and remember-me cookie.
 
+## Changes
+- `auth/session.go`: Fixed UTC vs local time comparison in session expiry
+- `auth/login.go`: Set cookie MaxAge to 30 days when remember-me is checked
+- `auth/session_test.go`: Added test for timezone edge case
+
+## Decisions
+- 30 days for remember-me duration (standard practice)
+- Kept session cookies (MaxAge=0) for non-remember-me logins
+
 ## Slack Thread
 https://myworkspace.slack.com/archives/C0123ABCDEF/p1732456789123456
 ```
 
-From GitHub, reviewers click the thread link to see the full conversation.
-From Slack, users see the PR link in Claude's message. **Bidirectional.**
+### Why PR Description Instead of Files
+
+| Approach | Pros | Cons |
+|---|---|---|
+| `history/<threadId>.md` (old idea) | Searchable via grep, part of repo | Clutters repo, extra commits, grows forever |
+| **PR description** (new) | Zero files, already where reviewers look, GitHub search works | Not in the repo (lives on GitHub) |
+
+The PR description is the natural place:
+- Reviewers **already read it** before reviewing code
+- GitHub **indexes it** for search
+- It's **permanent** — PRs are never deleted
+- **Zero repo clutter** — no extra files, no extra commits
+- The Slack thread link gives full conversation if the summary isn't enough
 
 ### GitHub Operations via `gh`
 
@@ -1256,6 +1233,12 @@ func IsMerged(prNumber int) (bool, error) {
     out, err := exec.Command("gh", "pr", "view", strconv.Itoa(prNumber),
         "--json", "state,mergedAt").Output()
     // parse JSON: state == "MERGED"
+}
+
+// UpdatePRDescription appends the thread summary to the PR body
+func UpdatePRDescription(prNumber int, summary string) error {
+    return exec.Command("gh", "pr", "edit", strconv.Itoa(prNumber),
+        "--body", summary).Run()
 }
 
 // GetPRDiff fetches the diff for cross-thread references
@@ -1277,7 +1260,7 @@ func WatchPRs(tracker *conflicts.Tracker, onMerge func(threadTS string, pr int))
 No GitHub API tokens needed — `gh` handles authentication via its own
 config (`~/.config/gh/`). One less secret to manage.
 
-### Detection: When to Generate History
+### Detection: When to Update PR Description
 
 The daemon watches Claude's response for PR creation signals:
 
@@ -1291,25 +1274,25 @@ ghPRPattern := regexp.MustCompile(`gh pr create`)
 
 When detected:
 1. Fetch full thread history from Slack (`conversations.replies`)
-2. Generate summary (Kimi for cost, or Claude for quality)
-3. Write `history/<threadTS>.md`
-4. Commit and push to the PR branch
+2. Generate summary via Kimi (~$0.002)
+3. `gh pr edit <number> --body <summary + thread link>`
 
-### Summary Generation Prompt
+### Summary Generation Prompt (Kimi)
 
 ```
-You are writing a development journal entry for a PR.
-
 Given a Slack thread conversation between a developer and an AI assistant,
-produce a markdown document with:
+generate a PR description with these sections:
 
-1. **Title**: one-line summary of what was done
-2. **Conversation**: key exchanges (skip noise, keep decisions and reasoning)
-3. **Changes Made**: list of files changed and what was done to each
-4. **Decisions**: architectural or implementation decisions made during the thread
+## Summary
+1-3 sentences describing what was done and why.
 
-Keep it concise but useful for a PR reviewer who wants to understand
-the "why" behind the changes.
+## Changes
+Bullet list of files changed and what was done to each.
+
+## Decisions
+Bullet list of architectural/implementation decisions made during the thread.
+
+Keep it concise. A PR reviewer should understand the "why" in 30 seconds.
 
 Thread:
 ---
@@ -1317,70 +1300,45 @@ Thread:
 ---
 ```
 
-### Directory Structure
+### Bidirectional Links
 
 ```
-history/
-  1732456789.123456.md    # Thread: fix login bug → PR #42
-  1732460000.654321.md    # Thread: add password reset → PR #43
-  1732470000.111111.md    # Thread: refactor API → PR #44
+Slack thread                          GitHub PR
+┌─────────────────┐                  ┌─────────────────────┐
+│ user: "fix the  │                  │ ## Summary           │
+│   login bug"    │                  │ Fixed timezone...    │
+│                 │    PR link       │                      │
+│ claude: "Fixed. │ ──────────────→  │ ## Slack Thread      │
+│   PR #42: url"  │                  │ https://slack.com/.. │
+│                 │  ←────────────── │                      │
+└─────────────────┘    thread link   └─────────────────────┘
 ```
 
-### Not Loaded by Default
+From Slack: click the PR URL to see the diff.
+From GitHub: click the thread URL to see the conversation.
 
-History files are **not injected into Claude's context**. They exist for
-humans, not for the AI:
+### Knowledge Layers (Simplified)
 
-- Claude already has full context via `--resume` within a thread
-- Loading history into the prompt would bloat context with past conversations
-- The `history/` folder can grow large over time (one file per PR)
-
-**When history IS useful**:
-- A user asks in Slack: "why did we change the auth flow?" → a human (or
-  Claude, if asked) can `grep history/ -l "auth"` to find the relevant thread
-- PR reviewers click into `history/` in the PR diff to understand the conversation
-- Post-mortems: trace a bug back to the thread + decisions that introduced it
-- Onboarding: new devs browse `history/` to understand project evolution
-
-The history folder is a **passive archive** — always there, never in the way.
-
-### Why This Is Useful
-
-1. **PR reviewers** see the full development context — not just the diff,
-   but the conversation that led to the decisions
-2. **Future developers** can search `history/` to understand why something
-   was built a certain way
-3. **Onboarding** — new team members can read through history to understand
-   the project's evolution
-4. **Accountability** — every change has a traceable conversation thread
-5. **Post-mortems** — if a bug is introduced, trace back to the thread
-   that created it
-
-### Relationship to Other Knowledge Features
-
-```
-history/<threadId>.md  →  "What happened" (passive archive, for humans)
-CLAUDE.md              →  "What we know" (loaded by Claude, shared knowledge)
-.codebutler/memory.md  →  "What the bot remembers" (loaded by Claude, local)
-```
-
-Three complementary layers with different audiences:
+No more `history/` folder. Two layers instead of three:
 
 | Layer | Loaded by Claude | Audience | Purpose |
 |---|---|---|---|
-| `history/` | No (passive) | Humans: reviewers, devs, onboarding | What happened and why |
 | `CLAUDE.md` | Yes (auto) | Claude + humans | Codebase conventions, shared knowledge |
-| `memory.md` | Yes (auto) | Claude only | Operational memory, local learnings |
+| `.codebutler/memory.md` | Yes (auto) | Claude only | Operational memory, local learnings |
+| PR description | No | Humans (reviewers) | What happened and why (lives on GitHub) |
 
 ### Implementation
 
-- **File**: `internal/history/history.go`
+- **File**: `internal/github/github.go`
 - **Functions**:
   - `DetectPR(claudeResponse string) (prNumber int, found bool)`
-  - `FetchThread(slackClient, channelID, threadTS string) []Message`
-  - `GenerateSummary(messages []Message, prNumber int) string`
-  - `WriteAndCommit(repoDir, threadTS, summary string) error`
-- **Integration**: called in daemon after `processBatch` when PR is detected
+  - `UpdatePRDescription(prNumber int, summary string) error`
+  - `IsMerged(prNumber int) (bool, error)`
+  - `GetPRDiff(prNumber int) (string, error)`
+  - `WatchPRs(tracker, onMerge)`
+- **Summary generation**: via Kimi in `internal/llm/client.go`
+- **Thread fetching**: via Slack `conversations.replies` in `internal/slack/handler.go`
+- **Integration**: called in daemon after PR is detected in Claude's response
 
 ---
 
@@ -1536,7 +1494,7 @@ After Claude finishes, cheap models handle the aftermath:
 Claude response arrives
     ↓ (parallel, non-blocking)
     ├─ Kimi: extract memory/learnings → update memory.md
-    ├─ Kimi: detect PR creation → generate history/<thread>.md
+    ├─ Kimi: detect PR creation → generate summary → gh pr edit --body
     ├─ Kimi: summarize for Slack (if response is very long)
     └─ Kimi: detect if Claude left TODO/FIXME → warn in thread
 ```
@@ -1910,7 +1868,7 @@ path that doesn't lose user messages.
 | Claude process crashes | Non-zero exit code from `exec.Command` | Reply in thread with error, session preserved for retry | User can say "try again" |
 | Kimi/orchestrator unreachable | HTTP timeout (10s) | Skip orchestration, send directly to Claude (fallback to v1 behavior) | Slightly more expensive, but works |
 | SQLite locked | Busy timeout on connection (`_busy_timeout=5000`) | Retry with backoff, max 3 attempts | Brief delay |
-| Out of disk | Write failure on store.db or history/ | Log error, continue processing in-memory | New messages not persisted until resolved |
+| Out of disk | Write failure on store.db | Log error, continue processing in-memory | New messages not persisted until resolved |
 | Machine reboot | systemd/launchd restarts daemon | Daemon starts, reconnects Slack, pending messages reprocessed | Brief downtime |
 
 ### Message Durability
@@ -2102,7 +2060,7 @@ func (d *Daemon) onPRMerged(threadTS string, prNumber int) {
     scope := d.tracker.Get(threadTS)
 
     // 1. Post-flight (parallel, non-blocking)
-    go d.generateHistory(threadTS, prNumber)    // history/<threadTS>.md
+    go d.updatePRDescription(threadTS, prNumber) // summary → gh pr edit
     go d.extractMemory(threadTS)                // update memory.md
 
     // 2. Notify in thread
@@ -2200,7 +2158,7 @@ The daemon detects the reference and fetches context:
 ```
 Slack thread link → fetch thread messages via conversations.replies
 PR URL            → fetch PR description + diff via gh pr view
-history/ file     → read history/<threadTS>.md if it exists
+PR URL            → fetch PR description + diff via gh pr view
 ```
 
 This context is injected into Claude's prompt as **read-only background**:
@@ -2273,7 +2231,7 @@ the 1:1:1 rule (that PR is already merged). Instead, they start a
 | `internal/router/router.go` | Message classification | Mock LLM client, verify routing decisions |
 | `internal/preflight/preflight.go` | Prompt enrichment | Mock grep/git results, verify enriched prompt |
 | `internal/conflicts/tracker.go` | File overlap detection, merge ordering | In-memory tracker with test data |
-| `internal/history/history.go` | PR detection in Claude output | Regex tests against sample outputs |
+| `internal/github/github.go` | PR detection, merge polling | Regex tests + mock `gh` output |
 | `internal/ratelimit/limiter.go` | Rate limiting logic | Time-based tests with controlled clock |
 | `internal/llm/client.go` | Request/response parsing | HTTP test server with canned responses |
 
@@ -2462,7 +2420,7 @@ Worktrees are the clear winner: instant creation, minimal disk, full isolation.
 8. PR merged (detected by daemon)
        ↓
 9. THREAD CLOSED:
-       - Post-flight: generate history/<threadTS>.md, extract memory
+       - Post-flight: update PR description (summary via Kimi), extract memory
        - Notify in thread: "PR #42 merged. Thread closed."
        - git worktree remove .codebutler/branches/fix-login
        - git branch -d codebutler/fix-login
@@ -2662,7 +2620,7 @@ myrepo/                              ← daemon: Slack + SQLite + orchestration
     images/                          ← generated images
   src/                               ← main repo source (daemon reads, never modifies)
   CLAUDE.md                          ← shared knowledge
-  history/                           ← thread journals (committed via PRs)
+  .gitignore                          ← includes .codebutler/
   go.mod
 ```
 
