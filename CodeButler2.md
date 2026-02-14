@@ -236,6 +236,7 @@ CREATE TABLE sessions (
 | `internal/slack/channels.go` | List/create channels, get info |
 | `internal/slack/snippets.go` | Code block extraction, smart formatting, file upload |
 | `internal/github/github.go` | PR detection, merge polling, PR description updates via `gh` |
+| `internal/journal/journal.go` | Thread journal: incremental MD narrative committed to branch |
 | `internal/models/interfaces.go` | ProductManager, Artist, Coder interfaces + shared types |
 | `internal/provider/openai/client.go` | Shared OpenAI HTTP client (auth, rate limiting, retries) |
 | `internal/provider/openai/product_manager.go` | Thin adapter: shared client → ProductManager interface |
@@ -718,7 +719,8 @@ This is the **central architectural decision** of CodeButler2.
 - [x] **memory.md with approval**: after PR creation, Claude (always) analyzes thread + diff → proposes memory updates in thread, user approves/edits, committed to PR branch
 - [x] **PM self-improvement**: memory extraction analyzes what Coder asked → adds "Planning Notes" so PM handles it next time
 - [x] **memory.md via git flow**: memory.md committed to repo, follows PR flow, merges to main with the PR
-- [x] **PR as journal**: thread summary goes in PR description (via `gh pr edit`), no files committed
+- [x] **PR as journal**: thread summary goes in PR description (via `gh pr edit`)
+- [x] **Thread journal**: detailed narrative MD file committed to branch (`.codebutler/journals/thread-<ts>.md`), lands on main with merge
 - [x] **Multi-model**: Claude executes code, cheap models (Kimi/GPT-4o-mini) orchestrate around it
 - [x] **Swappable providers**: three interfaces (ProductManager, Artist, Coder), all configurable via config.json
 - [x] **Kimi first, always**: Kimi starts every thread. Scans repo, asks questions, proposes plan. Claude never starts without approval
@@ -825,13 +827,19 @@ Memory extraction triggers after a PR is created:
 3. **User says "done"** — for threads that don't produce a PR (questions,
    images shown in Slack only) → committed directly to main
 
-Memory extraction **always uses Claude** regardless of the thread's active
-PM model. This is a deliberate design choice:
+Memory extraction **always uses Claude in the PM role** regardless of
+the thread's active PM model. Claude uses the same PM interface — same
+read-only tools, same memory file routing (memory-pm.md, memory-artist.md),
+same JSON output format. The only difference is a smarter brain doing
+the analysis.
+
+This is a deliberate design choice:
 
 - Claude is the best model for identifying subtle patterns and learnings
 - The diff is complex code — Claude understands it better than any other model
 - The cost is one extra Claude call (~$0.02-0.05) — worth it for quality learnings
 - This is the most valuable output of the entire thread: the learnings compound
+- Claude acts as PM here, NOT as Coder — it cannot edit files, only analyze
 
 When triggered, the daemon:
 
@@ -2061,7 +2069,8 @@ No more `history/` folder. Two layers instead of three:
 |---|---|---|---|
 | `CLAUDE.md` | Yes (auto) | Claude + humans | Codebase conventions, project guide |
 | `memory.md` | Yes (injected) | Claude (extraction) + PM (reads) | Learnings from conversations + diffs, planning notes |
-| PR description | No | Humans (reviewers) | What happened and why (lives on GitHub) |
+| Thread journal | No | Humans (user, reviewers) | Detailed narrative of what happened in the thread |
+| PR description | No | Humans (reviewers) | Short summary (lives on GitHub) |
 
 ### Implementation
 
@@ -2075,6 +2084,198 @@ No more `history/` folder. Two layers instead of three:
 - **Summary generation**: via `models.ProductManager` interface (Kimi, GPT-4o-mini, etc.)
 - **Thread fetching**: via Slack `conversations.replies` in `internal/slack/handler.go`
 - **Integration**: called in daemon after PR is detected in Claude's response
+
+### Thread Journal — Detailed Narrative per Thread
+
+The PR description is a short summary for reviewers. But sometimes
+you want to read **exactly what happened** — every interaction, every
+decision, every exchange between roles. That's the thread journal.
+
+A thread journal is a markdown file committed to the PR branch that
+tells the full story of the thread, oriented to the user (not to models).
+
+#### What It Looks Like
+
+```markdown
+# Thread Journal: "fix the login bug"
+
+**Started**: 2026-02-14 14:30 · **Closed**: 2026-02-14 15:12
+**Branch**: codebutler/fix-login · **PR**: #42
+**PM model**: Kimi (switched to Claude at 14:45, back to Kimi at 14:52)
+
+---
+
+## Timeline
+
+### 14:30 — User request
+> fix the login bug, sometimes the session expires immediately after login
+
+### 14:30 — PM (Kimi) analyzes
+PM read `auth/session.go`, `auth/login.go`, and `auth/session_test.go`.
+Found: session expiry uses `time.Now()` (local time) but cookies use UTC.
+**Plan proposed:**
+1. Fix timezone comparison in `auth/session.go`
+2. Add test for timezone edge case
+3. Check remember-me cookie behavior
+
+### 14:31 — User approved plan
+> yes
+
+### 14:31 — Coder (Claude) starts working
+Files modified: `auth/session.go`, `auth/login.go`, `auth/session_test.go`
+
+### 14:35 — Coder asks PM a question
+> "auth/login.go uses JWT but auth/session.go uses cookies. Which pattern
+>  for registration?"
+PM (Kimi) answered from memory: "JWT, always JWT"
+*(PM could have included this in the plan — learning extracted)*
+
+### 14:38 — Coder asks user (escalated by PM)
+> "The remember-me checkbox doesn't exist in the UI yet. Should I add it,
+>  or just fix the session expiry for now?"
+
+### 14:39 — User responds
+> just fix the session, remember-me is a separate ticket
+
+### 14:42 — Coder done, PR #42 opened
+Changes: 3 files, +45 -12 lines
+- `auth/session.go`: Fixed UTC vs local time comparison
+- `auth/login.go`: Set cookie timezone explicitly
+- `auth/session_test.go`: Added timezone edge case test
+
+### 14:42 — User requests deeper analysis
+> /pm claude
+PM switched to Claude (Pro).
+> Can you also check if there are similar timezone bugs elsewhere?
+
+### 14:45 — PM (Claude) investigates
+Claude read 8 files across `auth/`, `middleware/`, and `handlers/`.
+Found: `middleware/ratelimit.go` has a similar `time.Now()` vs UTC issue.
+**Recommended**: fix in a follow-up thread (different scope).
+
+### 14:48 — User switches back
+> /pm kimi
+> dale merge
+
+### 14:48 — Memory extraction (Claude)
+Proposed learnings:
+1. ➕ PM: "All time comparisons must use UTC — check for time.Now() vs time.UTC()"
+2. ➕ PM: "middleware/ratelimit.go has a timezone bug — needs separate fix"
+3. 💡 CLAUDE.md: "Always use time.Now().UTC() for time comparisons"
+User approved all 3.
+
+### 14:49 — Thread closed
+PR #42 merged (squash). Branch deleted. Worktree removed.
+
+---
+
+## Cost
+| Role | Model | Calls | Cost |
+|------|-------|-------|------|
+| PM | Kimi | 4 | $0.004 |
+| PM | Claude (Pro) | 2 | $0.06 |
+| Coder | Claude | 1 (5 turns) | $0.85 |
+| Memory extraction | Claude | 1 | $0.03 |
+| **Total** | | | **$0.944** |
+```
+
+#### How It's Generated
+
+The journal is **built incrementally** as the thread progresses —
+each significant event appends to the file. It's NOT generated at the
+end by summarizing the conversation (that would lose detail).
+
+```go
+// internal/journal/journal.go
+
+type Journal struct {
+    threadTS string
+    branch   string
+    entries  []Entry
+}
+
+type Entry struct {
+    Time    time.Time
+    Type    string // "user", "pm", "coder", "exchange", "switch", "memory", "close"
+    Content string // markdown-formatted
+}
+
+// Append adds an entry and commits the journal to the branch
+func (j *Journal) Append(entry Entry) {
+    j.entries = append(j.entries, entry)
+    j.writeAndCommit()
+}
+
+// writeAndCommit renders the full journal.md and commits to the branch
+func (j *Journal) writeAndCommit() {
+    md := j.render() // full markdown from all entries
+    // Write to .codebutler/journal.md on the branch
+    // git add + commit with message "journal: <latest entry type>"
+}
+```
+
+Events that get journal entries:
+
+| Event | Journal entry |
+|-------|--------------|
+| User message | Quote of the message |
+| PM plan proposed | Plan text + which files PM read |
+| User approves/rejects plan | User's response |
+| PM model switch (`/pm`) | Which model, when |
+| Coder starts working | Files being modified |
+| Coder→PM question (internal) | The question + PM's answer + source (memory/grep/file) |
+| Coder→User question (escalated) | The question |
+| User answers escalated question | User's response |
+| Coder done / PR opened | Files changed, lines added/removed |
+| Memory extraction | Proposed learnings + user's response |
+| Thread closed | PR merged, cleanup done |
+
+#### Where It Lives
+
+```
+.codebutler/journals/
+  thread-1732456789.123456.md   ← one file per thread
+```
+
+The journal is committed to the PR branch alongside the code changes.
+When the PR is merged, the journal lands on main permanently.
+
+For threads that don't produce a PR (questions, image-only), the journal
+is committed directly to main on thread close.
+
+#### Journal vs PR Description vs Slack Thread
+
+| | PR Description | Thread Journal | Slack Thread |
+|---|---|---|---|
+| **Audience** | Code reviewers | User (you, future you) | Everyone in channel |
+| **Detail level** | Summary (30s read) | Full narrative (5min read) | Raw conversation |
+| **Includes internal exchanges** | No | Yes (PM↔Coder questions) | No (those are invisible) |
+| **Includes cost breakdown** | No | Yes | Only in summary message |
+| **Includes PM model switches** | No | Yes | Only the switch messages |
+| **Includes which files PM read** | No | Yes | No |
+| **Searchable in repo** | No (GitHub only) | Yes (`grep -r "timezone" .codebutler/journals/`) | No (Slack search) |
+| **Lives** | GitHub PR | Git repo | Slack |
+
+The key insight: the thread journal shows **what happened behind the
+scenes** — the PM reading files, the internal exchanges between PM and
+Coder, the decisions the PM made autonomously. This is invisible in Slack
+(the user never sees internal exchanges) and absent from the PR description
+(which is a summary). The journal is the detailed "director's commentary"
+of the thread.
+
+#### Gitignored or Not?
+
+The journals live in `.codebutler/journals/` which is **NOT gitignored**.
+They are part of the repo. This is intentional:
+
+- They're a permanent record of how each change was developed
+- `git log` shows commits, journals show the _thought process_
+- You can grep journals to find "when did we decide to use bcrypt?"
+- They're small (~2-5KB each) and text-only — negligible repo overhead
+- Future threads can reference past journals for context
+
+If the repo owner doesn't want them, they can add
+`.codebutler/journals/` to `.gitignore`.
 
 ---
 
@@ -3015,6 +3216,8 @@ PR created (detected in Claude's response)
     ├─ PM (active model): detect if Coder left TODO/FIXME in code
     │   → warn in thread: "Coder left 2 TODOs — want a new thread to resolve them?"
     │
+    ├─ Journal: append "PR opened" entry → commit to PR branch
+    │
     └─ Claude (always): memory extraction
         → git diff main..branch → get the full diff
         → analyze full thread + diff → propose memory updates (section 16)
@@ -3032,7 +3235,8 @@ learnings compound over time and a missed pattern now costs future threads.
 User: "merge" / "done" / "dale"
     ↓
     ├─ PM (active model): generate PR summary → update PR description via `gh pr edit`
-    ├─ Merge PR: `gh pr merge --squash`
+    ├─ Journal: finalize (close entry + cost table) → commit to branch
+    ├─ Merge PR: `gh pr merge --squash` (journal lands on main with merge)
     ├─ Delete remote branch: `git push origin --delete <branch>`
     └─ Clean up worktree: `git worktree remove`
 ```
@@ -5056,7 +5260,7 @@ Only 4 states. No "idle", no "stale", no "archived":
 | `pr_opened` | PR exists, awaiting review/merge | Yes (triggers new Claude run for changes) |
 | `merged` | PR merged, thread is done | No — bot replies: "This thread is closed. Start a new thread." |
 
-### What Happens After PR Creation (Memory)
+### What Happens After PR Creation (Memory + Journal)
 
 ```go
 func (d *Daemon) onPRCreated(threadTS string, prNumber int) {
@@ -5065,17 +5269,28 @@ func (d *Daemon) onPRCreated(threadTS string, prNumber int) {
     // 1. Add thread URL to PR body (uses active PM — cheap)
     go d.addThreadLinkToPR(threadTS, prNumber)
 
-    // 2. Extract memory — ALWAYS uses Claude, regardless of thread's active PM.
+    // 2. Journal: append "PR opened" entry + commit to branch
+    d.journal.Append(threadTS, journal.Entry{
+        Type: "pr_opened",
+        Content: fmt.Sprintf("PR #%d opened. Changes: ...", prNumber),
+    })
+
+    // 3. Extract memory — ALWAYS uses Claude in PM role.
     //    Gets the diff to analyze what actually changed, not just what was discussed.
     go d.extractMemory(threadTS, scope.Branch) // Claude + diff → propose → approve → commit
 }
 
-// extractMemory always uses Claude (d.pmModels["claude"]) even if the
-// thread's active PM is Kimi or another model. If Claude is not in the
-// PM pool (unlikely but possible), falls back to the active PM.
+// extractMemory always uses Claude in PM role (d.pmModels["claude"]).
+// This is Claude acting AS the PM — same interface, same read-only tools,
+// same memory file routing. It's NOT Claude as Coder. The only difference
+// vs Kimi-as-PM is a smarter brain doing the analysis.
 //
-// The diff gives Claude concrete code context that the conversation alone
-// doesn't capture: new files, new deps, patterns established in code.
+// Why Claude-as-PM for extraction:
+// - Claude reads the diff better than any other model
+// - Learnings compound — quality here pays dividends in every future thread
+// - Cost is ~$0.02-0.05 per extraction — worth it
+//
+// Falls back to active PM if Claude is not in the pool.
 func (d *Daemon) extractMemory(threadTS, branch string) {
     // 1. Get the diff
     diff := d.git.Diff("main", branch) // git diff main...<branch>
@@ -5118,23 +5333,27 @@ func (d *Daemon) onUserClose(threadTS string) {
     // 1. Generate PR summary → update PR description
     d.updatePRDescription(threadTS, scope.PRNumber)
 
-    // 2. Post thread usage report (tokens, costs, tips)
+    // 2. Finalize thread journal: append close entry + cost table,
+    //    commit to branch (this is the last commit before merge)
+    d.journal.Finalize(threadTS, scope)
+
+    // 3. Post thread usage report (tokens, costs, tips)
     //    See section 24.6 for format details.
     d.postThreadUsageReport(threadTS, scope)
 
-    // 3. Merge the PR
+    // 4. Merge the PR (journal is now part of the merge)
     d.github.MergePR(scope.PRNumber) // gh pr merge --squash
 
-    // 4. Notify in thread
+    // 5. Notify in thread
     d.slack.SendMessage(scope.ChannelID,
         fmt.Sprintf("PR #%d merged. Thread closed.", scope.PRNumber),
         threadTS)
 
-    // 5. Cleanup: delete remote branch + remove worktree
+    // 6. Cleanup: delete remote branch + remove worktree
     d.github.DeleteBranch(scope.Branch)
     worktree.Remove(d.repoDir, scope.Branch)
 
-    // 6. Remove from active tracking
+    // 7. Remove from active tracking
     d.tracker.Close(threadTS)
 
     // 7. Notify overlapping threads to rebase
@@ -5561,10 +5780,12 @@ Worktrees are the clear winner: instant creation, minimal disk, full isolation.
        - git diff main..branch → get full diff
        - Claude analyzes thread + diff → proposes learnings → user approves
        - memory.md committed to PR branch + pushed
+       - Journal: "PR opened" entry appended + committed
        ↓
 9. User: "dale merge" → THREAD CLOSED:
-       - Kimi generates summary → updates PR description via gh pr edit
-       - gh pr merge --squash
+       - PM generates summary → updates PR description via gh pr edit
+       - Journal: finalize (close entry + cost table) → committed
+       - gh pr merge --squash (journal included in merge)
        - git push origin --delete codebutler/fix-login
        - git worktree remove .codebutler/branches/fix-login
        - Remove from conflict tracker
