@@ -559,7 +559,9 @@ Claude threads are expensive. Limited by `maxConcurrentThreads`.
 
 ### Sending
 ```
-Kimi/Claude response
+PM/Artist/Coder response
+    ↓
+Prepend role prefix ("*PM:*", "*Artist:*", "*Coder:*")
     ↓
 Format response (code snippets, markdown)
     ↓
@@ -607,10 +609,49 @@ func getConversationResponseTime() // deleted
 
 ## 12. Features that Change
 
-### Bot Prefix → Removed
-- WhatsApp needed `[BOT]` to filter own messages
-- Slack identifies bots by `bot_id` in the event
-- Bot messages are sent without prefix (cleaner)
+### Bot Prefix → Role Prefix
+
+WhatsApp needed `[BOT]` to filter own messages. Slack identifies bots
+natively (`bot_id`), so we no longer need a filtering prefix.
+
+Instead, every outgoing message gets a **role prefix** so users always
+know which part of the system is talking and what phase they're in:
+
+```
+PM: "I see auth/login.go. What's the symptom?"
+PM: "Plan: fix session.go:42. Say *yes*."
+Coder: "Working on it..."
+Coder: "Done. PR #42 opened."
+Artist: [uploads image] "Here it is. Adjust?"
+PM: "📝 Here's what I'd remember: ..."
+PM: "📊 Thread Summary: ..."
+```
+
+The prefix is **bold** in Slack (`*PM:*`, `*Coder:*`, `*Artist:*`).
+
+```go
+// internal/daemon/message.go
+
+type Role string
+
+const (
+    RolePM     Role = "PM"
+    RoleArtist Role = "Artist"
+    RoleCoder  Role = "Coder"
+)
+
+// FormatMessage prepends the role prefix to outgoing messages.
+func FormatMessage(role Role, text string) string {
+    return fmt.Sprintf("*%s:* %s", role, text)
+}
+```
+
+**Why this matters:**
+- Users learn the system fast — they see which "person" is talking
+- Phase transitions are visible: "PM asked questions → now Coder is working"
+- When the Artist generates an image, it's clear it's a different actor
+- Memory extraction messages come from PM — users know it's organizing, not coding
+- If Coder asks a question, users understand it's an implementation question, not a planning one
 
 ### Read Receipts → Reactions
 - WhatsApp: `MarkRead()` shows blue ticks
@@ -724,23 +765,49 @@ The daemon extracts learnings after creating a PR and **shows them to the
 user for approval** before committing to `memory.md`. The user controls what
 gets remembered. Uses Kimi (cheap and fast) instead of Claude.
 
-### File
+### Files — One Memory Per Role
+
+Each role has its own memory file. They learn different things and have
+different personalities. The Coder already has `CLAUDE.md` — we don't
+create a separate memory for it.
 
 ```
-<repo>/memory.md
+<repo>/memory-pm.md       # ProductManager: workflows, project knowledge, planning notes
+<repo>/memory-artist.md   # Artist: style preferences, color palettes, icon conventions
+<repo>/CLAUDE.md          # Coder: coding conventions, architecture, test patterns (already exists)
 ```
 
-Committed to the repo — not gitignored. Injected as context into the Claude
-and Kimi prompts on each thread. Lives at the repo root alongside `CLAUDE.md`.
+**Why separate files:**
+- The PM learns workflows, clarification patterns, and project structure.
+  It doesn't care about art styles or coding conventions.
+- The Artist learns color palettes, icon sizes, visual motifs, preferred
+  prompts. It doesn't care about JWT vs cookies.
+- The Coder (Claude) uses `CLAUDE.md`, which already exists in most repos.
+  CodeButler doesn't manage `CLAUDE.md` — the user and Claude do.
+
+**What each role sees:**
+- PM system prompt gets: `memory-pm.md` (workflows + knowledge + planning)
+- Artist system prompt gets: `memory-artist.md` (visual style + preferences)
+- Coder prompt gets: `CLAUDE.md` (whatever the repo already has)
+
+**Memory extraction is role-aware.** After a thread, the PM analyzes the
+conversation and proposes updates to the right file:
+- Planning/project learnings → `memory-pm.md`
+- Visual/style learnings → `memory-artist.md`
+- Coding convention learnings → suggested as a note to the user (they
+  decide whether to update `CLAUDE.md` themselves)
+
+All memory files are committed to the repo — not gitignored. They live
+at the repo root alongside `CLAUDE.md`.
 
 ### The Git Flow
 
-memory.md follows the same PR flow as code:
+Memory files follow the same PR flow as code:
 
-1. **After PR creation**: Kimi extracts learnings → proposes in thread → user approves
-2. **Kimi commits** the approved changes to `memory.md` on the PR branch and pushes
-3. **memory.md update is part of the PR** — visible in the diff, reviewable
-4. **On merge**: memory.md lands on main → available to all future threads
+1. **After PR creation**: PM extracts learnings → proposes in thread → user approves
+2. **PM commits** the approved changes to the right memory file(s) on the PR branch and pushes
+3. **Memory updates are part of the PR** — visible in the diff, reviewable
+4. **On merge**: memory lands on main → available to all future threads
 
 This means memory is:
 - **Versioned** — full git history of every learning
@@ -797,22 +864,29 @@ Kimi proposes in thread:
 ### What the User Sees in the Thread
 
 ```
-[Bot] 📝 PR #42 merged! Here's what I'd like to remember:
+PM: 📝 PR #42 merged! Here's what I'd like to remember:
 
+  *PM memory (memory-pm.md):*
   1. ➕ Auth pattern: always use JWT, never cookies
-  2. ➕ When planning auth tasks, always reference auth/login.go for patterns
-  3. 📎 Kimi learning: next time a task touches auth, pre-check JWT vs cookie pattern before asking Claude
+  2. ➕ When planning auth tasks, always reference auth/login.go
+  3. 🤝 Working with Coder: always mention JWT pattern in auth plans
+
+  *CLAUDE.md suggestion:*
+  4. 💡 Consider adding: "Auth uses JWT everywhere, never cookies"
 
   Reply *yes* to save all, or tell me what to change.
 ```
 
-**For image-only threads** (no Claude, no PR):
+**For image-only threads** (no Coder, no PR):
 ```
-[Bot] 📝 Thread done! Here's what I'd like to remember:
+PM: 📝 Thread done! Here's what I'd like to remember:
 
+  *Artist memory (memory-artist.md):*
   1. ➕ Logo style: minimalist, blue #2563EB, no text
-  2. ➕ User prefers "lost astronaut" motif over robots for error pages
-  3. 📎 Planning: when generating images for this project, use blue #2563EB as primary color
+  2. ➕ User prefers "lost astronaut" motif over robots
+
+  *PM memory (memory-pm.md):*
+  3. 🤝 Working with Artist: default to blue #2563EB for all image prompts
 
   Reply *yes* to save all, or tell me what to change.
 ```
@@ -832,44 +906,90 @@ You receive the full thread, which may include any combination of:
 Kimi's planning phase, image generation, user interactions,
 and Claude's implementation phase.
 
-Your job has TWO parts:
+Your job has THREE parts:
 
 PART 1 — General learnings:
 Extract useful decisions, conventions, and gotchas worth remembering.
 For image threads: style preferences, color choices, motifs, formats.
 
-PART 2 — Kimi self-improvement:
-- If Claude ran: look at what Claude asked. If it could have been
-  answered during planning, propose a planning note.
+PART 2 — Self-improvement:
+- If Coder ran: look at what Coder asked. If it could have been
+  answered during planning, propose a planning note for PM.
 - If images were generated: note style preferences, prompt adjustments
-  the user made, preferred formats/sizes. Next time Kimi generates
-  images for this project, it should use these preferences by default.
+  the user made, preferred formats/sizes. Add to Artist memory.
+- If a workflow was followed: did it work well? Missing steps?
+  Propose workflow refinements.
 
-Respond with a JSON array of operations:
-- {"op": "append", "line": "- ...", "category": "project"}
+PART 3 — Inter-role learning:
+- Did PM give the Coder enough context? If Coder asked implementation
+  questions, PM should learn to include that info next time.
+- Did PM give the Artist the right style info? If user corrected
+  colors/sizes, update both PM and Artist memory.
+- Did the Artist output in the right format for Coder? If there was
+  a mismatch (wrong size, wrong path), both roles should learn.
+- Route inter-role learnings to the "Working with Other Roles" section
+  of the right memory file.
+
+Respond with a JSON array of operations. Each op targets a specific
+memory file — route learnings to the right role:
+
+PM memory (memory-pm.md):
+- {"op": "append", "file": "pm", "line": "- ...", "category": "project"}
     — project decision, convention, or pattern
-- {"op": "append", "line": "- ...", "category": "planning"}
-    — something Kimi should check/resolve during Phase 1 next time
-- {"op": "replace", "old": "exact existing line", "new": "merged line"}
-    — update existing knowledge with new info
+- {"op": "append", "file": "pm", "line": "- ...", "category": "planning"}
+    — something PM should check/resolve during Phase 1 next time
+- {"op": "append", "file": "pm", "line": "...", "category": "workflow"}
+    — new workflow step or workflow refinement (include ## workflow-name)
+- {"op": "append", "file": "pm", "line": "- ...", "category": "roles", "role": "Artist"}
+    — how PM should work with Artist (goes to "Working with Other Roles / Artist")
+- {"op": "append", "file": "pm", "line": "- ...", "category": "roles", "role": "Coder"}
+    — how PM should work with Coder (goes to "Working with Other Roles / Coder")
+- {"op": "replace", "file": "pm", "old": "exact existing line", "new": "merged line"}
+    — update existing PM knowledge with new info
+
+Artist memory (memory-artist.md):
+- {"op": "append", "file": "artist", "line": "- ...", "category": "style"}
+    — visual style preference, color, icon convention
+- {"op": "append", "file": "artist", "line": "- ...", "category": "roles", "role": "PM"}
+    — how Artist should work with PM (goes to "Working with Other Roles / PM")
+- {"op": "append", "file": "artist", "line": "- ...", "category": "roles", "role": "Coder"}
+    — how Artist should work with Coder (goes to "Working with Other Roles / Coder")
+- {"op": "replace", "file": "artist", "old": "exact existing line", "new": "merged line"}
+    — update existing Artist knowledge
+
+Coder suggestion (not committed — shown as tip):
+- {"op": "suggest-claude", "line": "- ..."}
+    — something the user should consider adding to CLAUDE.md
+
+No changes:
 - {"op": "none"}
-    — nothing worth remembering
 
 Rules:
-- Distinguish between project knowledge and planning improvements
-- "planning" learnings tell Kimi what to pre-check next time
+- Route each learning to the RIGHT file. Project facts → PM. Colors → Artist.
+- Workflow refinements go to PM (category "workflow"). Include the workflow name.
+- "planning" learnings tell PM what to pre-check next time
+- Visual/style learnings ALWAYS go to Artist, never PM
+- Inter-role learnings go to category "roles" with the target role specified.
+  If Coder asked a question PM should have answered → PM learns about Coder.
+  If Artist used wrong size → both PM and Artist learn about each other.
+- Coding conventions go as "suggest-claude" — PM doesn't write CLAUDE.md
 - Keep each line concise (1 line max)
 - Only record genuinely useful knowledge — not trivia
 - Use "replace" to merge with existing entries when possible
 
-Current memory:
+Current PM memory:
 ---
-{contents of memory.md}
+{contents of memory-pm.md}
+---
+
+Current Artist memory:
+---
+{contents of memory-artist.md}
 ---
 
 Thread conversation:
 ---
-{full thread: kimi planning + user messages + claude implementation}
+{full thread: PM planning + user messages + Claude implementation + image generation}
 ---
 ```
 
@@ -877,97 +997,377 @@ Thread conversation:
 
 ```json
 [
-  {"op": "append", "line": "- Auth: always JWT, never cookies. Reference: auth/login.go", "category": "project"},
-  {"op": "append", "line": "- Planning: when task touches auth, pre-read auth/login.go and auth/session.go to identify JWT vs cookie pattern", "category": "planning"},
-  {"op": "replace", "old": "- Registration endpoint exists at /register", "new": "- Registration at POST /register, uses JWT (same as login)"}
+  {"op": "append", "file": "pm", "line": "- Auth: always JWT, never cookies. Reference: auth/login.go", "category": "project"},
+  {"op": "append", "file": "pm", "line": "- Planning: when task touches auth, pre-read auth/login.go and auth/session.go to identify JWT vs cookie pattern", "category": "planning"},
+  {"op": "replace", "file": "pm", "old": "- Registration endpoint exists at /register", "new": "- Registration at POST /register, uses JWT (same as login)"},
+  {"op": "append", "file": "artist", "line": "- Login page uses blue gradient background, not flat", "category": "style"},
+  {"op": "suggest-claude", "line": "- Auth uses JWT everywhere, never cookies (see auth/login.go)"}
 ]
 ```
 
-### memory.md Format
+### memory-pm.md Format
 
 ```markdown
+# Workflows
+
+## bugfix
+Trigger: user reports a bug, error, or something broken
+Steps:
+1. Ask: what's the symptom? (error message, wrong behavior, where)
+2. Grep + ReadFile to find the relevant code
+3. GitLog to check recent changes in that area
+4. Identify root cause, explain it to the user
+5. Propose fix plan (which lines change, what test to add)
+6. Wait for approval → Claude executes
+
+## feature
+Trigger: user wants to add new functionality
+Steps:
+1. Ask: what exactly should it do? Who uses it? Any UI?
+2. ListFiles + Grep to find where it fits in the codebase
+3. ReadFile existing similar features for patterns
+4. Propose plan: new files, modified files, tests, migrations
+5. If complex, break into sub-tasks and propose order
+6. Wait for approval → Claude executes
+
+## implement-milestone
+Trigger: user wants to implement a defined milestone/epic
+Steps:
+1. Ask: which milestone? Read issue/doc if referenced
+2. Break milestone into ordered tasks (each becomes a thread or sequential Claude run)
+3. For each task: identify files, dependencies, test strategy
+4. Propose the full implementation order with estimates
+5. Execute tasks one by one, reporting progress after each
+6. Final: integration test plan across all tasks
+
+## question
+Trigger: user asks about the codebase, architecture, or how something works
+Steps:
+1. ReadFile + Grep to find the answer
+2. Explain clearly with file:line references
+3. If the answer reveals a gap in memory, propose a memory update
+4. No Claude needed — PM answers directly
+
 # Project Knowledge
 - Auth: always JWT, never cookies. Reference: auth/login.go
 - Registration at POST /register, uses JWT (same as login)
 - Tests use testify, not stdlib testing
 - Deploy: make build → docker push → kubectl apply
-- Visual style: blue #2563EB primary, flat design, rounded corners
-- Error pages use "lost astronaut" motif (not robots)
-- Icons: 24px, 2px stroke, outlined style (see static/icons/)
 
 # Planning Notes
 - When task touches auth, pre-read auth/login.go and auth/session.go
 - When task involves models, check existing models/ for GORM conventions
 - Always mention the test framework (testify) in plans so Claude doesn't ask
-- Image generation: default to blue #2563EB, flat design, transparent background
-- When generating icons, reference existing set in static/icons/ for consistency
 ```
 
-Two sections: **Project Knowledge** (what the codebase does) and
-**Planning Notes** (what Kimi should check during Phase 1). Both are
-injected into prompts, but Planning Notes specifically help Kimi
-produce better plans over time.
+### memory-artist.md Format
+
+```markdown
+# Style
+- Primary color: #2563EB (blue)
+- Design language: flat, minimalist, rounded corners
+- Error pages: "lost astronaut" motif (not robots)
+- Background: transparent for icons, white for illustrations
+
+# Icons
+- Size: 24px grid
+- Stroke: 2px, outlined style
+- Reference set: static/icons/
+- Match existing style before creating new icons
+
+# Image Generation Defaults
+- Always use project primary color (#2563EB) unless told otherwise
+- Flat design, no gradients, no 3D effects
+- For app assets: SVG-friendly flat shapes
+- For error pages: friendly illustrations, cartoon style
+
+# Learned Preferences
+- User prefers "lost astronaut" over robots for error imagery
+- Icons should be outlined, never filled
+- Logos: no text, abstract motifs only
+```
+
+### CLAUDE.md (Coder — already exists)
+
+The Coder uses the project's existing `CLAUDE.md`. CodeButler does **not**
+manage this file. The user and Claude maintain it as they normally would.
+CodeButler only reads it to inject into Claude's prompt.
+
+If a thread reveals a coding convention that should be in `CLAUDE.md`, the
+PM notes it in the thread usage report (section 24.6) as a suggestion:
+```
+💡 Claude asked about the test framework during implementation.
+   Consider adding to CLAUDE.md: "Tests use testify, not stdlib testing"
+```
+
+The PM never writes to `CLAUDE.md` — that's the user's domain.
+
+### Three Roles, Three Memories
+
+```
+┌──────────────────┐    ┌──────────────────┐    ┌──────────────────┐
+│  ProductManager   │    │     Artist        │    │     Coder         │
+│                   │    │                   │    │                   │
+│  Reads:           │    │  Reads:           │    │  Reads:           │
+│  memory-pm.md     │    │  memory-artist.md │    │  CLAUDE.md        │
+│                   │    │                   │    │                   │
+│  Learns:          │    │  Learns:          │    │  Learns:          │
+│  - workflows      │    │  - color palettes │    │  (user manages    │
+│  - project facts  │    │  - icon styles    │    │   CLAUDE.md)      │
+│  - planning tips  │    │  - visual motifs  │    │                   │
+│  - clarification  │    │  - prompt tweaks  │    │                   │
+│    patterns       │    │  - size prefs     │    │                   │
+└──────────────────┘    └──────────────────┘    └──────────────────┘
+```
+
+Four sections in `memory-pm.md`:
+
+1. **Workflows** — defines the playbooks the PM follows. Each workflow has
+   a trigger (how to recognize it) and steps (what the PM does). These are
+   the starting defaults. They evolve per project through the memory feedback
+   loop (see below).
+
+2. **Project Knowledge** — what the codebase does, architectural decisions,
+   conventions. No visual/style info (that goes to Artist).
+
+3. **Planning Notes** — what the PM should check during Phase 1. Self-improvement
+   notes that make future planning more accurate.
+
+4. **Working with Other Roles** — how to interact effectively with the
+   Artist and Coder. What context each needs, what mistakes to avoid.
+
+Three sections in `memory-artist.md`:
+
+1. **Style** — colors, design language, general visual identity.
+
+2. **Icons/Assets** — specific conventions for icons, illustrations, etc.
+
+3. **Working with Other Roles** — what context the Artist gets from PM,
+   how to format images for the Coder to use, what the user prefers.
+
+#### Inter-Role Learning
+
+Each role learns not just about the project, but about how to work
+better with the other roles. This is the "Working with Other Roles"
+section in each memory file.
+
+**PM learns about the Artist:**
+```markdown
+# Working with Other Roles
+
+## Artist
+- Always read memory-artist.md before generating prompts
+- Include the primary color (#2563EB) in every image prompt
+- For icons: specify exact pixel size (Artist defaults to 1024x1024 otherwise)
+- User prefers to see the prompt before generation — always show it first
+- When generating multiple variants, ask user to pick before moving on
+```
+
+**PM learns about the Coder:**
+```markdown
+## Coder
+- Always include file:line references in the plan — Coder wastes turns exploring without them
+- Mention the test framework (testify) explicitly — Coder asked about it in thread #12
+- For auth tasks: include the JWT pattern in the plan (Coder asked in thread #8)
+- Keep plans under 6 steps — Coder handles detailed steps better than vague big ones
+- If the task touches >5 files, break into sequential Claude runs
+```
+
+**Artist learns about the PM and Coder:**
+```markdown
+# Working with Other Roles
+
+## PM
+- PM sends prompts enriched with project context — trust the color/style suggestions
+- If PM doesn't mention a style, read memory-artist.md defaults first
+- Always output PNG — Coder needs PNG for web assets
+
+## Coder
+- Save images to the paths PM specifies (e.g. static/images/)
+- Use web-friendly sizes: icons 24-48px, illustrations max 1024px
+- If the image will be used in code, provide the exact filename
+```
+
+**How this evolves:**
+
+```
+Thread #5: PM sends Coder a plan without mentioning the test framework.
+  → Coder asks "which test framework?"
+  → Memory extraction proposes:
+    memory-pm.md # Working with Other Roles / Coder:
+    "- Always mention test framework (testify) in plans"
+  → User approves → PM never forgets again
+
+Thread #8: PM generates an icon prompt without pixel size.
+  → Artist generates 1024x1024 instead of 24x24.
+  → User: "too big"
+  → Memory extraction proposes:
+    memory-pm.md # Working with Other Roles / Artist:
+    "- Always specify exact pixel size in icon prompts"
+    memory-artist.md # Working with Other Roles / PM:
+    "- If PM doesn't specify size, default to 24px for icons (project standard)"
+  → Both roles learn from the same mistake
+
+Thread #15: Coder creates a PR with images in the wrong directory.
+  → PM proposes:
+    memory-pm.md # Working with Other Roles / Coder:
+    "- Specify target directory for images explicitly (e.g. static/images/)"
+    memory-artist.md # Working with Other Roles / Coder:
+    "- Save all generated images to static/images/ unless told otherwise"
+```
+
+Over time, the roles form a well-coordinated team. The PM knows exactly
+what context the Coder needs. The Artist knows the project's visual
+standards. The Coder gets precise plans with all the information it
+needs to execute without asking questions.
+
+#### Workflows Are Living Documents
+
+Workflows are **not hardcoded**. They live in `memory-pm.md` and follow the
+same approval + git flow as all other memory. This means:
+
+- **Default workflows** are seeded on first run (bugfix, feature,
+  implement-milestone, question). The PM proposes them, user approves.
+- **Users can add custom workflows**. A game studio might add `asset-pipeline`.
+  A data team might add `etl-job`. A mobile team might add `release-build`.
+- **Workflows improve over time**. After each thread, the memory extraction
+  can propose workflow refinements: "add step 2.5: check migrations/" or
+  "the bugfix workflow should also check error logs".
+- **Each project develops its own playbook**. After 20 threads, the
+  workflows reflect that specific team's patterns, not generic defaults.
+
+```
+Week 1 (defaults):
+  ## bugfix
+  Steps: 1. Ask symptom  2. Grep  3. GitLog  4. Propose fix
+
+Week 4 (after 15 threads):
+  ## bugfix
+  Steps: 1. Ask symptom  2. Check Sentry for error context
+         3. Grep + ReadFile  4. GitLog for recent deploys
+         5. Check if related to known flaky areas (see Planning Notes)
+         6. Propose fix with rollback plan if touching payments/
+
+Week 8 (team has learned):
+  ## bugfix
+  Steps: 1. Ask symptom  2. Check Sentry + Datadog  3. Grep
+         4. If payments-related: always add integration test
+         5. If auth-related: pre-read auth/login.go (JWT pattern)
+         6. Propose fix, mention deploy window if critical
+```
+
+#### Custom Workflow Example
+
+A user can define a new workflow at any time:
+
+```
+User: "I want to define a new workflow for database migrations"
+PM: "Got it. Let me draft a workflow based on how your project handles migrations."
+PM: (ReadFile config/database.go, Grep "migrate", ListFiles migrations/)
+PM: "Here's what I'd add to Workflows:
+
+  ## db-migration
+  Trigger: user needs a schema change, new table, or column modification
+  Steps:
+  1. Ask: what changes? New table, alter column, add index?
+  2. ReadFile the latest migration in migrations/ for naming pattern
+  3. ReadFile models/ to understand current schema
+  4. Propose migration SQL + model update + test
+  5. If destructive (drop column, rename): flag it and ask for rollback plan
+  6. Wait for approval → Claude executes
+
+  Save this workflow?"
+User: "yes, but add a step to check if there's a pending migration first"
+PM: "Updated — added step 1.5: check for unapplied migrations. Saving."
+→ Committed to memory-pm.md
+```
+
+Next time:
+```
+User: "I need to add a created_at column to the users table"
+PM: "This looks like a *db-migration* workflow. Let me follow the steps..."
+PM: (checks pending migrations, reads latest migration, reads User model)
+PM: "Here's the plan: ..."
+```
 
 ### Implementation
 
 - **File**: `internal/memory/memory.go`
 - **Functions**:
-  - `Load(path) string` — read memory.md (or "" if doesn't exist)
-  - `Apply(content string, ops []Op) string` — apply approved operations
-  - `Save(path, content string)` — write memory.md
+  - `LoadPM(repoDir) string` — read memory-pm.md (or "" if doesn't exist)
+  - `LoadArtist(repoDir) string` — read memory-artist.md (or "" if doesn't exist)
+  - `Apply(content string, ops []Op) string` — apply approved operations to a memory file
+  - `Save(path, content string)` — write a memory file
   - `FormatProposal(ops []Op) string` — format ops as Slack message for user review
+    (groups by target file: "PM memory:", "Artist memory:", "CLAUDE.md suggestion:")
   - `ParseUserResponse(text string, ops []Op) []Op` — process user edits/approvals
+  - `SeedDefaults(repoDir)` — create memory-pm.md and memory-artist.md with
+    default workflows and empty sections on first run
 - **ProductManager**: uses `models.ProductManager` interface
   - Any provider that implements `Chat()` and `ChatJSON()`
   - Requires productManager config in global config
 - **Daemon integration**: after PR creation, launch goroutine:
-  1. Call Kimi for memory analysis
-  2. Post proposal in thread
+  1. Call PM for memory analysis (reads both memory files + thread)
+  2. Post grouped proposal in thread (PM ops, Artist ops, Claude suggestions)
   3. Wait for user response (with timeout — if no response in 24h, discard)
-  4. Commit approved changes to memory.md on the PR branch
+  4. Commit approved changes to the right file(s) on the PR branch
   5. `git push` to update the PR
+  6. For "suggest-claude" ops: just show in thread, never commit
 
 ### The Virtuous Cycle
 
 ```
 Thread N (code task):
-  Kimi plans → Claude implements → Claude asks "JWT or cookies?"
+  PM plans → Claude implements → Claude asks "JWT or cookies?"
   → User: "JWT" → PR created
-  → Kimi proposes: "always JWT" + "pre-check auth pattern"
+  → PM proposes: memory-pm.md: "always JWT" + "pre-check auth pattern"
+  →              suggest for CLAUDE.md: "Auth uses JWT everywhere"
   → User: "yes"
-  → memory.md committed to PR branch + pushed
-  → PR merged → memory.md lands on main ✓
+  → memory-pm.md committed to PR branch + pushed
+  → PR merged → memory-pm.md lands on main ✓
 
 Thread N+1 (touches auth, branched from main after merge):
-  Kimi reads memory.md from main → knows JWT pattern → includes it in plan
+  PM reads memory-pm.md → knows JWT pattern → includes it in plan
   → Claude never asks → faster, cheaper, better
 
 Thread N+2 (image task):
   User: "create an icon for settings"
-  → Kimi shows prompt with blue #2563EB (from memory)
+  → Artist reads memory-artist.md → knows blue #2563EB, outlined, 24px
+  → PM shows prompt with correct style (from Artist memory)
   → User: "perfect, go"
-  → Kimi generates, user says "push it"
-  → PR created → Kimi learns: "settings icon is a gear" → committed to PR
-  → PR merged → learning on main ✓
+  → PM generates, user says "push it"
+  → PR created → PM proposes: memory-artist.md: "settings icon is a gear"
+  → PR merged → Artist learning on main ✓
 
 Thread N+3 (code + image):
   User: "add a loading spinner to the dashboard"
-  → Kimi generates spinner icon (blue, flat, matching existing style —
-    all from memory) → shows prompt, user approves
-  → Kimi plans: "save spinner + update dashboard template"
+  → Artist reads memory-artist.md → generates spinner with correct style
+  → PM plans: "save spinner + update dashboard template"
   → Claude implements → no style questions needed
 
-Thread N+4:
-  Kimi catches something else Claude or itself would have asked
-  → Another planning note added → committed to PR → merged to main
-  → System keeps improving
+Thread N+4 (bugfix — workflow has evolved):
+  User: "login is broken"
+  → PM reads bugfix workflow from memory-pm.md
+  → Workflow now says "check Sentry" (added after thread N)
+  → PM follows refined steps → faster diagnosis
+  → After fix: PM proposes workflow refinement:
+    "bugfix step 3: also check auth/login.go JWT pattern"
+  → User approves → workflow keeps improving
+
+Thread N+5:
+  Same bugfix workflow is now 2 steps more specific
+  → PM catches auth issues on its own → fewer clarification rounds
+  → System keeps improving, each role independently
 ```
 
-Over time, Kimi's plans get more complete and its image prompts get
-more accurate because memory accumulates the patterns and decisions
-that matter. The user drives this process — nothing gets remembered
-without their approval. And because memory follows git flow, it's
-versioned, reviewable, and merge-safe.
+Over time, each role's memory gets more accurate:
+- **PM** workflows become project-specific playbooks
+- **Artist** style memory becomes a complete brand guide
+- **Coder** (via CLAUDE.md suggestions) accumulates coding conventions
+
+The user drives this process — nothing gets remembered without their
+approval. And because memory follows git flow, it's versioned,
+reviewable, and merge-safe.
 
 ---
 
@@ -1848,16 +2248,17 @@ i7j8k9l Refactor auth middleware
 }
 ```
 
-**`ReadMemory`** — Access the project memory
+**`ReadMemory`** — Access role-specific memory
 
 ```json
 {
   "name": "ReadMemory",
-  "description": "Read the project's memory.md file. Contains learned conventions, decisions, and context from previous conversations.",
+  "description": "Read a role's memory file. PM memory has workflows, project knowledge, and planning notes. Artist memory has style preferences and visual conventions.",
   "parameters": {
     "type": "object",
     "properties": {
-      "section": { "type": "string", "description": "Only return this section (e.g. 'auth', 'deployment'). Omit for full file." }
+      "role":    { "type": "string", "description": "'pm' (memory-pm.md) or 'artist' (memory-artist.md). Default: 'pm'." },
+      "section": { "type": "string", "description": "Only return this section (e.g. 'Workflows', 'Style', 'Planning Notes'). Omit for full file." }
     }
   }
 }
@@ -1882,7 +2283,7 @@ Example output:
 ```
 Thread ts_001 [Phase: Claude] branch: feat/user-auth
   Files: models/user.go, auth/register.go, routes.go
-Thread ts_002 [Phase: Kimi] branch: (not yet created)
+Thread ts_002 [Phase: PM] branch: (not yet created)
   Plan touches: auth/middleware.go
 ```
 
@@ -2021,38 +2422,47 @@ WITH Kimi first (v2):
     → Total: $0.30 for a precise fix
 ```
 
-#### What Kimi Does in Phase 1
+#### What the PM Does in Phase 1
 
-1. **Understands the request**: asks clarifying questions if vague
-2. **Scans the codebase**: grep, read files, check git log (cheap operations)
-3. **Answers questions directly**: "what does X do?" → Kimi reads the file and explains (no Claude needed)
-4. **Proposes a plan for code tasks**: lists files to change, approach, estimated complexity
-5. **Generates images**: if the task involves creating visual assets (icons, logos, mockups), Kimi generates them via OpenAI gpt-image-1 — then asks what to do next (see below)
-6. **Detects conflicts**: checks if other threads touch the same files
-7. **Waits for approval**: user must say "yes" before Claude starts
+1. **Selects a workflow**: reads `memory-pm.md`, matches the user's request
+   to a workflow trigger. If unclear, asks: "Is this a bugfix, a new
+   feature, or something else?" If the user describes a new type of work,
+   the PM proposes a new custom workflow (see "Custom Workflow Example" in
+   section 16). The selected workflow drives the rest of Phase 1.
+2. **Follows the workflow steps**: each workflow defines the exploration and
+   clarification steps. The PM follows them in order, using tools as needed.
+3. **Scans the codebase**: grep, read files, check git log (cheap operations)
+4. **Answers questions directly**: "what does X do?" → PM reads the file and explains (no Claude needed)
+5. **Proposes a plan for code tasks**: lists files to change, approach, estimated complexity
+6. **Generates images**: if the task involves creating visual assets (icons, logos, mockups), PM triggers the Artist via OpenAI gpt-image-1 — then asks what to do next (see below)
+7. **Detects conflicts**: checks if other threads touch the same files
+8. **Waits for approval**: user must say "yes" before Claude starts
 
 #### Conversation Examples
 
-**Simple question (Kimi handles entirely, Claude never runs):**
+**Simple question (PM handles entirely, Claude never runs):**
 ```
 User: "how do we deploy?"
-Kimi: "Based on README.md and the Makefile, deployment is:
+PM: (matches → question workflow)
+PM: "Based on README.md and the Makefile, deployment is:
   1. make build
   2. docker push
   3. kubectl apply -f k8s/
   The CI pipeline in .github/workflows/deploy.yml does this automatically on merge to main."
 ```
 
-**Vague request (Kimi clarifies before proposing):**
+**Bugfix (PM follows bugfix workflow):**
 ```
 User: "login is broken"
-Kimi: "I see several login-related files:
+PM: (matches → bugfix workflow, follows steps)
+PM: "Following the *bugfix* workflow.
+  I see several login-related files:
   - auth/login.go (POST /login endpoint)
   - auth/session.go (session management)
   - auth/middleware.go (auth middleware)
   What's happening? Error message? Timeout? Wrong redirect?"
 User: "it redirects to a 404 after login"
-Kimi: "Found it. auth/login.go:58 redirects to /dashboard but routes.go
+PM: "Found it. auth/login.go:58 redirects to /dashboard but routes.go
   defines it as /app/dashboard. The redirect path is wrong.
   Plan: change redirect in auth/login.go:58 from /dashboard to /app/dashboard.
   Say *yes* to fix it."
@@ -2060,10 +2470,11 @@ User: "yes"
 → Claude executes
 ```
 
-**Complex task (Kimi plans in detail):**
+**Feature (PM follows feature workflow):**
 ```
 User: "add user registration with email verification"
-Kimi: "That's a multi-file feature. Here's my plan:
+PM: (matches → feature workflow, follows steps)
+PM: "That's a multi-file feature. Here's my plan:
 
   📋 *Work Plan*
   1. Create `models/user.go` — User struct + DB migration
@@ -2077,118 +2488,124 @@ Kimi: "That's a multi-file feature. Here's my plan:
   Estimated: ~5 Claude turns.
   Say *yes* to start, or tell me what to change."
 User: "skip email verification for now, just basic registration"
-Kimi: "Updated plan:
+PM: "Updated plan:
   1. Create `models/user.go` — User struct + DB migration
   2. Create `auth/register.go` — POST /register with bcrypt
   3. Update `routes.go` — add POST /register
   4. Add tests
   Say *yes*."
 User: "dale"
-→ Claude executes the refined plan
+→ Coder executes the refined plan
+→ Coder: "Done. PR #42 opened with registration endpoint."
 ```
 
-**Image generation — just show it (thread ends, no Claude):**
+**Image generation — just show it (thread ends, no Coder):**
 ```
 User: "create a logo for the app, minimalist, blue tones"
-Kimi: (reads README, checks existing assets/ folder, notes the app name)
-Kimi: "I'd send this prompt to the image generator:
+PM: (reads README, checks existing assets/ folder, notes the app name)
+PM: "I'd send this prompt to the Artist:
   'Minimalist logo for CodeButler, a developer tool. Clean lines,
    blue tones (#2563EB), no text, abstract butler/code motif,
    SVG-friendly flat design'
   Want me to adjust anything?"
 User: "go"
-Kimi: generates via gpt-image-1
-Kimi: [uploads image] "Here it is. What do you want to do?
-   ✅ Done  ·  🔄 Adjust  ·  📁 Push to repo  ·  🔧 Use with Claude"
+Artist: [generates via gpt-image-1, uploads image]
+Artist: "Here it is. What do you want to do?
+   ✅ Done  ·  🔄 Adjust  ·  📁 Push to repo  ·  🔧 Use with Coder"
 User: "looks good"
-→ User: "done" → memory extraction. Kimi learns: "logo style: minimalist, blue #2563EB"
+→ User: "done" → memory extraction
+  → memory-artist.md: "logo style: minimalist, blue #2563EB"
 ```
 
 **Image generation — iterate then push to repo:**
 ```
 User: "need a favicon for the web dashboard"
-Kimi: (reads internal/daemon/web.go, sees HTML template, checks static/)
-Kimi: "I'd generate with this prompt:
+PM: (reads internal/daemon/web.go, sees HTML template, checks static/)
+PM: "I'd generate with this prompt:
   'Favicon 32x32px, flat design, blue (#2563EB) on transparent
    background, matches existing icon style in static/icons/'
   Adjust?"
 User: "looks good"
-Kimi: generates via gpt-image-1
-Kimi: [uploads image] "What do you think?"
+Artist: [generates via gpt-image-1, uploads image]
+Artist: "What do you think?"
 User: "make it rounder"
-Kimi: "Updated prompt: '...rounded corners, circular shape...' Generating."
-Kimi: [uploads new image] "Better?"
+Artist: "Updated prompt: '...rounded corners, circular shape...' Generating."
+Artist: [uploads new image] "Better?"
 User: "yes, push it"
-Kimi: creates branch, adds favicon to static/, commits, opens PR
-→ PR created → memory extraction → Kimi learns: "favicon is round, blue"
+PM: creates branch, adds favicon to static/, commits, opens PR
+→ PR created → memory extraction
+  → memory-artist.md: "favicon is round, blue"
 → User: "dale merge" → summary + merge + cleanup
 ```
 
-**Image generation — then hand off to Claude for implementation:**
+**Image generation — then hand off to Coder for implementation:**
 ```
 User: "create an error illustration for the 404 page"
-Kimi: (reads routes, finds 404 handler, checks templates)
-Kimi: "I'd generate: 'Friendly 404 error illustration, cartoon style,
+PM: (reads routes, finds 404 handler, checks templates)
+PM: "I'd generate: 'Friendly 404 error illustration, cartoon style,
   confused robot, matches the blue/white theme in templates/base.html'
   Want to adjust the prompt?"
 User: "make it a lost astronaut instead of a robot"
-Kimi: "Updated: '...lost astronaut floating in space, friendly...'"
-User: "dale"
-Kimi: generates via gpt-image-1
-Kimi: [uploads image] "Here it is. What next?"
+PM: "Updated. Generating..."
+Artist: [generates via gpt-image-1, uploads image]
+Artist: "Here it is. What next?"
 User: "use it in the 404 page, replace the current text-only error"
-Kimi: "Plan:
+PM: "Plan:
   1. Save illustration to static/images/404.png
   2. Update templates/error.html to show the image
   3. Update the CSS for centered layout
-  Say *yes* to start Claude."
+  Say *yes* to start Coder."
 User: "yes"
-→ Phase 2: Claude gets the plan + the generated image in worktree
+Coder: "Working on the 404 page..."
+→ Phase 2: Coder gets the plan + the generated image in worktree
 ```
 
-**Image with user reference — Kimi asks for inspiration:**
+**Image with user reference — PM asks for inspiration:**
 ```
 User: "need icons for the settings page"
-Kimi: (checks static/icons/, sees existing icon style)
-Kimi: "I see existing icons in static/icons/ use a flat, 24px style.
+PM: (checks static/icons/, sees existing icon style)
+PM: "I see existing icons in static/icons/ use a flat, 24px style.
   Do you have a reference image for the style you want? Or should I
   match the existing set?"
 User: [sends screenshot of Material Design icons]
-Kimi: "Got it. I'd generate: 'Settings gear icon, Material Design
+PM: "Got it. I'll tell the Artist: 'Settings gear icon, Material Design
   style, 24x24px, matching the attached reference, outlined, 2px
   stroke, #333 on transparent'
   Adjust?"
 User: "perfect"
-Kimi: generates using edit API with reference
-Kimi: [uploads result] "What next?"
+Artist: [generates using edit API with reference, uploads result]
+Artist: "What next?"
 ```
 
 **Image editing — user sends a photo directly:**
 ```
 User: [attaches screenshot] "remove the watermark and use this as the hero image"
-Kimi: "I'd edit with this prompt: 'Remove watermark, clean up
+PM: "I'd tell the Artist: 'Remove watermark, clean up
   artifacts, maintain original colors and composition'
   Adjust?"
 User: "also make it wider, 1920x1080"
-Kimi: "Updated: '...remove watermark, extend to 1920x1080,
+Artist: "Updated: '...remove watermark, extend to 1920x1080,
   fill edges naturally...' Generating."
-Kimi: [uploads edited image] "What next?"
+Artist: [uploads edited image] "What next?"
 User: "push it and have Claude add it to the landing page"
-Kimi: "Plan:
+PM: "Plan:
   1. Save to static/images/hero.png (branch + PR)
-  2. Claude updates templates/landing.html to use the new hero
+  2. Coder updates templates/landing.html to use the new hero
   Say *yes*."
 User: "dale"
-→ Kimi pushes image first, then Claude implements the template change
+→ PM pushes image first, then Coder implements the template change
 ```
 
-#### Kimi's System Prompt
+#### PM System Prompt
 
 ```
-You are an AI development assistant working in a code repository.
+You are the ProductManager (PM) — an AI development assistant.
 Your role is to UNDERSTAND, DEFINE, and PLAN — never to write code.
+Your messages are prefixed with "PM:" so users know who is talking.
 
-You have tools to explore the codebase autonomously:
+You work alongside two other roles:
+- Artist: generates and edits images. You coordinate with Artist.
+- Coder: writes code, runs tests, creates PRs. You hand off plans to Coder.
 
 EXPLORATION TOOLS (read-only, use freely):
 - ReadFile(path, offset?, limit?) — read file contents with line numbers
@@ -2196,17 +2613,44 @@ EXPLORATION TOOLS (read-only, use freely):
 - ListFiles(pattern, path?) — find files by glob pattern
 - GitLog(n?, path?) — see recent commits
 - GitDiff(ref?, path?) — see uncommitted or ref-based changes
-- ReadMemory(section?) — read project memory (conventions, decisions)
-- ListThreads(status?) — see active threads and their files (conflict detection)
+- ReadMemory(role?, section?) — read memory (pm or artist)
+- ListThreads(status?) — see active threads and their files
 - GHStatus(type, number) — check GitHub PR/issue status
 
 ACTION TOOLS (use when the user requests):
-- GenerateImage(prompt, size?) — create image via gpt-image-1
-- EditImage(prompt, image, size?) — edit an existing image
+- GenerateImage(prompt, size?) — trigger the Artist to create an image
+- EditImage(prompt, image, size?) — trigger the Artist to edit an image
 - UploadImage(path) — send image to Slack
 - CreateBranch(name) — create git branch
 - CommitAndPush(files, message) — commit files and push
 - OpenPR(title, body) — open a pull request
+
+WORKFLOWS:
+On every new thread, your FIRST step is:
+1. ReadMemory(role="pm", section="Workflows") to load your workflows
+2. Match the user's request to a workflow trigger
+3. If unclear, ask: "Is this a bugfix, a new feature, or something else?"
+4. If the user describes a new type of work that doesn't match any
+   workflow, propose a new custom workflow for their approval
+5. Follow the matched workflow steps in order
+
+Each workflow defines the exploration and clarification steps. Follow
+them — they've been refined by this team over time.
+
+WORKING WITH OTHER ROLES:
+Before starting, also read:
+- ReadMemory(role="pm", section="Working with Other Roles")
+This tells you what context each role needs from you. Follow it.
+
+When handing off to Coder:
+- Include file:line references in the plan
+- Mention test framework, coding conventions, patterns
+- Check "Working with Other Roles / Coder" for project-specific notes
+
+When triggering Artist:
+- Read memory-artist.md first for style defaults
+- Include colors, sizes, and style in the prompt
+- Check "Working with Other Roles / Artist" for project-specific notes
 
 RULES:
 - Use exploration tools proactively. Don't guess — look.
@@ -2216,52 +2660,14 @@ RULES:
 - Never make claims about code you haven't read with ReadFile.
 - Never propose changes to files you haven't read.
 
-Your job is to fully define the task before handing it to Claude.
-Claude should NEVER need to ask "what do you mean?" or "what should
-this do?". By the time Claude starts, the task must be unambiguous.
+Your job is to fully define the task before handing it to the Coder.
+The Coder should NEVER need to ask "what do you mean?" or "what should
+this do?". By the time the Coder starts, the task must be unambiguous.
 
-Workflow:
-1. Understand what the user wants — ask questions until it's clear
-2. Explore the codebase with your tools to build context:
-   - ListFiles to understand project structure
-   - Grep to find relevant code
-   - ReadFile to understand implementations
-   - GitLog to see recent changes
-   - ReadMemory for project conventions
-3. If it's a question → answer it directly (you have the tools to read
-   any file and search anything — no need for Claude)
-4. If it involves creating images/visual assets:
-   a. Scan the codebase for context (Grep for existing assets, ReadFile
-      for styles, check where images are used)
-   b. Generate/edit the image with a context-aware prompt
-   c. Show the result in Slack
-   d. Ask the user what to do next:
-      - Done → user says "done" → memory extraction → thread closed
-      - Iterate → adjust and re-generate
-      - Push to repo → create branch, commit image, open PR
-      - Continue with Claude → build a plan that uses the image
-   e. The user drives — you don't assume which path
-5. If it's a code task → explore with tools, then propose a plan:
-   - Which files will be created/modified (cite line numbers from ReadFile)
-   - What specifically changes in each file
-   - What patterns to follow (reference actual code you read)
-   - What edge cases to handle
-   - What tests to add
-6. If the request is vague, ask follow-up questions. Be specific:
-   BAD:  "Can you give more details?"
-   GOOD: "I see auth/login.go:58 returns a JWT (I just read it).
-          Should registration also return a JWT, or redirect to /login?"
-7. Present the plan and wait for approval
-8. If the user adjusts, update the plan and re-present
-
-Image generation can happen at any point during Phase 1. You might
-generate an image as part of planning (e.g., "here's the icon, now
-here's the plan for adding it to the app") or as the entire task.
-
-Your plan must be detailed enough that an engineer (Claude) can
-implement it without asking requirements questions. Implementation
-questions ("bcrypt or argon2?") are fine — scope questions ("what
-fields should User have?") mean your plan wasn't complete enough.
+Your plan must be detailed enough that the Coder can implement it
+without asking requirements questions. Implementation questions
+("bcrypt or argon2?") are fine — scope questions ("what fields should
+User have?") mean your plan wasn't complete enough.
 
 Repository: {repo_path}
 
@@ -2413,13 +2819,14 @@ but now orchestrated by Kimi with project context.
 ```
 User message mentions images/visuals/icons/logos/etc.
     ↓
-Kimi: scan repo for context
+PM: scan repo for context (using tools)
   - check existing assets (static/, images/, public/)
   - read any design tokens / CSS variables
+  - ReadMemory(role="artist") for style defaults
   - note project name, branding, existing style
     ↓
-Kimi: build context-aware prompt, SHOW IT to the user
-  "I'd send this to the image generator:
+PM: build context-aware prompt, SHOW IT to the user
+  "I'd tell the Artist:
    'Minimalist 32x32 favicon, flat design, blue (#2563EB) on
     transparent background, matching the existing icon set in
     static/icons/ which uses rounded corners and 2px stroke'
@@ -2427,16 +2834,16 @@ Kimi: build context-aware prompt, SHOW IT to the user
     ↓
 User: "looks good" / "make it green instead" / adjusts prompt
     ↓
-gpt-image-1: generate/edit with approved prompt
+Artist: generate/edit with approved prompt (gpt-image-1)
     ↓
-Kimi: upload to Slack thread + ask user what to do next
+Artist: upload to Slack thread + ask user what to do next
     ↓
 User chooses:
   ├─ "looks good"/"done" → memory extraction → thread closed
-  ├─ "make it rounder"   → Kimi adjusts prompt, shows it, re-generates
-  ├─ "push it"           → Kimi creates branch + PR with asset
-  ├─ "use it in the app" → Kimi builds plan → user approves → Phase 2
-  └─ (sends a photo)     → Kimi uses it as input for edit/inspiration
+  ├─ "make it rounder"   → Artist adjusts prompt, shows it, re-generates
+  ├─ "push it"           → PM creates branch + PR with asset
+  ├─ "use it in the app" → PM builds plan → user approves → Coder starts
+  └─ (sends a photo)     → Artist uses it as input for edit/inspiration
 ```
 
 **The prompt preview is important.** Users learn how prompt engineering
@@ -2453,25 +2860,26 @@ Kimi handles three cases for input images:
    Kimi uses it as input for the gpt-image-1 edit API.
 3. **No reference** — Kimi generates purely from the enriched text prompt.
 
-In all cases, Kimi shows the prompt before generating.
+In all cases, PM shows the prompt before generating, and Artist prefixes
+its messages with "Artist:" so the user sees the role transition.
 
 #### Thread Outcomes After Image Generation
 
 The key insight: image generation can **resolve the thread entirely**
-or be a **stepping stone to Claude**. Kimi asks, the user decides.
+or be a **stepping stone to Coder**. PM asks, the user decides.
 
 | User says | What happens | Phase 2? | PR? |
 |---|---|---|---|
 | "looks good" / "done" | Thread ends | No | No |
-| "make it X" / "try again" | Re-generate, loop | No (yet) | No |
-| "push it to the repo" | Kimi: branch + commit + PR | No | Yes |
-| "push it and implement" | Kimi: push asset, then plan for Claude | Yes | Yes |
-| "use it in the app" | Kimi: plan includes the image | Yes | Yes |
-| [sends new image] | Kimi: use as reference, re-generate | No (yet) | No |
+| "make it X" / "try again" | Artist re-generates, loop | No (yet) | No |
+| "push it to the repo" | PM: branch + commit + PR | No | Yes |
+| "push it and implement" | PM: push asset, then plan for Coder | Yes | Yes |
+| "use it in the app" | PM: plan includes the image | Yes | Yes |
+| [sends new image] | Artist: use as reference, re-generate | No (yet) | No |
 
-#### Kimi Pushing Assets (Without Claude)
+#### PM Pushing Assets (Without Coder)
 
-When the user says "push it", Kimi handles it directly:
+When the user says "push it", PM handles it directly:
 
 ```
 1. Create branch: git checkout -b asset/<slug>
@@ -2606,14 +3014,14 @@ A thread lives until its PR is merged. That's the only exit.
 
 ```
 Thread created (Slack thread)
-    → Kimi classifies as code_task
-    → Worktree + branch created
-    → Claude starts working
-    → Claude modifies files (tracked per response)
-    → Claude opens PR
-    → Memory extracted → committed to PR branch
+    → PM: selects workflow, explores, proposes plan
+    → User approves → worktree + branch created
+    → Coder: starts working
+    → Coder: modifies files (tracked per response)
+    → Coder: opens PR
+    → PM: memory extraction → committed to PR branch
     → User: "dale merge"
-    → Thread CLOSED: PR merged, branch deleted, worktree removed
+    → PM: thread summary → PR merged, branch deleted, worktree removed
 ```
 
 ```go
@@ -3022,27 +3430,28 @@ and even push assets to the repo without Claude.
 └──────────────────────┬───────────────────────────────┘
                        ↓
     ╔══════════════════════════════════════╗
-    ║        PHASE 1: KIMI (cheap)         ║
-    ║     ~$0.001-0.005 per message        ║
+    ║     PHASE 1: PM + Artist (cheap)    ║
+    ║     ~$0.001-0.005 per message       ║
     ╠══════════════════════════════════════╣
     ║                                      ║
-    ║  Kimi: scan repo, understand request ║
+    ║  PM: select workflow from memory     ║
+    ║  PM: scan repo with tools            ║
     ║      ↓                               ║
-    ║  Kimi: ask questions / propose plan  ║──→ User replies
+    ║  PM: ask questions / propose plan   ║──→ User replies
     ║      ↓                               ║     (loop until
-    ║  Kimi: refine plan                   ║←── plan is right)
+    ║  PM: refine plan                    ║←── plan is right)
     ║      ↓                               ║
-    ║  (optional) generate/edit images     ║
+    ║  (optional) Artist: gen/edit images  ║
     ║      ↓                               ║
-    ║  Kimi: "Here's the plan. Yes?"       ║
+    ║  PM: "Here's the plan. Yes?"        ║
     ║                                      ║
     ╚════╤═════════════════╤═══════════════╝
          │                 │
          │              ┌──┴──────────────────────────┐
-         │              │  Thread resolved by Kimi:    │
+         │              │  Thread resolved by PM:      │
          │              │  question answered, or       │
-         │              │  images delivered, or        │
-         │              │  assets pushed via PR         │
+         │              │  images delivered by Artist,  │
+         │              │  or assets pushed via PR      │
          │              └──┬──────────────────────────┘
          │                 ↓
          │        ┌────────────────┐
@@ -3056,17 +3465,17 @@ and even push assets to the repo without Claude.
     ┌─── create worktree + branch
     ↓
     ╔══════════════════════════════════════╗
-    ║       PHASE 2: CLAUDE (expensive)    ║
+    ║      PHASE 2: CODER (expensive)     ║
     ║          ~$0.30-2.00 per run         ║
     ╠══════════════════════════════════════╣
     ║                                      ║
-    ║  Claude: execute approved plan       ║
-    ║  Claude: edit files, run tests       ║
+    ║  Coder: execute approved plan       ║
+    ║  Coder: edit files, run tests       ║
     ║  (images from Phase 1 available      ║
     ║   in worktree if generated)          ║
-    ║  Claude: commit, push, open PR       ║
+    ║  Coder: commit, push, open PR       ║
     ║      ↓                               ║
-    ║  User replies → Claude --resume      ║
+    ║  User replies → Coder --resume      ║
     ║                                      ║
     ╚══════════════════╤═══════════════════╝
                        ↓
@@ -3075,22 +3484,25 @@ and even push assets to the repo without Claude.
               └────────┬───────┘
                        ↓
     ╔══════════════════════════════════════╗
-    ║   PHASE 3: MEMORY + CLOSE (Kimi)     ║
+    ║    PHASE 3: MEMORY + CLOSE (PM)      ║
     ║          ~$0.003                      ║
     ╠══════════════════════════════════════╣
     ║                                      ║
     ║  3a. Memory extraction:              ║
-    ║  Kimi: analyze full thread           ║
-    ║    - what Claude asked (learnings)   ║
+    ║  PM: analyze full thread             ║
+    ║    - what Coder asked (learnings)    ║
     ║    - project decisions made          ║
-    ║    - planning improvements           ║
+    ║    - inter-role learnings            ║
+    ║    - workflow refinements            ║
     ║      ↓                               ║
-    ║  Kimi: post proposed updates         ║
+    ║  PM: post proposed updates           ║
     ║    "📝 Here's what I'd remember..."  ║
+    ║    (grouped: PM memory, Artist       ║
+    ║     memory, CLAUDE.md suggestions)   ║
     ║      ↓                               ║
     ║  User: approves / edits / adds       ║
     ║      ↓                               ║
-    ║  Commit memory.md to PR branch       ║
+    ║  Commit to right memory file(s)      ║
     ║  git push                            ║
     ║                                      ║
     ║  ── PR open for review ──            ║
@@ -3098,8 +3510,8 @@ and even push assets to the repo without Claude.
     ║  3b. User closes thread:             ║
     ║  User: "merge" / "done" / "dale"     ║
     ║      ↓                               ║
-    ║  Kimi: generate summary → PR desc    ║
-    ║  Kimi: post thread usage report      ║
+    ║  PM: generate summary → PR desc      ║
+    ║  PM: post thread usage report        ║
     ║  gh pr merge --squash                ║
     ║  Delete branch + worktree            ║
     ║                                      ║
