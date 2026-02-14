@@ -1816,3 +1816,340 @@ message, enriched the prompt, and extracted memory afterward.
 Claude is still the only model that touches code. The cheap models
 never write code, never run tools, never modify files. They only
 read, classify, summarize, and plan.
+
+---
+
+## 25. Error Recovery & Resilience
+
+The daemon runs 24/7. Things will fail: Slack disconnects, Claude hangs,
+Kimi times out, the machine reboots. Every failure mode needs a recovery
+path that doesn't lose user messages.
+
+### Failure Modes & Recovery
+
+| Failure | Detection | Recovery | User Impact |
+|---|---|---|---|
+| Slack disconnect | Socket Mode auto-reconnect + state callback | Auto-reconnect (built into slack-go SDK) | Brief pause, messages queued by Slack |
+| Claude process hangs | `context.WithTimeout` (from config `timeout` min) | Kill process, reply in thread: "timed out, try again" | One thread affected |
+| Claude process crashes | Non-zero exit code from `exec.Command` | Reply in thread with error, session preserved for retry | User can say "try again" |
+| Kimi/orchestrator unreachable | HTTP timeout (10s) | Skip orchestration, send directly to Claude (fallback to v1 behavior) | Slightly more expensive, but works |
+| SQLite locked | Busy timeout on connection (`_busy_timeout=5000`) | Retry with backoff, max 3 attempts | Brief delay |
+| Out of disk | Write failure on store.db or history/ | Log error, continue processing in-memory | New messages not persisted until resolved |
+| Machine reboot | systemd/launchd restarts daemon | Daemon starts, reconnects Slack, pending messages reprocessed | Brief downtime |
+
+### Message Durability
+
+Messages are persisted to SQLite **before** processing. If the daemon
+crashes mid-Claude-call, the message is already in the DB. On restart,
+unacked messages are reprocessed:
+
+```go
+// On startup
+pending, _ := store.GetPending()
+for _, msg := range pending {
+    go d.processThread(msg.ThreadTS, msg)
+}
+```
+
+### Claude Session Recovery
+
+If Claude crashes mid-thread, the `session_id` is still stored. The next
+message in that thread will `--resume` from where Claude left off. The
+user sees: "Something went wrong. Send another message to continue."
+
+### Graceful Shutdown
+
+```go
+func (d *Daemon) Run() error {
+    ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+    defer cancel()
+
+    // ... start Slack, event loop ...
+
+    <-ctx.Done()
+
+    // 1. Stop accepting new messages
+    // 2. Wait for active Claude processes (with timeout)
+    // 3. Flush pending memory updates
+    // 4. Close SQLite
+    // 5. Disconnect Slack
+    d.shutdown(30 * time.Second)
+    return nil
+}
+```
+
+### Circuit Breaker for Orchestrator
+
+If Kimi fails 3 times in a row, disable orchestration for 5 minutes
+and route everything directly to Claude. This prevents cascading
+slowdowns when the orchestrator is down:
+
+```go
+type CircuitBreaker struct {
+    failures    int
+    lastFailure time.Time
+    threshold   int           // 3
+    cooldown    time.Duration // 5 minutes
+}
+
+func (cb *CircuitBreaker) Allow() bool {
+    if cb.failures < cb.threshold { return true }
+    if time.Since(cb.lastFailure) > cb.cooldown {
+        cb.failures = 0 // reset
+        return true
+    }
+    return false // skip orchestrator
+}
+```
+
+---
+
+## 26. Access Control & Rate Limiting
+
+### Who Can Use the Bot?
+
+By default, **any member of the Slack channel** can trigger Claude.
+This is intentional — the channel IS the access control boundary.
+
+Optional restrictions in config:
+
+```json
+// <repo>/.codebutler/config.json
+{
+  "access": {
+    "allowedUsers": [],           // empty = everyone in channel
+    "maxConcurrentThreads": 5,    // per channel
+    "maxClaude CallsPerHour": 20, // cost protection
+    "maxClaudeCallsPerUser": 10   // per user per hour
+  }
+}
+```
+
+### Rate Limiting Layers
+
+```
+Layer 1 — Slack rate limits (platform-enforced)
+    1 message/second for chat.postMessage
+    20 files/minute for files.uploadV2
+    → Queue with backoff, built into slack-go SDK
+
+Layer 2 — Claude concurrency (resource protection)
+    Max N concurrent Claude processes (default 5)
+    → New threads wait in queue if limit reached
+    → Reply: "⏳ Queue position: 3. Processing will start shortly."
+
+Layer 3 — Per-user rate limiting (cost protection)
+    Max M Claude calls per user per hour (default 10)
+    → Reply: "You've reached the hourly limit. Try again in 23 minutes."
+
+Layer 4 — Cost ceiling (budget protection)
+    Max daily spend (estimated from token counts)
+    → When exceeded: "Daily budget reached. Bot will resume tomorrow."
+    → Or: notify admin in DM, continue processing
+```
+
+### Why This Matters
+
+Without limits, one team member can accidentally burn $500/day by
+spamming the bot with complex tasks. The rate limiting is primarily
+**cost protection**, not access control.
+
+### Implementation
+
+```go
+// internal/ratelimit/limiter.go
+
+type Limiter struct {
+    mu              sync.Mutex
+    activeThreads   int
+    maxThreads      int
+    userCalls       map[string][]time.Time  // userID → timestamps
+    maxCallsPerUser int
+    maxCallsPerHour int
+    dailySpend      float64
+    maxDailySpend   float64
+}
+
+func (l *Limiter) AllowThread() bool
+func (l *Limiter) AllowUser(userID string) (bool, time.Duration)  // allowed, retryAfter
+func (l *Limiter) AllowBudget() bool
+func (l *Limiter) RecordCall(userID string, estimatedCost float64)
+```
+
+---
+
+## 27. Thread Lifecycle & Resource Cleanup
+
+### Thread States (Extended)
+
+```
+created → processing → idle → stale → archived
+            ↕                    ↓
+         processing          cleaned up
+            ↓
+         pr_opened → merged → cleaned up
+```
+
+### When Is a Thread "Done"?
+
+| Signal | Action |
+|---|---|
+| PR merged | Mark merged, run post-flight (history, memory), clean up branch scope |
+| 24h of silence | Mark stale, release Claude session resources |
+| 7 days of silence | Archive — remove from active tracking, session remains in DB |
+| User says "done" / "close" | Same as 24h silence, but immediate |
+
+### Resource Cleanup
+
+Active threads consume:
+1. **Memory**: thread scope in `conflicts.Tracker`, session entry in DB
+2. **Goroutine**: one per active thread (blocked waiting for messages)
+3. **Claude session**: `session_id` held for `--resume`
+4. **Branch tracking**: file overlap detection
+
+Cleanup releases #1 and #4. Claude sessions (#3) remain in DB
+indefinitely — they're cheap to store and allow resuming old threads.
+Goroutines (#2) naturally exit when the thread goes idle.
+
+### Stale Thread Detection
+
+```go
+// Run every hour
+func (d *Daemon) cleanupStaleThreads() {
+    for ts, scope := range d.tracker.GetAll() {
+        if time.Since(scope.LastActivity) > 24*time.Hour && scope.State == StateWorking {
+            d.tracker.MarkStale(ts)
+            // Optionally notify in thread
+            d.slack.SendMessage(scope.ChannelID, "Thread idle for 24h. "+
+                "Reply to resume, or the session will be archived.", ts)
+        }
+        if time.Since(scope.LastActivity) > 7*24*time.Hour {
+            d.tracker.Archive(ts)
+        }
+    }
+}
+```
+
+### Branch Cleanup
+
+When a PR is merged, the branch is deleted by GitHub (if configured).
+When a thread is archived without a PR, the branch persists — the user
+might come back to it. A monthly cleanup job can list orphaned branches:
+
+```
+codebutler --cleanup-branches
+```
+
+Lists branches created by CodeButler that have no open PR and no
+thread activity in 30 days. User confirms before deletion.
+
+---
+
+## 28. Testing Strategy
+
+### Unit Tests (no external services)
+
+| Package | What to Test | How |
+|---|---|---|
+| `internal/slack/snippets.go` | Code block extraction, size-based routing | Markdown input → expected snippets output |
+| `internal/router/router.go` | Message classification | Mock LLM client, verify routing decisions |
+| `internal/preflight/preflight.go` | Prompt enrichment | Mock grep/git results, verify enriched prompt |
+| `internal/conflicts/tracker.go` | File overlap detection, merge ordering | In-memory tracker with test data |
+| `internal/history/history.go` | PR detection in Claude output | Regex tests against sample outputs |
+| `internal/ratelimit/limiter.go` | Rate limiting logic | Time-based tests with controlled clock |
+| `internal/llm/client.go` | Request/response parsing | HTTP test server with canned responses |
+
+### Integration Tests (require tokens)
+
+```bash
+# Set test tokens (dedicated test workspace)
+export CODEBUTLER_TEST_BOT_TOKEN=xoxb-test-...
+export CODEBUTLER_TEST_APP_TOKEN=xapp-test-...
+
+go test ./internal/slack/ -integration
+```
+
+Tests:
+- Connect to Slack via Socket Mode
+- Send and receive messages in a test channel
+- Upload a file snippet
+- Add reactions
+
+### End-to-End Test (manual, described)
+
+```
+1. Create a test Slack workspace
+2. Install CodeButler app
+3. Run: codebutler --setup (pick test channel)
+4. Send: "what files are in this repo?"
+   → Expect: Kimi answers directly (question route)
+5. Send: "add a comment to main.go"
+   → Expect: Kimi enriches → Claude executes → response in thread
+6. Reply in thread: "also add to the other file"
+   → Expect: --resume with same session
+7. Send two messages in different threads simultaneously
+   → Expect: both processed concurrently
+```
+
+### Mock LLM Client for Tests
+
+```go
+// internal/llm/mock.go (build tag: testing)
+
+type MockClient struct {
+    Responses map[string]string  // prompt substring → response
+}
+
+func (m *MockClient) Chat(ctx context.Context, system, user string) (string, error) {
+    for key, resp := range m.Responses {
+        if strings.Contains(user, key) {
+            return resp, nil
+        }
+    }
+    return `{"route": "code_task"}`, nil  // default
+}
+```
+
+---
+
+## 29. Migration Path: v1 → v2
+
+### Can Both Coexist?
+
+Yes. v1 (WhatsApp) and v2 (Slack) are completely independent:
+- Different messaging backend
+- Different config keys (`whatsapp` vs `slack`)
+- Same SQLite schema (with renamed columns in v2)
+- Same Claude agent wrapper
+
+A repo can run v1 while another runs v2. They share nothing.
+
+### Migration Steps for an Existing Repo
+
+```
+1. Install Slack app in workspace (section 5)
+2. Run: codebutler --setup
+   → Detects existing config, asks: "Migrate to Slack? (y/n)"
+   → Prompts for Slack tokens
+   → Picks/creates channel
+   → Saves new config (preserves Claude settings)
+3. Old WhatsApp config backed up to .codebutler/config.whatsapp.bak
+4. Old messages and sessions remain in store.db
+   → Sessions are per-thread now, old ones ignored
+   → Messages retain history for reference
+5. Run: codebutler
+   → Starts with Slack backend
+```
+
+### What Happens to Old Sessions?
+
+Old `sessions` rows have `chat_jid` as primary key. New rows use
+`thread_ts`. Since the key format is completely different
+(`...@g.us` vs `1732456789.123456`), they don't conflict. Old rows
+are simply never queried — they're dead data that can be cleaned up
+with a migration script or left in place (harmless).
+
+### Rollback
+
+Delete `.codebutler/config.json`, restore from `.codebutler/config.whatsapp.bak`.
+Run `codebutler` — it will use WhatsApp again.
