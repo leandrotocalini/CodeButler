@@ -655,6 +655,8 @@ This is the **central architectural decision** of CodeButler2.
 - [x] **Markdown**: convert Claude output (standard Markdown) to Slack mrkdwn before sending
 - [x] **Code snippets**: short (<20 lines) inline, long (>=20 lines) as file upload
 - [x] **Knowledge sharing**: CLAUDE.md committed to branches, shared via PR merge
+- [x] **memory.md with approval**: after PR merge, Kimi proposes memory updates in thread, user approves/edits before saving
+- [x] **Kimi self-improvement**: Kimi analyzes what Claude asked → adds "Planning Notes" so it handles it next time
 - [x] **memory.md coexistence**: local memory.md (Kimi) + shared CLAUDE.md (git) both exist
 - [x] **PR as journal**: thread summary goes in PR description (via `gh pr edit`), no files committed
 - [x] **Multi-model**: Claude executes code, cheap models (Kimi/GPT-4o-mini) orchestrate around it
@@ -697,10 +699,11 @@ This is the **central architectural decision** of CodeButler2.
 
 ---
 
-## 16. Auto-Memory (Kimi)
+## 16. Memory with User Approval (Kimi)
 
-The daemon automatically extracts learnings at the end of each conversation
-and persists them in `memory.md`. Uses Kimi (cheap and fast) instead of Claude.
+The daemon extracts learnings after a PR merges and **shows them to the
+user for approval** before saving to `memory.md`. The user controls what
+gets remembered. Uses Kimi (cheap and fast) instead of Claude.
 
 ### File
 
@@ -708,47 +711,109 @@ and persists them in `memory.md`. Uses Kimi (cheap and fast) instead of Claude.
 <repo>/.codebutler/memory.md
 ```
 
-Injected as context into the Claude prompt on each new conversation.
+Injected as context into the Claude and Kimi prompts on each thread.
 
 ### Trigger
 
-When a conversation ends (60s of silence), the daemon:
+When a PR is merged (detected via GitHub webhook or polling), the daemon:
 
 1. Reads current `memory.md`
-2. Builds a summary of the conversation that just ended
-3. Calls Kimi with both
-4. Applies the operations Kimi returns
+2. Reads the full thread conversation (Kimi Phase 1 + Claude Phase 2)
+3. Calls Kimi to analyze and propose memory updates
+4. **Posts the proposed changes in the Slack thread** for user review
+5. User approves, edits, or adds more learnings
+6. Daemon applies the approved changes to `memory.md`
 
-### Kimi Prompt
+### The Feedback Loop
+
+Kimi doesn't just extract general learnings — it specifically analyzes
+what Claude asked during implementation. If Claude asked something that
+Kimi should have resolved in Phase 1, that becomes a learning for Kimi.
 
 ```
-You manage a memory file. Given the current memory and a conversation
-that just ended, respond with a JSON array of operations.
+Thread conversation:
+  [Kimi] Plan: 1. Create user model  2. Add POST /register  3. Tests
+  [User] yes
+  [Claude] auth/login.go uses JWT but auth/session.go uses cookies.
+           Which pattern for registration?
+  [User] JWT, always JWT
+  [Claude] Done. PR opened.
+  → PR merged
 
-Each operation is one of:
-- {"op": "none"}        — nothing new to remember
-- {"op": "append", "line": "- ..."}  — add a new learning
+Kimi's analysis:
+  Claude asked an implementation question that Kimi could have
+  pre-resolved by reading auth/login.go and auth/session.go.
+
+Kimi proposes in thread:
+  📝 *Proposed memory updates:*
+  1. ➕ `- Auth pattern: always use JWT, never cookies (auth/login.go is the reference)`
+  2. ➕ `- When planning auth-related tasks, check auth/login.go for the JWT pattern`
+
+  Reply *yes* to save, or suggest changes.
+```
+
+### What the User Sees in the Thread
+
+```
+[Bot] 📝 PR #42 merged! Here's what I'd like to remember:
+
+  1. ➕ Auth pattern: always use JWT, never cookies
+  2. ➕ When planning auth tasks, always reference auth/login.go for patterns
+  3. 📎 Kimi learning: next time a task touches auth, pre-check JWT vs cookie pattern before asking Claude
+
+  Reply *yes* to save all, or tell me what to change.
+```
+
+The user can:
+- **"yes"** → save all proposed changes
+- **"remove 3"** → save 1 and 2, skip 3
+- **"add: we use bcrypt for passwords, never md5"** → add a custom learning
+- **"change 1 to: Auth uses JWT everywhere except WebSocket handlers"** → edit before saving
+- **"no"** → discard all, save nothing
+
+### Kimi Prompt (Memory Extraction)
+
+```
+You analyze completed conversations to extract learnings for memory.
+You receive the full thread: Kimi's planning phase, user interactions,
+and Claude's implementation phase.
+
+Your job has TWO parts:
+
+PART 1 — General learnings:
+Extract useful decisions, conventions, and gotchas worth remembering.
+
+PART 2 — Kimi self-improvement:
+Look at what Claude asked during implementation. If Claude asked
+something that could have been answered during the planning phase
+(by reading the codebase), propose a learning so Kimi handles it
+next time.
+
+Respond with a JSON array of operations:
+- {"op": "append", "line": "- ...", "category": "project"}
+    — project decision, convention, or pattern
+- {"op": "append", "line": "- ...", "category": "planning"}
+    — something Kimi should check/resolve during Phase 1 next time
 - {"op": "replace", "old": "exact existing line", "new": "merged line"}
-                        — merge new info into an existing entry
+    — update existing knowledge with new info
+- {"op": "none"}
+    — nothing worth remembering
 
 Rules:
-- Use "replace" when new info can be combined with an existing line
-  (e.g., "cats are carnivores" + learning "dogs are carnivores"
-   → replace with "cats and dogs are carnivores")
-- Use "append" only for genuinely new knowledge
+- Distinguish between project knowledge and planning improvements
+- "planning" learnings tell Kimi what to pre-check next time
 - Keep each line concise (1 line max)
-- Only record useful decisions, conventions, gotchas — not trivia
-- Return [{"op": "none"}] if there is nothing worth remembering
-- You can return as many operations as needed
+- Only record genuinely useful knowledge — not trivia
+- Use "replace" to merge with existing entries when possible
 
 Current memory:
 ---
 {contents of memory.md}
 ---
 
-Conversation:
+Thread conversation:
 ---
-{conversation messages}
+{full thread: kimi planning + user messages + claude implementation}
 ---
 ```
 
@@ -756,41 +821,74 @@ Conversation:
 
 ```json
 [
-  {"op": "replace", "old": "- Cats are carnivores", "new": "- Cats and dogs are carnivores"},
-  {"op": "append", "line": "- Always deploy with --force in staging"}
+  {"op": "append", "line": "- Auth: always JWT, never cookies. Reference: auth/login.go", "category": "project"},
+  {"op": "append", "line": "- Planning: when task touches auth, pre-read auth/login.go and auth/session.go to identify JWT vs cookie pattern", "category": "planning"},
+  {"op": "replace", "old": "- Registration endpoint exists at /register", "new": "- Registration at POST /register, uses JWT (same as login)"}
 ]
 ```
 
-Or if nothing new:
+### memory.md Format
 
-```json
-[{"op": "none"}]
+```markdown
+# Project Knowledge
+- Auth: always JWT, never cookies. Reference: auth/login.go
+- Registration at POST /register, uses JWT (same as login)
+- Tests use testify, not stdlib testing
+- Deploy: make build → docker push → kubectl apply
+
+# Planning Notes
+- When task touches auth, pre-read auth/login.go and auth/session.go
+- When task involves models, check existing models/ for GORM conventions
+- Always mention the test framework (testify) in plans so Claude doesn't ask
 ```
+
+Two sections: **Project Knowledge** (what the codebase does) and
+**Planning Notes** (what Kimi should check during Phase 1). Both are
+injected into prompts, but Planning Notes specifically help Kimi
+produce better plans over time.
 
 ### Implementation
 
 - **File**: `internal/memory/memory.go`
 - **Functions**:
   - `Load(path) string` — read memory.md (or "" if doesn't exist)
-  - `Apply(content string, ops []Op) string` — apply operations to content
+  - `Apply(content string, ops []Op) string` — apply approved operations
   - `Save(path, content string)` — write memory.md
-- **Kimi client**: `internal/kimi/client.go`
+  - `FormatProposal(ops []Op) string` — format ops as Slack message for user review
+  - `ParseUserResponse(text string, ops []Op) []Op` — process user edits/approvals
+- **Kimi client**: `internal/llm/client.go`
   - OpenAI-compatible API (chat completions)
-  - Only used for auto-memory
-  - Requires `kimi.apiKey` in global config
-- **Daemon integration**: at the end of `endConversation()`, launch a
-  goroutine that calls Kimi and updates memory.md (non-blocking)
+  - Used for memory extraction and all Kimi tasks
+  - Requires orchestrator API key in global config
+- **Daemon integration**: on PR merge event, launch goroutine:
+  1. Call Kimi for memory analysis
+  2. Post proposal in thread
+  3. Wait for user response (with timeout — if no response in 24h, discard)
+  4. Apply approved changes
 
-### Config
+### The Virtuous Cycle
 
-```json
-// ~/.codebutler/config.json (global)
-{
-  "kimi": { "apiKey": "..." }
-}
+```
+Thread N:
+  Kimi plans → Claude implements → Claude asks "JWT or cookies?"
+  → User: "JWT" → PR merged
+  → Kimi proposes: "always JWT" + "pre-check auth pattern"
+  → User: "yes"
+  → memory.md updated
+
+Thread N+1 (touches auth):
+  Kimi reads memory → knows JWT pattern → includes it in plan
+  → Claude never asks → faster, cheaper, better
+
+Thread N+2:
+  Kimi catches something else Claude would have asked
+  → Another planning note added
+  → System keeps improving
 ```
 
-If no Kimi API key is configured, auto-memory is silently disabled.
+Over time, Kimi's plans get more complete because memory accumulates
+the patterns and decisions that matter. The user drives this process —
+nothing gets remembered without their approval.
 
 ---
 
@@ -804,14 +902,22 @@ of plain, structured logs with good information.
 ```
 2026-02-14 15:04:05 INF  slack connected
 2026-02-14 15:04:08 MSG  leandro: "fix the login bug"
-2026-02-14 15:04:08 MSG  leandro: "and check the CSS too"
-2026-02-14 15:04:11 CLD  processing 2 messages (new session)
-2026-02-14 15:04:45 CLD  done · 34s · 3 turns · $0.12
-2026-02-14 15:04:45 RSP  "Fixed the login bug and adjusted the CSS..."
-2026-02-14 15:05:45 INF  conversation ended (60s silence)
-2026-02-14 15:05:46 MEM  kimi: append "Login uses bcrypt, not md5"
-2026-02-14 15:06:00 WRN  slack reconnecting...
-2026-02-14 15:06:01 ERR  kimi API timeout after 10s
+2026-02-14 15:04:09 KMI  thread 1707.123 → kimi responding
+2026-02-14 15:04:11 RSP  kimi: "I see auth/login.go. What's the symptom?"
+2026-02-14 15:04:30 MSG  leandro: "session expires too fast"
+2026-02-14 15:04:32 KMI  thread 1707.123 → kimi responding
+2026-02-14 15:04:35 RSP  kimi: "Found it. Plan: fix session.go:42. Yes?"
+2026-02-14 15:04:40 MSG  leandro: "dale"
+2026-02-14 15:04:40 INF  thread 1707.123 → approved, starting claude
+2026-02-14 15:04:41 CLD  thread 1707.123 → claude running (new session)
+2026-02-14 15:05:15 CLD  thread 1707.123 → done · 34s · 3 turns · $0.12
+2026-02-14 15:05:15 RSP  claude: "Fixed session expiry. PR #42 opened."
+2026-02-14 16:20:00 INF  PR #42 merged
+2026-02-14 16:20:01 MEM  thread 1707.123 → proposing 2 memory updates
+2026-02-14 16:20:02 RSP  kimi: "📝 Here's what I'd remember: ..."
+2026-02-14 16:25:00 MSG  leandro: "yes"
+2026-02-14 16:25:01 MEM  thread 1707.123 → saved 2 updates to memory.md
+2026-02-14 16:25:01 INF  thread 1707.123 → closed
 ```
 
 ### Tags
@@ -823,9 +929,10 @@ of plain, structured logs with good information.
 | `ERR` | Errors: API failures, recovered crashes |
 | `DBG` | Debug: only if verbose mode is enabled |
 | `MSG` | Incoming user message |
+| `KMI` | Kimi activity: responding, planning |
 | `CLD` | Claude activity: start, done, resume |
-| `RSP` | Response sent to channel |
-| `MEM` | Auto-memory operations |
+| `RSP` | Response sent to channel (from Kimi or Claude) |
+| `MEM` | Memory operations: propose, approve, save |
 
 ### What Gets Removed
 
@@ -1747,17 +1854,33 @@ means Kimi's plan wasn't detailed enough. Over time, Kimi's system
 prompt gets refined to produce more complete plans (auto-memory helps
 with this — see section 16).
 
-### 24.4 Post-flight: After Claude Responds
+### 24.4 Post-flight: After PR Merges
 
-After Claude finishes, cheap models handle the aftermath:
+Post-flight triggers on **PR merge**, not on Claude's response. This is
+when the thread's work is truly done and we can extract learnings.
 
 ```
+PR merged (GitHub webhook / poll)
+    ↓
+    ├─ Kimi: analyze full thread → propose memory updates (section 16)
+    │   → post in thread → wait for user approval → save to memory.md
+    │
+    ├─ Kimi: detect if Claude asked questions Kimi should have resolved
+    │   → add to "Planning Notes" in memory (with user approval)
+    │
+    ├─ Kimi: detect if Claude left TODO/FIXME in code
+    │   → warn in thread: "Claude left 2 TODOs — want a new thread to resolve them?"
+    │
+    └─ Kimi: clean up worktree for merged branch
+```
+
+**While Claude is still working** (before PR merge), the only post-processing
+is practical:
+```
 Claude response arrives
-    ↓ (parallel, non-blocking)
-    ├─ Kimi: extract memory/learnings → update memory.md
-    ├─ Kimi: detect PR creation → generate summary → gh pr edit --body
-    ├─ Kimi: summarize for Slack (if response is very long)
-    └─ Kimi: detect if Claude left TODO/FIXME → warn in thread
+    ↓
+    ├─ Kimi: summarize for Slack (if response > 4000 chars)
+    └─ Kimi: detect PR creation → add thread URL to PR body
 ```
 
 ### 24.5 Thread = Branch = PR: Conflict Coordination
@@ -2049,17 +2172,31 @@ the user approves. Claude only appears after approval.
     ║                                      ║
     ╚══════════════════╤═══════════════════╝
                        ↓
+              ┌────────────────┐
+              │  PR merged     │
+              └────────┬───────┘
+                       ↓
     ╔══════════════════════════════════════╗
-    ║      POST-FLIGHT: KIMI (cheap)       ║
+    ║   PHASE 3: MEMORY REVIEW (Kimi)      ║
+    ║          ~$0.003                      ║
     ╠══════════════════════════════════════╣
-    ║  ├─ extract memory → memory.md       ║
-    ║  ├─ generate summary → gh pr edit    ║
-    ║  ├─ check conflicts with other PRs   ║
-    ║  └─ detect TODO/FIXME → warn         ║
+    ║                                      ║
+    ║  Kimi: analyze full thread           ║
+    ║    - what Claude asked (learnings)   ║
+    ║    - project decisions made          ║
+    ║    - planning improvements           ║
+    ║      ↓                               ║
+    ║  Kimi: post proposed updates         ║
+    ║    "📝 Here's what I'd remember..."  ║
+    ║      ↓                               ║
+    ║  User: approves / edits / adds       ║
+    ║      ↓                               ║
+    ║  Save to memory.md                   ║
+    ║                                      ║
     ╚══════════════════╤═══════════════════╝
                        ↓
               ┌────────────────┐
-              │  PR merged     │──→ Thread CLOSED
+              │ Thread CLOSED  │
               └────────────────┘
 ```
 
