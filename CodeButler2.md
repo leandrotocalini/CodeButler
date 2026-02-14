@@ -1,41 +1,41 @@
 # CodeButler 2
 
-Plan de evolución de CodeButler: migración WhatsApp → Slack + nuevas features.
+CodeButler evolution plan: WhatsApp → Slack migration + new features.
 
-**Estado**: Planificación (no se ha empezado a implementar)
-
----
-
-## 1. Motivación
-
-Migrar el messaging backend de WhatsApp (whatsmeow) a Slack, manteniendo
-la misma lógica core: daemon que monitorea un canal y spawna `claude -p`.
+**Status**: Planning (implementation not started)
 
 ---
 
-## 2. Mapping de Conceptos
+## 1. Motivation
 
-| WhatsApp | Slack | Notas |
+Migrate the messaging backend from WhatsApp (whatsmeow) to Slack, keeping
+the same core logic: a daemon that monitors a channel and spawns `claude -p`.
+
+---
+
+## 2. Concept Mapping
+
+| WhatsApp | Slack | Notes |
 |----------|-------|-------|
-| Group JID (`...@g.us`) | Channel ID (`C0123ABCDEF`) | Identificador del canal |
-| User JID (`...@s.whatsapp.net`) | User ID (`U0123ABCDEF`) | Identificador del usuario |
-| QR code pairing | OAuth App + Bot Token | Autenticación |
-| whatsmeow events | Slack Socket Mode / Events API | Recepción de mensajes |
-| `SendMessage(jid, text)` | `chat.postMessage(channel, text)` | Envío de texto |
-| `SendImage(jid, png, caption)` | `files.upload` + message | Envío de imágenes |
-| Read receipts (`MarkRead`) | No equivalente directo | Se puede omitir o usar reactions |
-| Typing indicator (`SendPresence`) | No hay typing nativo en bots | Se puede omitir |
-| Voice messages (Whisper) | Audio files en Slack → Whisper | Mismo flow, distinta descarga |
-| Bot prefix `[BOT]` | Bot messages tienen `bot_id` | Slack filtra bots nativamente |
-| Linked Devices (device name) | App name en workspace | Visible en Apps |
-| `whatsapp-session/session.db` | Bot token (string) | No hay sesión persistente |
-| Group creation | `conversations.create` | Channel privado/público |
+| Group JID (`...@g.us`) | Channel ID (`C0123ABCDEF`) | Channel identifier |
+| User JID (`...@s.whatsapp.net`) | User ID (`U0123ABCDEF`) | User identifier |
+| QR code pairing | OAuth App + Bot Token | Authentication |
+| whatsmeow events | Slack Socket Mode / Events API | Message reception |
+| `SendMessage(jid, text)` | `chat.postMessage(channel, text)` | Send text |
+| `SendImage(jid, png, caption)` | `files.upload` + message | Send images |
+| Read receipts (`MarkRead`) | No direct equivalent | Can omit or use reactions |
+| Typing indicator (`SendPresence`) | No native bot typing | Can omit |
+| Voice messages (Whisper) | Audio files in Slack → Whisper | Same flow, different download |
+| Bot prefix `[BOT]` | Bot messages have `bot_id` | Slack filters bots natively |
+| Linked Devices (device name) | App name in workspace | Visible in Apps |
+| `whatsapp-session/session.db` | Bot token (string) | No persistent session |
+| Group creation | `conversations.create` | Private/public channel |
 
 ---
 
-## 3. Arquitectura Actual vs Propuesta
+## 3. Current vs Proposed Architecture
 
-### Actual
+### Current
 ```
 WhatsApp <-> whatsmeow <-> Go daemon <-> spawns claude -p <-> repo context
                                |
@@ -43,7 +43,7 @@ WhatsApp <-> whatsmeow <-> Go daemon <-> spawns claude -p <-> repo context
                       (messages + sessions)
 ```
 
-### Propuesta
+### Proposed
 ```
 Slack <-> slack-go SDK <-> Go daemon <-> spawns claude -p <-> repo context
                                |
@@ -53,51 +53,51 @@ Slack <-> slack-go SDK <-> Go daemon <-> spawns claude -p <-> repo context
 
 ---
 
-## 4. Dependencias
+## 4. Dependencies
 
-### Eliminar
-- `go.mau.fi/whatsmeow` (y todas sus subdependencias: protobuf, signal protocol, etc.)
-- `github.com/skip2/go-qrcode` (QR ya no se necesita)
+### Remove
+- `go.mau.fi/whatsmeow` (and all subdependencies: protobuf, signal protocol, etc.)
+- `github.com/skip2/go-qrcode` (QR no longer needed)
 - `github.com/mdp/qrterminal/v3` (QR terminal)
 
-### Agregar
-- `github.com/slack-go/slack` — SDK oficial de Slack para Go
-  - Socket Mode (WebSocket, no necesita endpoint público)
+### Add
+- `github.com/slack-go/slack` — Official Slack SDK for Go
+  - Socket Mode (WebSocket, no public endpoint needed)
   - Events API
   - Web API (chat.postMessage, files.upload, etc.)
 
 ---
 
-## 5. Slack App Setup (pre-requisitos)
+## 5. Slack App Setup (prerequisites)
 
-Antes de que el daemon funcione, el usuario necesita crear una Slack App:
+Before the daemon works, the user needs to create a Slack App:
 
-1. Ir a https://api.slack.com/apps → Create New App
-2. Configurar Bot Token Scopes (OAuth & Permissions):
-   - `channels:history` — leer mensajes de canales públicos
-   - `channels:read` — listar canales
-   - `chat:write` — enviar mensajes
-   - `files:read` — descargar archivos adjuntos (audio, imágenes)
-   - `files:write` — subir archivos (imágenes generadas)
-   - `groups:history` — leer mensajes de canales privados
-   - `groups:read` — listar canales privados
-   - `reactions:write` — (opcional) confirmar lectura con reaction
-   - `users:read` — resolver nombres de usuario
-3. Habilitar Socket Mode (Settings → Socket Mode → Enable)
-   - Genera un App-Level Token (`xapp-...`)
-4. Habilitar Events (Event Subscriptions → Enable):
+1. Go to https://api.slack.com/apps → Create New App
+2. Configure Bot Token Scopes (OAuth & Permissions):
+   - `channels:history` — read public channel messages
+   - `channels:read` — list channels
+   - `chat:write` — send messages
+   - `files:read` — download attachments (audio, images)
+   - `files:write` — upload files (generated images)
+   - `groups:history` — read private channel messages
+   - `groups:read` — list private channels
+   - `reactions:write` — (optional) confirm read with reaction
+   - `users:read` — resolve usernames
+3. Enable Socket Mode (Settings → Socket Mode → Enable)
+   - Generates an App-Level Token (`xapp-...`)
+4. Enable Events (Event Subscriptions → Enable):
    - Subscribe to bot events: `message.channels`, `message.groups`
-5. Install to Workspace → copiar Bot Token (`xoxb-...`)
+5. Install to Workspace → copy Bot Token (`xoxb-...`)
 
-### Tokens necesarios
-- **Bot Token** (`xoxb-...`): operaciones de API (enviar, leer, etc.)
-- **App Token** (`xapp-...`): conexión Socket Mode (WebSocket)
+### Required tokens
+- **Bot Token** (`xoxb-...`): API operations (send, read, etc.)
+- **App Token** (`xapp-...`): Socket Mode connection (WebSocket)
 
 ---
 
 ## 6. Config Changes
 
-### Actual (`config.json`)
+### Current (`config.json`)
 ```json
 {
   "whatsapp": { "groupJID": "...@g.us", "groupName": "...", "botPrefix": "[BOT]" },
@@ -106,12 +106,12 @@ Antes de que el daemon funcione, el usuario necesita crear una Slack App:
 }
 ```
 
-### Propuesta: Config Global + Per-Repo
+### Proposed: Global + Per-Repo Config
 
-Dos niveles de config. La global tiene las keys compartidas, la per-repo
-solo lo específico del canal. Per-repo puede override valores globales.
+Two config levels. Global holds shared keys, per-repo holds only channel-specific
+settings. Per-repo can override global values.
 
-**Global** (`~/.codebutler/config.json`) — se configura una sola vez:
+**Global** (`~/.codebutler/config.json`) — configured once:
 ```json
 {
   "slack": {
@@ -123,7 +123,7 @@ solo lo específico del canal. Per-repo puede override valores globales.
 }
 ```
 
-**Per-repo** (`<repo>/.codebutler/config.json`) — uno por repo:
+**Per-repo** (`<repo>/.codebutler/config.json`) — one per repo:
 ```json
 {
   "slack": {
@@ -134,59 +134,59 @@ solo lo específico del canal. Per-repo puede override valores globales.
 }
 ```
 
-**Merge strategy**: per-repo override global (campo por campo).
-Si per-repo define `slack.botToken`, usa ese en vez del global.
+**Merge strategy**: per-repo overrides global (field by field).
+If per-repo defines `slack.botToken`, that takes precedence over global.
 
-**Cambios vs actual:**
+**Changes vs current:**
 - `whatsapp` → `slack`
 - `groupJID` → `channelID`
 - `groupName` → `channelName`
-- `botPrefix` → **eliminado** (Slack identifica bots por `bot_id`)
-- Nuevos: `botToken`, `appToken` (en global)
-- `openai.apiKey` se mueve a global (compartido entre repos)
-- Nuevo: `kimi.apiKey` en global
+- `botPrefix` → **removed** (Slack identifies bots by `bot_id`)
+- New: `botToken`, `appToken` (in global)
+- `openai.apiKey` moves to global (shared across repos)
+- New: `kimi.apiKey` in global
 
 ---
 
 ## 7. Storage Changes
 
-### Directorios
+### Directories
 
 ```
 ~/.codebutler/
-  config.json                    # Global: tokens de Slack, OpenAI key
+  config.json                    # Global: Slack tokens, OpenAI key
 
 <repo>/.codebutler/
   config.json                    # Per-repo: channelID, Claude settings
-  store.db                       # Messages + Claude session IDs (SQLite) — SIN CAMBIOS
-  images/                        # Generated images — SIN CAMBIOS
+  store.db                       # Messages + Claude session IDs (SQLite) — UNCHANGED
+  images/                        # Generated images — UNCHANGED
 ```
 
 ### SQLite `messages` table
 
 ```sql
--- Actual
+-- Current
 CREATE TABLE messages (
     id          TEXT PRIMARY KEY,
-    from_jid    TEXT NOT NULL,        -- → renombrar a from_id
-    chat        TEXT NOT NULL,        -- → renombrar a channel_id
+    from_jid    TEXT NOT NULL,        -- → rename to from_id
+    chat        TEXT NOT NULL,        -- → rename to channel_id
     content     TEXT NOT NULL,
     timestamp   TEXT NOT NULL,
     is_voice    INTEGER DEFAULT 0,
     acked       INTEGER DEFAULT 0,
-    wa_msg_id   TEXT DEFAULT ''       -- → renombrar a platform_msg_id
+    wa_msg_id   TEXT DEFAULT ''       -- → rename to platform_msg_id
 );
 ```
 
-**Cambios mínimos**: renombrar columnas para ser platform-agnostic, o dejarlas
-como están internamente y solo cambiar el código que las llena.
+**Minimal changes**: rename columns to be platform-agnostic, or keep them
+internally and only change the code that populates them.
 
 ### SQLite `sessions` table
 
 ```sql
--- Actual
+-- Current
 CREATE TABLE sessions (
-    chat_jid   TEXT PRIMARY KEY,      -- → channel_id (misma semántica)
+    chat_jid   TEXT PRIMARY KEY,      -- → channel_id (same semantics)
     session_id TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -194,47 +194,47 @@ CREATE TABLE sessions (
 
 ---
 
-## 8. Archivos a Modificar/Crear/Eliminar
+## 8. Files to Modify/Create/Delete
 
-### Eliminar
-| Archivo | Razón |
-|---------|-------|
-| `internal/whatsapp/client.go` | Reemplazado por cliente Slack |
-| `internal/whatsapp/handler.go` | Reemplazado por event handler Slack |
-| `internal/whatsapp/groups.go` | Reemplazado por channel operations |
-| `internal/whatsapp/auth.go` | QR no aplica, Slack usa tokens |
+### Delete
+| File | Reason |
+|------|--------|
+| `internal/whatsapp/client.go` | Replaced by Slack client |
+| `internal/whatsapp/handler.go` | Replaced by Slack event handler |
+| `internal/whatsapp/groups.go` | Replaced by channel operations |
+| `internal/whatsapp/auth.go` | QR not applicable, Slack uses tokens |
 
-### Crear
-| Archivo | Propósito |
-|---------|-----------|
-| `internal/slack/client.go` | Conexión Socket Mode, estado, desconexión |
-| `internal/slack/handler.go` | Parseo de eventos, envío de mensajes/imágenes |
-| `internal/slack/channels.go` | Listar/crear canales, obtener info |
+### Create
+| File | Purpose |
+|------|---------|
+| `internal/slack/client.go` | Socket Mode connection, state, disconnect |
+| `internal/slack/handler.go` | Event parsing, send messages/images |
+| `internal/slack/channels.go` | List/create channels, get info |
 
-### Modificar
-| Archivo | Cambios |
-|---------|---------|
-| `cmd/codebutler/main.go` | Setup wizard: pedir tokens en vez de QR, seleccionar canal en vez de grupo |
-| `internal/config/types.go` | `WhatsAppConfig` → `SlackConfig`, separar `GlobalConfig` y `RepoConfig` |
-| `internal/config/load.go` | Load global (`~/.codebutler/`) + per-repo, merge, save ambos |
-| `internal/daemon/daemon.go` | Reemplazar `whatsapp.Client` por `slack.Client`, adaptar filtros |
+### Modify
+| File | Changes |
+|------|---------|
+| `cmd/codebutler/main.go` | Setup wizard: prompt tokens instead of QR, select channel instead of group |
+| `internal/config/types.go` | `WhatsAppConfig` → `SlackConfig`, separate `GlobalConfig` and `RepoConfig` |
+| `internal/config/load.go` | Load global (`~/.codebutler/`) + per-repo, merge, save both |
+| `internal/daemon/daemon.go` | Replace `whatsapp.Client` with `slack.Client`, adapt filters |
 | `internal/daemon/imagecmd.go` | `SendImage` → Slack `files.upload` |
-| `internal/daemon/web.go` | Cambiar "WhatsApp state" por "Slack state" en status API |
-| `internal/store/store.go` | Renombrar columnas: `from_id`, `channel_id`, `platform_msg_id` |
-| `go.mod` / `go.sum` | Nuevas dependencias |
+| `internal/daemon/web.go` | Change "WhatsApp state" to "Slack state" in status API |
+| `internal/store/store.go` | Rename columns: `from_id`, `channel_id`, `platform_msg_id` |
+| `go.mod` / `go.sum` | New dependencies |
 
-### Sin cambios
-| Archivo | Razón |
-|---------|-------|
-| `internal/agent/agent.go` | Claude spawn es independiente del messaging |
-| `internal/imagegen/generate.go` | OpenAI API es independiente |
-| `internal/transcribe/whisper.go` | Whisper API es independiente |
-| `internal/store/sessions.go` | Semántica idéntica (channel_id en vez de chat_jid) |
-| `internal/daemon/logger.go` | Logger es independiente |
+### Unchanged
+| File | Reason |
+|------|--------|
+| `internal/agent/agent.go` | Claude spawn is messaging-independent |
+| `internal/imagegen/generate.go` | OpenAI API is independent |
+| `internal/transcribe/whisper.go` | Whisper API is independent |
+| `internal/store/sessions.go` | Identical semantics (channel_id instead of chat_jid) |
+| `internal/daemon/logger.go` | Logger is independent |
 
 ---
 
-## 9. Nuevo `internal/slack/` — Diseño de Interfaces
+## 9. New `internal/slack/` — Interface Design
 
 ### `client.go`
 
@@ -253,55 +253,55 @@ type Client struct {
     api       *slack.Client        // Web API (xoxb token)
     socket    *socketmode.Client   // Socket Mode (xapp token)
     state     ConnectionState
-    botUserID string               // Bot's own user ID (para filtrar sus mensajes)
+    botUserID string               // Bot's own user ID (to filter its own messages)
 }
 
-// Connect inicia Socket Mode y espera conexión
+// Connect starts Socket Mode and waits for connection
 func Connect(botToken, appToken string) (*Client, error)
 
-// Disconnect cierra la conexión
+// Disconnect closes the connection
 func (c *Client) Disconnect()
 
-// GetState devuelve el estado actual
+// GetState returns the current connection state
 func (c *Client) GetState() ConnectionState
 
-// IsConnected devuelve true si conectado
+// IsConnected returns true if connected
 func (c *Client) IsConnected() bool
 
-// GetBotUserID devuelve el user ID del bot
+// GetBotUserID returns the bot's user ID
 func (c *Client) GetBotUserID() string
 ```
 
 ### `handler.go`
 
 ```go
-// Message es la abstracción de mensaje (equivalente a whatsapp.Message)
+// Message abstracts a message (equivalent to whatsapp.Message)
 type Message struct {
     ID        string
     From      string    // User ID
-    FromName  string    // Display name (resuelto via users.info)
+    FromName  string    // Display name (resolved via users.info)
     Channel   string    // Channel ID
     Content   string
     Timestamp string    // Slack ts (e.g., "1234567890.123456")
-    IsFromMe  bool      // Es del bot
-    IsVoice   bool      // Audio file adjunto
-    IsImage   bool      // Image file adjunto
-    FileURL   string    // URL del archivo (si hay)
-    ThreadTS  string    // Thread timestamp (para responder en thread)
+    IsFromMe  bool      // From the bot
+    IsVoice   bool      // Audio file attachment
+    IsImage   bool      // Image file attachment
+    FileURL   string    // File URL (if any)
+    ThreadTS  string    // Thread timestamp (for replying in thread)
 }
 
 type MessageHandler func(Message)
 
-// OnMessage registra callback para mensajes nuevos
+// OnMessage registers a callback for new messages
 func (c *Client) OnMessage(handler MessageHandler)
 
-// SendMessage envía texto a un canal
+// SendMessage sends text to a channel
 func (c *Client) SendMessage(channelID, text string) error
 
-// SendImage sube y envía imagen a un canal
+// SendImage uploads and sends an image to a channel
 func (c *Client) SendImage(channelID string, pngData []byte, caption string) error
 
-// DownloadFile descarga un archivo de Slack
+// DownloadFile downloads a file from Slack
 func (c *Client) DownloadFile(fileURL string) ([]byte, error)
 ```
 
@@ -313,21 +313,21 @@ type Channel struct {
     Name string
 }
 
-// GetChannels lista canales donde el bot está presente
+// GetChannels lists channels where the bot is present
 func (c *Client) GetChannels() ([]Channel, error)
 
-// CreateChannel crea un canal nuevo
+// CreateChannel creates a new channel
 func (c *Client) CreateChannel(name string) (string, error)
 
-// GetChannelInfo obtiene info de un canal
+// GetChannelInfo gets info about a channel
 func (c *Client) GetChannelInfo(channelID string) (*Channel, error)
 ```
 
 ---
 
-## 10. Setup Wizard — Nuevo Flow
+## 10. Setup Wizard — New Flow
 
-### Actual (WhatsApp)
+### Current (WhatsApp)
 ```
 1. Show QR code
 2. User scans with phone
@@ -337,9 +337,9 @@ func (c *Client) GetChannelInfo(channelID string) (*Channel, error)
 6. Save config
 ```
 
-### Propuesto (Slack) — con config global
+### Proposed (Slack) — with global config
 
-**Primera vez (no existe `~/.codebutler/config.json`):**
+**First time (no `~/.codebutler/config.json`):**
 ```
 1. Prompt: "Bot Token (xoxb-...):"
 2. Prompt: "App Token (xapp-...):"
@@ -352,22 +352,22 @@ func (c *Client) GetChannelInfo(channelID string) (*Channel, error)
 9. Save → <repo>/.codebutler/config.json (per-repo)
 ```
 
-**Repos siguientes (global ya existe):**
+**Subsequent repos (global already exists):**
 ```
-1. Load ~/.codebutler/config.json → tokens ya configurados
+1. Load ~/.codebutler/config.json → tokens already configured
 2. Connect Socket Mode
 3. List channels → select or create
 4. Save → <repo>/.codebutler/config.json (per-repo)
 ```
 
-**Diferencia clave**: tokens y API keys se piden una sola vez y se guardan
-en `~/.codebutler/`. Cada repo solo configura su canal.
+**Key difference**: tokens and API keys are requested once and stored
+in `~/.codebutler/`. Each repo only configures its channel.
 
 ---
 
-## 11. Message Flow — Nuevo
+## 11. Message Flow — New
 
-### Recepción
+### Reception
 ```
 Slack WebSocket (Socket Mode)
     ↓ socketmode.EventTypeEventsAPI
@@ -382,10 +382,10 @@ store.Insert(Message)
     ↓
 Signal msgNotify channel
     ↓
-(conversation state machine — SIN CAMBIOS)
+(conversation state machine — UNCHANGED)
 ```
 
-### Envío
+### Sending
 ```
 agent.Run() result
     ↓
@@ -394,118 +394,116 @@ slack.Client.SendMessage(channelID, text)
 Slack API
 ```
 
-### Filtrado de mensajes propios
+### Own message filtering
 ```
-// WhatsApp actual: compara botPrefix en el contenido
+// Current WhatsApp: compare botPrefix in content
 if strings.HasPrefix(msg.Content, cfg.WhatsApp.BotPrefix) { skip }
 
-// Slack nuevo: compara bot user ID
+// New Slack: compare bot user ID
 if msg.BotID != "" || msg.User == c.botUserID { skip }
 ```
 
-**Ventaja**: Slack identifica bots nativamente, no necesitamos prefijo.
+**Advantage**: Slack identifies bots natively, no prefix needed.
 
 ---
 
-## 12. Features que Cambian
+## 12. Features that Change
 
-### Bot Prefix → Eliminado
-- WhatsApp necesitaba `[BOT]` para filtrar mensajes propios
-- Slack identifica bots por `bot_id` en el evento
-- Los mensajes del bot se envían sin prefijo (más limpio)
+### Bot Prefix → Removed
+- WhatsApp needed `[BOT]` to filter own messages
+- Slack identifies bots by `bot_id` in the event
+- Bot messages are sent without prefix (cleaner)
 
 ### Read Receipts → Reactions
-- WhatsApp: `MarkRead()` muestra ticks azules
-- Slack: usar reactions como feedback visual
-  - 👀 (`eyes`) cuando se empieza a procesar
-  - ✅ (`white_check_mark`) cuando Claude termina de responder
+- WhatsApp: `MarkRead()` shows blue ticks
+- Slack: use reactions as visual feedback
+  - 👀 (`eyes`) when processing starts
+  - ✅ (`white_check_mark`) when Claude finishes responding
 
-### Typing Indicator → Eliminado
-- WhatsApp: `SendPresence(composing=true)` muestra "typing..."
-- Slack: bots no pueden mostrar typing indicator
-- Se puede omitir sin impacto funcional
+### Typing Indicator → Removed
+- WhatsApp: `SendPresence(composing=true)` shows "typing..."
+- Slack: bots cannot show typing indicator
+- Can be omitted without functional impact
 
-### Threads (nuevo en Slack)
-- **Decidido**: siempre responder en thread del mensaje original
-- Mantiene el canal limpio
-- Agrupa conversación con Claude en un hilo visual
+### Threads (new in Slack)
+- **Decided**: always reply in thread of original message
+- Keeps the channel clean
+- Groups Claude conversation in a visual thread
 
 ### Voice Messages
-- WhatsApp: voz inline, descarga con `DownloadAudio()`
-- Slack: audio como file attachment, descarga con `files.info` + HTTP GET con auth
-- Mismo pipeline de Whisper después de la descarga
+- WhatsApp: inline voice, download with `DownloadAudio()`
+- Slack: audio as file attachment, download with `files.info` + HTTP GET with auth
+- Same Whisper pipeline after download
 
 ### Image Messages
-- WhatsApp: imagen inline con `DownloadImage()`
-- Slack: imagen como file attachment
-- Envío: `files.upload` en vez de protobuf con media upload
+- WhatsApp: inline image with `DownloadImage()`
+- Slack: image as file attachment
+- Send: `files.upload` instead of protobuf with media upload
 
 ---
 
-## 13. Decisiones Tomadas
+## 13. Decisions Made
 
-- [x] **Threads**: responder en thread del mensaje original
-- [x] **Reactions**: sí, usar 👀 al empezar a procesar y ✅ al terminar
-- [x] **Nombres de columnas en SQLite**: renombrar a `from_id`, `channel_id`, `platform_msg_id`
-- [x] **Múltiples canales**: no, un canal por repo (como WhatsApp)
-- [x] **Mention del bot**: responder a todos los mensajes del canal, sin requerir @mention
-- [x] **Message length**: splitear en múltiples mensajes de ~4000 chars en el thread
-
-### Pendientes
-- [x] **Markdown**: Convertir output de Claude (Markdown standard) a mrkdwn de Slack antes de enviar
+- [x] **Threads**: reply in thread of original message
+- [x] **Reactions**: yes, use 👀 when processing starts and ✅ when done
+- [x] **SQLite column names**: rename to `from_id`, `channel_id`, `platform_msg_id`
+- [x] **Multiple channels**: no, one channel per repo (like WhatsApp)
+- [x] **Bot mention**: respond to all channel messages, no @mention required
+- [x] **Message length**: split into multiple ~4000 char messages in thread
+- [x] **Markdown**: convert Claude output (standard Markdown) to Slack mrkdwn before sending
 
 ---
 
-## 14. Orden de Implementación
+## 14. Implementation Order
 
 1. **Config**: `SlackConfig` + load/save
-2. **Slack client**: conexión Socket Mode, estado
-3. **Slack handler**: recibir mensajes, enviar texto
-4. **Daemon integration**: reemplazar whatsapp.Client por slack.Client
-5. **Setup wizard**: flujo de tokens + selección de canal
-6. **Image support**: `files.upload` para `/create-image`
-7. **Voice support**: descarga de audio files → Whisper
-8. **Cleanup**: eliminar `internal/whatsapp/`, actualizar `go.mod`
-9. **Testing**: test manual end-to-end
-10. **Docs**: actualizar CLAUDE.md
+2. **Slack client**: Socket Mode connection, state
+3. **Slack handler**: receive messages, send text
+4. **Daemon integration**: replace whatsapp.Client with slack.Client
+5. **Setup wizard**: token flow + channel selection
+6. **Image support**: `files.upload` for `/create-image`
+7. **Voice support**: audio file download → Whisper
+8. **Cleanup**: delete `internal/whatsapp/`, update `go.mod`
+9. **Testing**: manual end-to-end test
+10. **Docs**: update CLAUDE.md
 
 ---
 
-## 15. Riesgos
+## 15. Risks
 
-| Riesgo | Mitigación |
-|--------|------------|
-| Rate limiting de Slack (1 msg/s) | Implementar queue con backoff |
-| Mensajes > 4000 chars | Splitear en múltiples mensajes |
-| Socket Mode requiere app-level token | Documentar bien en setup |
-| Files API cambió en 2024+ | Usar SDK actualizado |
-| Bot no puede ver mensajes sin invitar al canal | Documentar en setup wizard |
+| Risk | Mitigation |
+|------|------------|
+| Slack rate limiting (1 msg/s) | Implement queue with backoff |
+| Messages > 4000 chars | Split into multiple messages |
+| Socket Mode requires app-level token | Document well in setup |
+| Files API changed in 2024+ | Use updated SDK |
+| Bot can't see messages without being invited to channel | Document in setup wizard |
 
 ---
 
 ## 16. Auto-Memory (Kimi)
 
-El daemon extrae aprendizajes automáticamente al final de cada conversación
-y los persiste en `memory.md`. Usa Kimi (barato y rápido) en vez de Claude.
+The daemon automatically extracts learnings at the end of each conversation
+and persists them in `memory.md`. Uses Kimi (cheap and fast) instead of Claude.
 
-### Archivo
+### File
 
 ```
 <repo>/.codebutler/memory.md
 ```
 
-Se inyecta como contexto al prompt de Claude en cada conversación nueva.
+Injected as context into the Claude prompt on each new conversation.
 
 ### Trigger
 
-Cuando la conversación termina (60s de silencio), el daemon:
+When a conversation ends (60s of silence), the daemon:
 
-1. Lee `memory.md` actual
-2. Arma un resumen de la conversación que acaba de terminar
-3. Llama a Kimi con ambos
-4. Aplica las operaciones que Kimi devuelve
+1. Reads current `memory.md`
+2. Builds a summary of the conversation that just ended
+3. Calls Kimi with both
+4. Applies the operations Kimi returns
 
-### Prompt a Kimi
+### Kimi Prompt
 
 ```
 You manage a memory file. Given the current memory and a conversation
@@ -538,34 +536,34 @@ Conversation:
 ---
 ```
 
-### Respuesta esperada
+### Expected Response
 
 ```json
 [
-  {"op": "replace", "old": "- Los gatos son carnívoros", "new": "- Los gatos y los perros son carnívoros"},
-  {"op": "append", "line": "- Deploy siempre con --force en staging"}
+  {"op": "replace", "old": "- Cats are carnivores", "new": "- Cats and dogs are carnivores"},
+  {"op": "append", "line": "- Always deploy with --force in staging"}
 ]
 ```
 
-O si no hay nada nuevo:
+Or if nothing new:
 
 ```json
 [{"op": "none"}]
 ```
 
-### Implementación
+### Implementation
 
-- **Archivo**: `internal/memory/memory.go`
-- **Funciones**:
-  - `Load(path) string` — lee memory.md (o "" si no existe)
-  - `Apply(content string, ops []Op) string` — aplica operaciones al contenido
-  - `Save(path, content string)` — escribe memory.md
+- **File**: `internal/memory/memory.go`
+- **Functions**:
+  - `Load(path) string` — read memory.md (or "" if doesn't exist)
+  - `Apply(content string, ops []Op) string` — apply operations to content
+  - `Save(path, content string)` — write memory.md
 - **Kimi client**: `internal/kimi/client.go`
-  - API compatible con OpenAI (chat completions)
-  - Solo se usa para auto-memory
-  - Necesita `kimi.apiKey` en config global
-- **Integración en daemon**: al final de `endConversation()`, lanzar
-  goroutine que llama a Kimi y actualiza memory.md (no bloquea el loop)
+  - OpenAI-compatible API (chat completions)
+  - Only used for auto-memory
+  - Requires `kimi.apiKey` in global config
+- **Daemon integration**: at the end of `endConversation()`, launch a
+  goroutine that calls Kimi and updates memory.md (non-blocking)
 
 ### Config
 
@@ -576,84 +574,84 @@ O si no hay nada nuevo:
 }
 ```
 
-Si no hay Kimi API key configurada, auto-memory se desactiva silenciosamente.
+If no Kimi API key is configured, auto-memory is silently disabled.
 
 ---
 
 ## 17. Logging — Plain Structured Logs
 
-Reemplazar el sistema dual (ring buffer + TUI con ANSI) por un único canal
-de logs planos, estructurados, con buena información.
+Replace the dual system (ring buffer + TUI with ANSI) with a single channel
+of plain, structured logs with good information.
 
-### Formato
+### Format
 
 ```
 2026-02-14 15:04:05 INF  slack connected
-2026-02-14 15:04:08 MSG  leandro: "che arreglá el bug del login"
-2026-02-14 15:04:08 MSG  leandro: "y fijate el CSS también"
+2026-02-14 15:04:08 MSG  leandro: "fix the login bug"
+2026-02-14 15:04:08 MSG  leandro: "and check the CSS too"
 2026-02-14 15:04:11 CLD  processing 2 messages (new session)
 2026-02-14 15:04:45 CLD  done · 34s · 3 turns · $0.12
-2026-02-14 15:04:45 RSP  "Arreglé el bug del login y ajusté el CSS..."
+2026-02-14 15:04:45 RSP  "Fixed the login bug and adjusted the CSS..."
 2026-02-14 15:05:45 INF  conversation ended (60s silence)
-2026-02-14 15:05:46 MEM  kimi: append "Login usa bcrypt, no md5"
+2026-02-14 15:05:46 MEM  kimi: append "Login uses bcrypt, not md5"
 2026-02-14 15:06:00 WRN  slack reconnecting...
 2026-02-14 15:06:01 ERR  kimi API timeout after 10s
 ```
 
-### Niveles
+### Tags
 
-| Tag | Significado |
-|-----|-------------|
-| `INF` | Info del sistema: conexión, config, estado |
-| `WRN` | Warnings: reconexiones, timeouts recuperables |
-| `ERR` | Errores: fallos de API, crashes recuperados |
-| `DBG` | Debug: solo si se habilita verbose mode |
-| `MSG` | Mensaje entrante del usuario |
-| `CLD` | Actividad de Claude: start, done, resume |
-| `RSP` | Respuesta enviada al canal |
-| `MEM` | Operaciones de auto-memory |
+| Tag | Meaning |
+|-----|---------|
+| `INF` | System info: connection, config, state |
+| `WRN` | Warnings: reconnections, recoverable timeouts |
+| `ERR` | Errors: API failures, recovered crashes |
+| `DBG` | Debug: only if verbose mode is enabled |
+| `MSG` | Incoming user message |
+| `CLD` | Claude activity: start, done, resume |
+| `RSP` | Response sent to channel |
+| `MEM` | Auto-memory operations |
 
-### Qué se elimina
+### What Gets Removed
 
-- `Clear()` — no más clear screen
-- `Header()` — no más banners con separadores
-- `UserMsg()` — reemplazado por `MSG`
-- `BotStart()` / `BotResult()` / `BotText()` — reemplazado por `CLD` y `RSP`
-- `Status()` — reemplazado por `INF`
-- ANSI escape codes — todo plano
-- Dependencia `go-isatty` — ya no se necesita
+- `Clear()` — no more screen clearing
+- `Header()` — no more banners with separators
+- `UserMsg()` — replaced by `MSG`
+- `BotStart()` / `BotResult()` / `BotText()` — replaced by `CLD` and `RSP`
+- `Status()` — replaced by `INF`
+- ANSI escape codes — everything plain
+- `go-isatty` dependency — no longer needed
 
-### Qué se mantiene
+### What Stays
 
-- **Ring buffer + SSE** para el web dashboard (misma mecánica, nuevo formato)
+- **Ring buffer + SSE** for the web dashboard (same mechanics, new format)
 - **Subscribers** (`Subscribe()` / `Unsubscribe()`)
 
-### Implementación
+### Implementation
 
-Un solo método interno `log(tag, format, args...)` que:
-1. Formatea: `{datetime} {TAG}  {message}`
-2. Escribe a stderr
-3. Almacena en ring buffer
-4. Notifica subscribers
+A single internal `log(tag, format, args...)` method that:
+1. Formats: `{datetime} {TAG}  {message}`
+2. Writes to stderr
+3. Stores in ring buffer
+4. Notifies subscribers
 
-Métodos públicos: `Inf()`, `Wrn()`, `Err()`, `Dbg()`, `Msg()`, `Cld()`, `Rsp()`, `Mem()`
+Public methods: `Inf()`, `Wrn()`, `Err()`, `Dbg()`, `Msg()`, `Cld()`, `Rsp()`, `Mem()`
 
 ---
 
 ## 18. Service Install — macOS + Linux
 
-Correr CodeButler como servicio del sistema. En macOS usa **LaunchAgent**,
-en Linux usa **systemd user service**. Ambos corren en la sesión del usuario,
-lo que da acceso a:
+Run CodeButler as a system service. On macOS uses **LaunchAgent**,
+on Linux uses **systemd user service**. Both run in the user's session,
+which gives access to:
 
 - Xcode toolchain (`xcodebuild test`, `swift test`, `xcrun`)
 - User keychain
-- PATH con developer tools
+- PATH with developer tools
 - Homebrew binaries
-- Environment variables del usuario
+- User environment variables
 
-Un LaunchDaemon (macOS) o system-level systemd service correría como root
-sin sesión y no tendría acceso a nada de esto.
+A LaunchDaemon (macOS) or system-level systemd service would run as root
+without a session and wouldn't have access to any of this.
 
 ### macOS: LaunchAgent Plist
 
@@ -711,34 +709,34 @@ WantedBy=default.target
 ```
 
 ```bash
-# Para que user services arranquen sin login:
+# To make user services start without login:
 sudo loginctl enable-linger leandro
 ```
 
-`enable-linger` permite que los servicios del usuario arranquen al boot
-sin necesidad de login. Sin linger, arrancan al login (como LaunchAgent).
+`enable-linger` allows user services to start at boot without requiring
+login. Without linger, they start at login (like LaunchAgent).
 
 ### CLI Commands
 
 ```bash
-codebutler --install     # genera plist + launchctl load
-codebutler --uninstall   # launchctl unload + borra plist
-codebutler --status      # muestra si el servicio está corriendo
-codebutler --logs        # tail -f del log file
+codebutler --install     # generate plist/unit + load/enable
+codebutler --uninstall   # unload/disable + delete plist/unit
+codebutler --status      # show if the service is running
+codebutler --logs        # tail -f the log file
 ```
 
-### `--install` hace:
+### `--install` does:
 
-1. Detecta repo actual (`pwd`) y nombre (basename)
-2. Detecta path del binario `codebutler`
-3. Detecta OS (`runtime.GOOS`)
-4. Crea `~/.codebutler/logs/` si no existe
-5. **macOS**: genera plist → `~/Library/LaunchAgents/` → `launchctl load`
-6. **Linux**: genera unit → `~/.config/systemd/user/` → `systemctl --user enable --now`
+1. Detect current repo (`pwd`) and name (basename)
+2. Detect binary path of `codebutler`
+3. Detect OS (`runtime.GOOS`)
+4. Create `~/.codebutler/logs/` if it doesn't exist
+5. **macOS**: generate plist → `~/Library/LaunchAgents/` → `launchctl load`
+6. **Linux**: generate unit → `~/.config/systemd/user/` → `systemctl --user enable --now`
 
-### Múltiples repos
+### Multiple repos
 
-Cada repo es un servicio independiente:
+Each repo is an independent service:
 
 ```
 # macOS
@@ -754,24 +752,24 @@ Cada repo es un servicio independiente:
   codebutler-ios-app.service
 ```
 
-Cada uno con su propio `WorkingDirectory`, log file, y canal de Slack.
+Each with its own `WorkingDirectory`, log file, and Slack channel.
 
-### Comportamiento
+### Behavior
 
-- macOS: `RunAtLoad` + `KeepAlive` → arranca al login, reinicia si crashea
-- Linux: `enable` + `Restart=always` → mismo comportamiento
-- Linux con `enable-linger`: arranca al boot sin necesidad de login
-- Logs van a `~/.codebutler/logs/<repo>.log` (formato plano, sección 17)
-- El web dashboard sigue disponible en su puerto (auto-incrementa si busy)
+- macOS: `RunAtLoad` + `KeepAlive` → starts at login, restarts on crash
+- Linux: `enable` + `Restart=always` → same behavior
+- Linux with `enable-linger`: starts at boot without requiring login
+- Logs go to `~/.codebutler/logs/<repo>.log` (plain format, section 17)
+- Web dashboard remains available on its port (auto-increments if busy)
 
 ---
 
 ## 19. Claude Sandboxing — System Prompt
 
-El prompt de sistema que CodeButler le pasa a `claude -p` debe empezar con
-restricciones claras para "jailear" al agente dentro del repo.
+The system prompt that CodeButler passes to `claude -p` must start with
+clear restrictions to jail the agent inside the repo.
 
-### Prefijo obligatorio del prompt
+### Mandatory prompt prefix
 
 ```
 RESTRICTIONS — READ FIRST:
@@ -790,25 +788,24 @@ RESTRICTIONS — READ FIRST:
 You are working in: {repo_path}
 ```
 
-### Por qué
+### Why
 
-Dado que Claude corre con `permissionMode: bypassPermissions`, tiene acceso
-completo al shell. Sin estas restricciones en el prompt, Claude podría:
-- Instalar paquetes que rompan el sistema
-- Navegar fuera del repo y leer/modificar otros archivos
-- Hacer `git push --force` o borrar branches
-- Ejecutar comandos destructivos
+Since Claude runs with `permissionMode: bypassPermissions`, it has full
+shell access. Without these prompt restrictions, Claude could:
+- Install packages that break the system
+- Navigate outside the repo and read/modify other files
+- Run `git push --force` or delete branches
+- Execute destructive commands
 
-El prompt sandboxing es una capa de defensa por software (no es un sandbox
-real del OS), pero en la práctica Claude respeta estas instrucciones
-consistentemente.
+The prompt sandboxing is a software defense layer (not a real OS sandbox),
+but in practice Claude respects these instructions consistently.
 
-### Implementación
+### Implementation
 
-En `internal/agent/agent.go`, el prompt se arma como:
+In `internal/agent/agent.go`, the prompt is assembled as:
 
 ```go
 prompt := sandboxPrefix + "\n\n" + memoryContext + "\n\n" + userMessages
 ```
 
-Donde `sandboxPrefix` es una constante con las restricciones.
+Where `sandboxPrefix` is a constant with the restrictions.
