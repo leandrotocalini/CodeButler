@@ -426,37 +426,112 @@ Filter: channel match, not from bot
 Audio file? → Download → Whisper transcribe
     ↓
 Determine thread context:
-    ├─ thread_ts == "" → new top-level message → spawn goroutine
-    └─ thread_ts != "" → reply in thread → spawn goroutine with --resume
-    ↓
-goroutine:
-    1. Lock thread (prevent double-processing)
-    2. Lookup session_id for thread_ts
-    3. agent.Run(prompt, session_id)
-    4. Reply in thread (slack.MsgOptionTS(thread_ts))
-    5. Store session_id for thread_ts
-    6. Unlock thread
+    ├─ thread_ts == "" → new top-level message → KIMI STARTS (always)
+    └─ thread_ts != "" → reply in existing thread → route to Kimi or Claude
+```
+
+### Thread Phases: Kimi First, Claude Second
+
+Every thread goes through two phases. Kimi **always** starts.
+Claude **never** starts without user approval.
+
+```
+PHASE 1 — KIMI (definition & planning)
+    User sends message
+        ↓
+    Kimi responds: asks questions, proposes approach, shows plan
+        ↓
+    User replies: refines, adjusts, adds details
+        ↓
+    Kimi updates plan, shows final proposal
+        ↓
+    User says "yes" / "dale" / "go" / approves
+        ↓
+PHASE 2 — CLAUDE (implementation)
+    Daemon creates worktree + branch
+        ↓
+    Claude executes the approved plan
+        ↓
+    User can reply → Claude resumes (--resume)
+        ↓
+    Claude opens PR → thread lifecycle continues
+```
+
+**Kimi handles all conversation until approval. Claude only touches code.**
+
+### Thread State in the Daemon
+
+```go
+type ThreadPhase string
+const (
+    PhaseKimi   ThreadPhase = "kimi"    // Kimi is talking to the user
+    PhaseClaude ThreadPhase = "claude"  // User approved, Claude is working
+)
+
+type Thread struct {
+    ThreadTS    string
+    Phase       ThreadPhase
+    KimiHistory []Message     // conversation so far (for Kimi context)
+    Plan        string        // Kimi's approved plan (passed to Claude)
+    Branch      string        // set when Phase transitions to claude
+    SessionID   string        // Claude session ID (for --resume)
+}
+```
+
+### Message Routing
+
+```go
+func (d *Daemon) onMessage(msg Message) {
+    thread := d.getOrCreateThread(msg.ThreadTS)
+
+    switch thread.Phase {
+    case PhaseKimi:
+        // Check if user is approving Kimi's plan
+        if isApproval(msg.Text) && thread.Plan != "" {
+            thread.Phase = PhaseClaude
+            d.startClaude(thread)
+            return
+        }
+        // Otherwise, Kimi continues the conversation
+        d.runKimi(thread, msg)
+
+    case PhaseClaude:
+        // User replied after Claude started — resume Claude
+        d.resumeClaude(thread, msg)
+    }
+}
+
+func isApproval(text string) bool {
+    approvals := []string{"yes", "si", "sí", "dale", "go", "do it", "proceed", "ok", "lgtm"}
+    lower := strings.ToLower(strings.TrimSpace(text))
+    for _, a := range approvals {
+        if lower == a { return true }
+    }
+    return false
+}
 ```
 
 ### Concurrency Model
 
 ```go
 type Daemon struct {
-    // ...
-    activeMu sync.Mutex
-    active   map[string]bool  // thread_ts → currently processing
+    threads  map[string]*Thread  // thread_ts → thread state
+    threadMu sync.Mutex
 }
 ```
 
-Each thread is processed independently. Multiple threads can run Claude
-concurrently. The `active` map prevents double-processing if multiple
-messages arrive in the same thread while Claude is still working —
-those messages are queued per-thread and processed after the current
-run completes.
+Multiple threads can be in different phases simultaneously:
+- Thread A: Kimi is discussing with user (no worktree, no Claude)
+- Thread B: User just approved, Claude is coding (worktree active)
+- Thread C: Kimi is asking clarifying questions (no worktree)
+- Thread D: Claude finished, PR opened, waiting for merge
+
+Kimi threads are cheap (~$0.001/message). Many can run in parallel.
+Claude threads are expensive. Limited by `maxConcurrentThreads`.
 
 ### Sending
 ```
-agent.Run() result
+Kimi/Claude response
     ↓
 Format response (code snippets, markdown)
     ↓
@@ -573,9 +648,9 @@ This is the **central architectural decision** of CodeButler2.
 - [x] **memory.md coexistence**: local memory.md (Kimi) + shared CLAUDE.md (git) both exist
 - [x] **PR as journal**: thread summary goes in PR description (via `gh pr edit`), no files committed
 - [x] **Multi-model**: Claude executes code, cheap models (Kimi/GPT-4o-mini) orchestrate around it
-- [x] **Smart routing**: Kimi classifies messages — questions answered directly, code tasks go to Claude
-- [x] **Pre-flight enrichment**: Kimi scans repo + memory before Claude runs, builds focused prompt
-- [x] **Workflow planning**: Kimi generates execution plans for complex tasks, user approves before Claude runs
+- [x] **Kimi first, always**: Kimi starts every thread. Scans repo, asks questions, proposes plan. Claude never starts without approval
+- [x] **Approval gate**: user must explicitly approve before Claude runs. "yes"/"dale"/"go" triggers Phase 2
+- [x] **Questions never reach Claude**: Kimi answers questions directly (reads files, checks docs). Thread ends without Claude
 - [x] **Thread = Branch = PR**: each thread creates exactly one branch, one PR. Non-negotiable 1:1:1 mapping
 - [x] **PR merged = thread closed**: merge is the only way a thread ends. No stale timeouts, no manual close
 - [x] **Cross-thread references**: link old threads/PRs in new thread for read-only context. Rule stays: 1 thread = 1 branch = 1 PR
@@ -1406,85 +1481,221 @@ type Context struct {
 func Enrich(kimiClient, repoDir, userMessage, memory string) (*Context, error)
 ```
 
-### 24.2 Smart Routing: Not Everything Needs Claude
+### 24.2 Kimi as First Responder — The Core Flow
 
-Some messages don't need a $1 Claude call. Kimi can handle simple
-questions directly, and only escalate to Claude when code changes
-are needed.
+Kimi **always** starts every thread. This is not routing — it's the
+fundamental interaction model. The user talks to Kimi first, defines
+what they want, and only when they approve does Claude execute.
+
+#### Why Kimi First, Always
 
 ```
-User message
-    ↓
-Kimi classifier (1 API call, ~$0.001):
-    ├─ "question"  → Kimi answers directly (grep + read + respond)
-    ├─ "code_task" → Claude (full agent with tools)
-    ├─ "clarify"   → Kimi asks follow-up question
-    └─ "off_topic" → Kimi politely redirects
+WITHOUT Kimi (current v1):
+    User: "fix the login bug"
+    → Claude starts immediately ($0.50+)
+    → Claude explores the codebase, asks itself questions
+    → Maybe fixes the wrong thing → another $0.50 call
+    → Total: $1.00+ for a vague request
+
+WITH Kimi first (v2):
+    User: "fix the login bug"
+    → Kimi: "I see auth/login.go and auth/session.go. What's the
+       symptom? Timeout? Wrong credentials? Session expiry?" ($0.001)
+    → User: "the session expires too fast"
+    → Kimi: "Found it. auth/session.go:42 sets expiry to 1h. The
+       config says 24h. Looks like a hardcoded override.
+       Plan: fix line 42 to use config value, add test.
+       Say *yes* to start." ($0.002)
+    → User: "yes"
+    → Claude executes with perfect context ($0.30)
+    → Total: $0.30 for a precise fix
 ```
 
-**Examples**:
+#### What Kimi Does in Phase 1
 
-| Message | Classification | Handler |
-|---|---|---|
-| "fix the login bug" | code_task | Claude |
-| "what does the auth middleware do?" | question | Kimi (read file + summarize) |
-| "how do we deploy?" | question | Kimi (check README/docs) |
-| "refactor the API to use REST" | code_task | Claude |
-| "is the CI passing?" | question | Kimi (check gh status) |
-| "login" | clarify | Kimi: "Can you describe the issue?" |
+1. **Understands the request**: asks clarifying questions if vague
+2. **Scans the codebase**: grep, read files, check git log (cheap operations)
+3. **Answers questions directly**: "what does X do?" → Kimi reads the file and explains (no Claude needed)
+4. **Proposes a plan for code tasks**: lists files to change, approach, estimated complexity
+5. **Detects conflicts**: checks if other threads touch the same files
+6. **Waits for approval**: user must say "yes" before Claude starts
 
-**Cost impact**: If 40% of messages are questions, that's 40% fewer Claude
-calls. At ~$0.50/Claude call, this adds up fast.
+#### Conversation Examples
 
-**Implementation**:
-```go
-// internal/router/router.go
-
-type Route string
-const (
-    RouteCode    Route = "code_task"
-    RouteQuestion Route = "question"
-    RouteClarify  Route = "clarify"
-)
-
-func Classify(kimiClient, message string) (Route, error)
-func AnswerQuestion(kimiClient, repoDir, question string) (string, error)
+**Simple question (Kimi handles entirely, Claude never runs):**
+```
+User: "how do we deploy?"
+Kimi: "Based on README.md and the Makefile, deployment is:
+  1. make build
+  2. docker push
+  3. kubectl apply -f k8s/
+  The CI pipeline in .github/workflows/deploy.yml does this automatically on merge to main."
 ```
 
-### 24.3 Thread Workflow: Plan → Approve → Execute
+**Vague request (Kimi clarifies before proposing):**
+```
+User: "login is broken"
+Kimi: "I see several login-related files:
+  - auth/login.go (POST /login endpoint)
+  - auth/session.go (session management)
+  - auth/middleware.go (auth middleware)
+  What's happening? Error message? Timeout? Wrong redirect?"
+User: "it redirects to a 404 after login"
+Kimi: "Found it. auth/login.go:58 redirects to /dashboard but routes.go
+  defines it as /app/dashboard. The redirect path is wrong.
+  Plan: change redirect in auth/login.go:58 from /dashboard to /app/dashboard.
+  Say *yes* to fix it."
+User: "yes"
+→ Claude executes
+```
 
-For complex tasks, Kimi creates a structured work plan before Claude
-executes anything. The user reviews and approves the plan first.
-
+**Complex task (Kimi plans in detail):**
 ```
 User: "add user registration with email verification"
-    ↓
-Kimi workflow planner:
-    1. Analyze request complexity → "complex, multi-file"
-    2. Scan codebase for existing patterns (auth, models, routes)
-    3. Generate execution plan:
+Kimi: "That's a multi-file feature. Here's my plan:
 
-        📋 *Work Plan*
-        1. Create `models/user.go` — User struct + DB schema
-        2. Create `auth/register.go` — POST /register endpoint
-        3. Create `auth/verify.go` — GET /verify?token=... endpoint
-        4. Create `email/send.go` — verification email sender
-        5. Update `routes.go` — add new endpoints
-        6. Add tests for registration flow
+  📋 *Work Plan*
+  1. Create `models/user.go` — User struct + DB migration
+  2. Create `auth/register.go` — POST /register endpoint
+  3. Create `auth/verify.go` — GET /verify?token=... endpoint
+  4. Create `email/send.go` — verification email via SMTP
+  5. Update `routes.go` — add new endpoints
+  6. Add tests for the registration flow
 
-        Estimated: ~5 Claude turns
-        Reply *yes* to execute, or describe changes.
-    ↓
-User: "yes" (or "skip email verification for now")
-    ↓
-Claude executes the approved plan (or adjusted version)
+  I see the project uses GORM for models and chi for routing.
+  Estimated: ~5 Claude turns.
+  Say *yes* to start, or tell me what to change."
+User: "skip email verification for now, just basic registration"
+Kimi: "Updated plan:
+  1. Create `models/user.go` — User struct + DB migration
+  2. Create `auth/register.go` — POST /register with bcrypt
+  3. Update `routes.go` — add POST /register
+  4. Add tests
+  Say *yes*."
+User: "dale"
+→ Claude executes the refined plan
 ```
 
-**Why this is better than Claude planning**:
-- Kimi plan costs ~$0.002. Claude plan costs ~$0.50.
-- User gets to review before expensive execution starts
-- If user says "no, different approach" → saved a full Claude call
-- Claude gets a structured plan as input → more focused execution
+#### Kimi's System Prompt
+
+```
+You are an AI development assistant working in a code repository.
+Your role is to UNDERSTAND and PLAN, never to write code.
+
+You have access to these tools:
+- grep/search the codebase
+- read files
+- check git log
+- check gh pr/issue status
+
+Your job:
+1. Understand what the user wants
+2. If it's a question → answer it directly (read the relevant files)
+3. If it's a code task → scan the codebase, propose a specific plan
+4. Ask clarifying questions when the request is vague
+5. When the plan is ready, present it clearly and wait for approval
+6. Never say "I can't do that" — if it's a code task, plan it for Claude
+
+When proposing a plan, always include:
+- Which files will be created/modified
+- What the approach is (patterns found in the codebase)
+- Estimated complexity
+
+Repository: {repo_path}
+Memory: {memory.md contents}
+```
+
+#### Implementation
+
+```go
+// internal/kimi/responder.go
+
+// Respond handles a message in Kimi phase
+// Returns the response text and optionally a plan
+func Respond(ctx context.Context, client *llm.Client, repoDir string,
+    history []Message, newMessage string, memory string) (response string, plan *Plan, err error)
+
+type Plan struct {
+    Summary   string   // one-line description
+    Steps     []string // what Claude will do
+    Files     []string // files that will be touched
+    Estimated string   // "~3 Claude turns"
+}
+```
+
+### 24.3 The Approval Gate
+
+The transition from Kimi to Claude is explicit. The user must approve.
+This is not just a cost optimization — it's a **control mechanism**.
+The user stays in charge of what Claude does.
+
+#### What Counts as Approval
+
+```go
+var approvalPatterns = []string{
+    "yes", "si", "sí", "dale", "go", "do it", "proceed",
+    "ok", "lgtm", "ship it", "approved", "let's go",
+}
+```
+
+Kimi can also detect approval in natural language:
+- "yes but change X first" → Kimi adjusts plan, re-proposes
+- "yes, and also do Y" → Kimi adds to plan, re-proposes
+- "no" / "wait" / "actually..." → Kimi continues conversation
+
+#### What Happens on Approval
+
+```
+User: "yes"
+    ↓
+1. Daemon transitions thread from PhaseKimi → PhaseClaude
+2. Create worktree: git worktree add .codebutler/branches/<slug>
+3. Init worktree (pod install, npm ci, etc.)
+4. Build Claude prompt:
+    - Sandbox prefix (section 19)
+    - Kimi's approved plan
+    - Relevant file contents (from Kimi's pre-flight)
+    - Memory context
+5. Spawn Claude in worktree: claude -p <prompt>
+6. React with 👀 in thread
+7. Claude works...
+8. Post response in thread
+9. React with ✅
+```
+
+#### The Prompt Claude Receives
+
+```
+{sandbox prefix}
+
+APPROVED PLAN (implement this):
+---
+1. Create models/user.go — User struct with GORM tags
+2. Create auth/register.go — POST /register with bcrypt
+3. Update routes.go — add POST /register route
+4. Add tests for registration
+---
+
+RELEVANT CONTEXT:
+---
+models/post.go (existing model example):
+  type Post struct { ID uint; Title string; ... }
+
+routes.go (current routes):
+  r.Post("/login", auth.Login)
+  r.Get("/posts", posts.List)
+
+auth/login.go (existing auth pattern):
+  func Login(w http.ResponseWriter, r *http.Request) { ... }
+---
+
+USER REQUEST: "add basic user registration without email verification"
+
+{memory context}
+```
+
+Claude gets a **precise, focused prompt** with a clear plan and relevant
+code. No exploration needed. This is why Kimi-first saves money.
 
 ### 24.4 Post-flight: After Claude Responds
 
@@ -1745,49 +1956,65 @@ to Slack weekly.
 
 ### 24.7 The Full Pipeline
 
-Putting it all together — a single message flows through this pipeline:
+Every thread follows this pipeline. Kimi owns the conversation until
+the user approves. Claude only appears after approval.
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                   USER MESSAGE                       │
-└──────────────────────┬──────────────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│                NEW SLACK THREAD                       │
+│            User: "fix the login bug"                  │
+└──────────────────────┬───────────────────────────────┘
+                       ↓
+    ╔══════════════════════════════════════╗
+    ║        PHASE 1: KIMI (cheap)        ║
+    ║     ~$0.001-0.005 per message       ║
+    ╠══════════════════════════════════════╣
+    ║                                      ║
+    ║  Kimi: scan repo, understand request ║
+    ║      ↓                               ║
+    ║  Kimi: ask questions / propose plan  ║──→ User replies
+    ║      ↓                               ║     (loop until
+    ║  Kimi: refine plan                   ║←── plan is right)
+    ║      ↓                               ║
+    ║  Kimi: "Here's the plan. Yes?"       ║
+    ║                                      ║
+    ╚══════════════════╤═══════════════════╝
                        ↓
               ┌────────────────┐
-              │  Kimi: CLASSIFY │  ~$0.001, <1s
-              └───────┬────────┘
-                      │
-         ┌────────────┼────────────┐
-         ↓            ↓            ↓
-    [question]   [code_task]   [clarify]
-         │            │            │
-         ↓            ↓            ↓
-   Kimi answers  ┌─────────┐  Kimi asks
-   directly      │  Kimi:   │  follow-up
-   (~$0.002)     │ ENRICH   │
-                 │ + PLAN   │  ~$0.003
-                 └────┬─────┘
-                      ↓
-              ┌───────────────┐
-              │ User approves │  (for complex tasks)
-              │   the plan    │
-              └───────┬───────┘
-                      ↓
-              ┌───────────────┐
-              │    Claude:    │
-              │   EXECUTE     │  ~$0.50-2.00
-              │  (code agent) │
-              └───────┬───────┘
-                      ↓
-         ┌────────────┼────────────┐
-         ↓            ↓            ↓
-   Kimi: extract  Kimi: detect  Kimi: format
-   memory         PR → history  response
-   (~$0.001)      (~$0.002)     (~$0.001)
-         ↓            ↓            ↓
-└─────────────────────────────────────────────────────┐
-│                SLACK THREAD RESPONSE                  │
-└──────────────────────────────────────────────────────┘
+              │  User: "yes"   │
+              └────────┬───────┘
+                       ↓
+         ┌─── create worktree + branch
+         ↓
+    ╔══════════════════════════════════════╗
+    ║       PHASE 2: CLAUDE (expensive)    ║
+    ║          ~$0.30-2.00 per run         ║
+    ╠══════════════════════════════════════╣
+    ║                                      ║
+    ║  Claude: execute approved plan       ║
+    ║  Claude: edit files, run tests       ║
+    ║  Claude: commit, push, open PR       ║
+    ║      ↓                               ║
+    ║  User replies → Claude --resume      ║
+    ║                                      ║
+    ╚══════════════════╤═══════════════════╝
+                       ↓
+    ╔══════════════════════════════════════╗
+    ║      POST-FLIGHT: KIMI (cheap)       ║
+    ╠══════════════════════════════════════╣
+    ║  ├─ extract memory → memory.md       ║
+    ║  ├─ generate summary → gh pr edit    ║
+    ║  ├─ check conflicts with other PRs   ║
+    ║  └─ detect TODO/FIXME → warn         ║
+    ╚══════════════════╤═══════════════════╝
+                       ↓
+              ┌────────────────┐
+              │  PR merged     │──→ Thread CLOSED
+              └────────────────┘
 ```
+
+**Some threads never reach Phase 2.** If the user asks a question,
+Kimi answers it directly. Thread done. $0.002 total. Claude never ran.
 
 ### 24.8 Model Client Abstraction
 
@@ -1823,17 +2050,17 @@ func (c *Client) ChatJSON(ctx context.Context, systemPrompt, userMessage string,
   "orchestrator": {
     "provider": "kimi",           // or "openai-mini", "deepseek"
     "apiKey": "...",
-    "enablePreflight": true,      // enrich prompts before Claude
-    "enableRouting": true,        // classify messages, skip Claude for questions
-    "enablePlanning": true,       // generate plans for complex tasks
-    "enableConflictDetection": true
+    "conflictDetection": true     // check file overlaps between threads
   }
 }
 ```
 
-If no orchestrator is configured, all features are bypassed and messages
-go directly to Claude (current v1 behavior). This keeps the system
-functional without the cheap model — it just costs more per call.
+The orchestrator is **required** in v2. Kimi-first is the core interaction
+model, not an optional optimization. Without it, messages would go directly
+to Claude — which defeats the architecture.
+
+If the orchestrator API is down, the circuit breaker (section 25) kicks in
+and routes directly to Claude as a temporary fallback.
 
 ### 24.10 What This Means for CodeButler's Identity
 
