@@ -637,3 +637,178 @@ Un solo método interno `log(tag, format, args...)` que:
 4. Notifica subscribers
 
 Métodos públicos: `Inf()`, `Wrn()`, `Err()`, `Dbg()`, `Msg()`, `Cld()`, `Rsp()`, `Mem()`
+
+---
+
+## 18. Service Install — macOS + Linux
+
+Correr CodeButler como servicio del sistema. En macOS usa **LaunchAgent**,
+en Linux usa **systemd user service**. Ambos corren en la sesión del usuario,
+lo que da acceso a:
+
+- Xcode toolchain (`xcodebuild test`, `swift test`, `xcrun`)
+- User keychain
+- PATH con developer tools
+- Homebrew binaries
+- Environment variables del usuario
+
+Un LaunchDaemon (macOS) o system-level systemd service correría como root
+sin sesión y no tendría acceso a nada de esto.
+
+### macOS: LaunchAgent Plist
+
+```xml
+<!-- ~/Library/LaunchAgents/com.codebutler.<repo>.plist -->
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.codebutler.myrepo</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/codebutler</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/leandro/projects/myrepo</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/leandro/.codebutler/logs/myrepo.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/leandro/.codebutler/logs/myrepo.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Applications/Xcode.app/Contents/Developer/usr/bin</string>
+    </dict>
+</dict>
+</plist>
+```
+
+### Linux: systemd User Service
+
+```ini
+# ~/.config/systemd/user/codebutler-myrepo.service
+[Unit]
+Description=CodeButler - myrepo
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/codebutler
+WorkingDirectory=/home/leandro/projects/myrepo
+Restart=always
+RestartSec=5
+StandardOutput=append:/home/leandro/.codebutler/logs/myrepo.log
+StandardError=append:/home/leandro/.codebutler/logs/myrepo.log
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+# Para que user services arranquen sin login:
+sudo loginctl enable-linger leandro
+```
+
+`enable-linger` permite que los servicios del usuario arranquen al boot
+sin necesidad de login. Sin linger, arrancan al login (como LaunchAgent).
+
+### CLI Commands
+
+```bash
+codebutler --install     # genera plist + launchctl load
+codebutler --uninstall   # launchctl unload + borra plist
+codebutler --status      # muestra si el servicio está corriendo
+codebutler --logs        # tail -f del log file
+```
+
+### `--install` hace:
+
+1. Detecta repo actual (`pwd`) y nombre (basename)
+2. Detecta path del binario `codebutler`
+3. Detecta OS (`runtime.GOOS`)
+4. Crea `~/.codebutler/logs/` si no existe
+5. **macOS**: genera plist → `~/Library/LaunchAgents/` → `launchctl load`
+6. **Linux**: genera unit → `~/.config/systemd/user/` → `systemctl --user enable --now`
+
+### Múltiples repos
+
+Cada repo es un servicio independiente:
+
+```
+# macOS
+~/Library/LaunchAgents/
+  com.codebutler.myapp.plist
+  com.codebutler.backend.plist
+  com.codebutler.ios-app.plist
+
+# Linux
+~/.config/systemd/user/
+  codebutler-myapp.service
+  codebutler-backend.service
+  codebutler-ios-app.service
+```
+
+Cada uno con su propio `WorkingDirectory`, log file, y canal de Slack.
+
+### Comportamiento
+
+- macOS: `RunAtLoad` + `KeepAlive` → arranca al login, reinicia si crashea
+- Linux: `enable` + `Restart=always` → mismo comportamiento
+- Linux con `enable-linger`: arranca al boot sin necesidad de login
+- Logs van a `~/.codebutler/logs/<repo>.log` (formato plano, sección 17)
+- El web dashboard sigue disponible en su puerto (auto-incrementa si busy)
+
+---
+
+## 19. Claude Sandboxing — System Prompt
+
+El prompt de sistema que CodeButler le pasa a `claude -p` debe empezar con
+restricciones claras para "jailear" al agente dentro del repo.
+
+### Prefijo obligatorio del prompt
+
+```
+RESTRICTIONS — READ FIRST:
+- You MUST NOT install software, packages, or dependencies (no brew, apt,
+  npm install, pip install, go install, etc.)
+- You MUST NOT leave the current working directory or access files outside
+  this repository
+- You MUST NOT modify system files, configs outside the repo, or
+  environment variables
+- You MUST NOT make network requests except through tools already available
+  in the repo
+- You MUST NOT run destructive commands (rm -rf, git push --force,
+  DROP TABLE, etc.)
+- If a task requires any of the above, explain what is needed and STOP
+
+You are working in: {repo_path}
+```
+
+### Por qué
+
+Dado que Claude corre con `permissionMode: bypassPermissions`, tiene acceso
+completo al shell. Sin estas restricciones en el prompt, Claude podría:
+- Instalar paquetes que rompan el sistema
+- Navegar fuera del repo y leer/modificar otros archivos
+- Hacer `git push --force` o borrar branches
+- Ejecutar comandos destructivos
+
+El prompt sandboxing es una capa de defensa por software (no es un sandbox
+real del OS), pero en la práctica Claude respeta estas instrucciones
+consistentemente.
+
+### Implementación
+
+En `internal/agent/agent.go`, el prompt se arma como:
+
+```go
+prompt := sandboxPrefix + "\n\n" + memoryContext + "\n\n" + userMessages
+```
+
+Donde `sandboxPrefix` es una constante con las restricciones.
