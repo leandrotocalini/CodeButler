@@ -183,14 +183,31 @@ internally and only change the code that populates them.
 
 ### SQLite `sessions` table
 
+The key insight: **each Slack thread IS a Claude session**. The primary key
+changes from `chat_jid` (one session per chat) to `thread_ts` (one session
+per thread). This enables N concurrent conversations in the same channel.
+
 ```sql
 -- Current
 CREATE TABLE sessions (
-    chat_jid   TEXT PRIMARY KEY,      -- → channel_id (same semantics)
+    chat_jid   TEXT PRIMARY KEY,      -- one session per chat
     session_id TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+-- Proposed
+CREATE TABLE sessions (
+    thread_ts  TEXT PRIMARY KEY,      -- one session per Slack thread
+    channel_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 ```
+
+**Behavior**:
+- New top-level message → create thread → new Claude session → store `thread_ts → session_id`
+- Reply in thread → lookup `thread_ts` → `--resume session_id`
+- Multiple threads can be active simultaneously (no global busy lock)
 
 ---
 
@@ -210,6 +227,7 @@ CREATE TABLE sessions (
 | `internal/slack/client.go` | Socket Mode connection, state, disconnect |
 | `internal/slack/handler.go` | Event parsing, send messages/images |
 | `internal/slack/channels.go` | List/create channels, get info |
+| `internal/slack/snippets.go` | Code block extraction, smart formatting, file upload |
 
 ### Modify
 | File | Changes |
@@ -217,7 +235,7 @@ CREATE TABLE sessions (
 | `cmd/codebutler/main.go` | Setup wizard: prompt tokens instead of QR, select channel instead of group |
 | `internal/config/types.go` | `WhatsAppConfig` → `SlackConfig`, separate `GlobalConfig` and `RepoConfig` |
 | `internal/config/load.go` | Load global (`~/.codebutler/`) + per-repo, merge, save both |
-| `internal/daemon/daemon.go` | Replace `whatsapp.Client` with `slack.Client`, adapt filters |
+| `internal/daemon/daemon.go` | Replace `whatsapp.Client` with `slack.Client`, delete state machine (~300 lines), add thread dispatch (~50 lines) |
 | `internal/daemon/imagecmd.go` | `SendImage` → Slack `files.upload` |
 | `internal/daemon/web.go` | Change "WhatsApp state" to "Slack state" in status API |
 | `internal/store/store.go` | Rename columns: `from_id`, `channel_id`, `platform_msg_id` |
@@ -229,7 +247,7 @@ CREATE TABLE sessions (
 | `internal/agent/agent.go` | Claude spawn is messaging-independent |
 | `internal/imagegen/generate.go` | OpenAI API is independent |
 | `internal/transcribe/whisper.go` | Whisper API is independent |
-| `internal/store/sessions.go` | Identical semantics (channel_id instead of chat_jid) |
+| `internal/store/sessions.go` | PK changes: `chat_jid` → `thread_ts`, add `channel_id` column |
 | `internal/daemon/logger.go` | Logger is independent |
 
 ---
@@ -365,32 +383,74 @@ in `~/.codebutler/`. Each repo only configures its channel.
 
 ---
 
-## 11. Message Flow — New
+## 11. Message Flow — Event-Driven Threads
+
+The conversation state machine (`AccumulationWindow`, `ReplyWindow`,
+`convActive`, `pollLoop`) is **eliminated entirely**. Slack threads
+provide natural conversation boundaries.
+
+### Architecture Change
+
+```
+BEFORE (WhatsApp):
+  1 global poll loop → 1 conversation at a time → state machine
+  AccumulationWindow (3s) → ReplyWindow (60s) → cold/hot modes
+
+AFTER (Slack):
+  Event-driven → 1 goroutine per thread → N concurrent conversations
+  No accumulation, no reply window, no state machine
+```
 
 ### Reception
 ```
 Slack WebSocket (Socket Mode)
     ↓ socketmode.EventTypeEventsAPI
     ↓ EventTypeMessageChannels
-Parse: user, channel, text, files
+Parse: user, channel, text, thread_ts, files
     ↓
 Filter: channel match, not from bot
     ↓
 Audio file? → Download → Whisper transcribe
     ↓
-store.Insert(Message)
+Determine thread context:
+    ├─ thread_ts == "" → new top-level message → spawn goroutine
+    └─ thread_ts != "" → reply in thread → spawn goroutine with --resume
     ↓
-Signal msgNotify channel
-    ↓
-(conversation state machine — UNCHANGED)
+goroutine:
+    1. Lock thread (prevent double-processing)
+    2. Lookup session_id for thread_ts
+    3. agent.Run(prompt, session_id)
+    4. Reply in thread (slack.MsgOptionTS(thread_ts))
+    5. Store session_id for thread_ts
+    6. Unlock thread
 ```
+
+### Concurrency Model
+
+```go
+type Daemon struct {
+    // ...
+    activeMu sync.Mutex
+    active   map[string]bool  // thread_ts → currently processing
+}
+```
+
+Each thread is processed independently. Multiple threads can run Claude
+concurrently. The `active` map prevents double-processing if multiple
+messages arrive in the same thread while Claude is still working —
+those messages are queued per-thread and processed after the current
+run completes.
 
 ### Sending
 ```
 agent.Run() result
     ↓
-slack.Client.SendMessage(channelID, text)
-    ↓ api.PostMessage(channelID, slack.MsgOptionText(text, false))
+Format response (code snippets, markdown)
+    ↓
+slack.Client.SendMessage(channelID, text, thread_ts)
+    ↓ api.PostMessage(channelID,
+        slack.MsgOptionText(text, false),
+        slack.MsgOptionTS(threadTS))
 Slack API
 ```
 
@@ -404,6 +464,28 @@ if msg.BotID != "" || msg.User == c.botUserID { skip }
 ```
 
 **Advantage**: Slack identifies bots natively, no prefix needed.
+
+### What Gets Deleted from daemon.go
+
+```go
+// ALL of this goes away:
+const AccumulationWindow = 3 * time.Second   // deleted
+const ReplyWindow = 60 * time.Second         // deleted
+const ColdPollInterval = 2 * time.Second     // deleted
+
+convMu       sync.Mutex       // deleted
+convActive   bool             // deleted
+convResponse time.Time        // deleted
+
+func pollLoop()               // deleted
+func handleNewMessages()      // deleted — replaced by event handler
+func isConversationActive()   // deleted
+func startConversation()      // deleted
+func endConversation()        // deleted
+func getConversationResponseTime() // deleted
+```
+
+**~200 lines of state machine code replaced by ~50 lines of thread dispatch.**
 
 ---
 
@@ -425,10 +507,29 @@ if msg.BotID != "" || msg.User == c.botUserID { skip }
 - Slack: bots cannot show typing indicator
 - Can be omitted without functional impact
 
-### Threads (new in Slack)
-- **Decided**: always reply in thread of original message
-- Keeps the channel clean
-- Groups Claude conversation in a visual thread
+### Threads = Claude Sessions (core design change)
+
+This is the **central architectural decision** of CodeButler2.
+
+- **Each Slack thread IS a Claude session** (1:1 mapping)
+- New message in channel → bot replies in a new thread → new `claude -p` session
+- Reply in that thread → `claude -p --resume <session_id>` with full context
+- Multiple threads can run concurrently (no global lock)
+- Thread history is visible in Slack (natural conversation UI)
+- No accumulation window, no reply window, no state machine
+- Session ends naturally when the user stops replying to that thread
+
+**Why this is better than WhatsApp groups:**
+
+| WhatsApp (v1) | Slack Threads (v2) |
+|---|---|
+| 1 conversation at a time (global lock) | N concurrent threads |
+| State machine: cold/hot modes, timers | Event-driven, no state machine |
+| ~300 lines of state machine code | ~50 lines of thread dispatch |
+| Messages queued during processing | Each thread independent |
+| 60s silence = conversation end | Thread never "expires" |
+| All messages in one flat chat | Each task in its own thread |
+| Hard to reference past conversations | Threads are permanent, searchable |
 
 ### Voice Messages
 - WhatsApp: inline voice, download with `DownloadAudio()`
@@ -444,13 +545,19 @@ if msg.BotID != "" || msg.User == c.botUserID { skip }
 
 ## 13. Decisions Made
 
-- [x] **Threads**: reply in thread of original message
+- [x] **Threads = Sessions**: each Slack thread IS a Claude session (1:1 mapping)
+- [x] **No state machine**: event-driven thread dispatch replaces cold/hot modes
+- [x] **Concurrent threads**: multiple threads can run Claude simultaneously
 - [x] **Reactions**: yes, use 👀 when processing starts and ✅ when done
 - [x] **SQLite column names**: rename to `from_id`, `channel_id`, `platform_msg_id`
+- [x] **Sessions key**: `thread_ts` replaces `chat_jid` as primary key
 - [x] **Multiple channels**: no, one channel per repo (like WhatsApp)
 - [x] **Bot mention**: respond to all channel messages, no @mention required
 - [x] **Message length**: split into multiple ~4000 char messages in thread
 - [x] **Markdown**: convert Claude output (standard Markdown) to Slack mrkdwn before sending
+- [x] **Code snippets**: short (<20 lines) inline, long (>=20 lines) as file upload
+- [x] **Knowledge sharing**: CLAUDE.md committed to branches, shared via PR merge
+- [x] **memory.md coexistence**: local memory.md (Kimi) + shared CLAUDE.md (git) both exist
 
 ---
 
@@ -809,3 +916,211 @@ prompt := sandboxPrefix + "\n\n" + memoryContext + "\n\n" + userMessages
 ```
 
 Where `sandboxPrefix` is a constant with the restrictions.
+
+---
+
+## 20. Code Snippets — Smart Formatting
+
+Claude's responses often contain code blocks. Slack supports both inline
+code blocks and file uploads with syntax highlighting. CodeButler2
+automatically picks the best format.
+
+### Strategy
+
+| Code block size | Format | Why |
+|---|---|---|
+| < 20 lines | Inline ` ```lang ` | Readable in-thread, no extra clicks |
+| >= 20 lines | `files.uploadV2` as snippet | Collapsible, syntax highlighted, downloadable |
+
+### Response Processing Pipeline
+
+```
+Claude response (markdown)
+    ↓
+Parse: extract code blocks (```lang\n...\n```)
+    ↓
+For each code block:
+    ├─ < 20 lines → keep inline as Slack ```lang block
+    └─ >= 20 lines → extract, upload as snippet file
+    ↓
+Reassemble message:
+    - Text portions → single message
+    - Long code blocks → separate file uploads in same thread
+```
+
+### Slack File Upload for Snippets
+
+```go
+// Upload a code snippet to a Slack thread
+func (c *Client) UploadSnippet(channelID, threadTS, code, lang, filename string) error {
+    _, err := c.api.UploadFileV2(slack.UploadFileV2Parameters{
+        Channel:        channelID,
+        Content:        code,
+        Filename:       filename,      // e.g., "fix.go", "query.sql"
+        FileType:       lang,          // e.g., "go", "python", "sql"
+        Title:          filename,
+        ThreadTimestamp: threadTS,
+    })
+    return err
+}
+```
+
+### Filename Inference
+
+Generate meaningful filenames from context:
+- If Claude mentions a file path → use that filename (e.g., `handler.go`)
+- If only language is known → use `snippet.{ext}` (e.g., `snippet.py`)
+- Multiple snippets in one response → number them (`snippet-1.go`, `snippet-2.go`)
+
+### Implementation
+
+- **File**: `internal/slack/snippets.go`
+- **Functions**:
+  - `FormatResponse(text string) (message string, snippets []Snippet)`
+  - `ExtractCodeBlocks(markdown string) []CodeBlock`
+- **Integration**: called in daemon before sending response to Slack
+
+---
+
+## 21. Knowledge Sharing via memory.md + PR Merge
+
+Each thread works in isolation. Knowledge is shared across threads only
+when a PR is merged — through git, not through any custom sync mechanism.
+
+### The Flow
+
+```
+Thread A: "fix the login bug"
+    → Claude works on branch fix/login
+    → Claude learns: "auth uses bcrypt, sessions expire after 24h"
+    → These learnings go into CLAUDE.md on the branch
+    → PR created → reviewed → merged to main
+    → CLAUDE.md changes now in main ✓
+
+Thread B: "add password reset" (started after merge)
+    → Claude reads CLAUDE.md from main (or its branch base)
+    → Already knows: "auth uses bcrypt, sessions expire after 24h"
+    → Builds on existing knowledge ✓
+
+Thread C: "refactor the API" (started BEFORE merge)
+    → Still working on its branch, doesn't see Thread A's learnings
+    → Gets the knowledge on next rebase/merge from main
+```
+
+### Why This Is Elegant
+
+1. **No custom sync** — git is the knowledge transport
+2. **Isolation by default** — threads can't pollute each other's context
+3. **Review gate** — learnings go through PR review before becoming shared
+4. **Conflict resolution** — git merge handles conflicting CLAUDE.md edits
+5. **Audit trail** — every knowledge addition is a commit with context
+
+### How It Differs from memory.md (Section 16)
+
+Section 16 describes auto-memory via Kimi that updates `.codebutler/memory.md`
+(gitignored, local). This section describes knowledge in `CLAUDE.md` (committed,
+shared).
+
+| | `.codebutler/memory.md` (Sec 16) | `CLAUDE.md` (Sec 21) |
+|---|---|---|
+| **Scope** | Local to this daemon instance | Shared across all developers |
+| **Written by** | Kimi (automatic) | Claude (during work) |
+| **Gitignored** | Yes | No — committed |
+| **Sharing** | Never shared | Shared via PR merge |
+| **Content** | Operational learnings | Codebase knowledge, conventions |
+| **Review** | No review | PR review gate |
+
+Both can coexist: memory.md for local operational memory, CLAUDE.md for
+shared codebase knowledge.
+
+---
+
+## 22. Why This Architecture Is Better
+
+### Simplicity
+
+The conversation state machine was the most complex part of CodeButler v1
+(~300 lines, 4 states, 3 timers, subtle edge cases). Slack threads
+eliminate it entirely. The new daemon is **event-driven with thread dispatch**:
+
+```go
+// v1: 300 lines of state machine
+func pollLoop()
+func handleNewMessages()   // cold mode vs hot mode
+func isConversationActive()
+func startConversation()
+func endConversation()
+func getConversationResponseTime()
+// AccumulationWindow, ReplyWindow, ColdPollInterval
+// convActive, convResponse, convMu
+
+// v2: ~20 lines of dispatch
+func onMessage(msg slack.Message) {
+    threadTS := msg.ThreadTS
+    if threadTS == "" {
+        threadTS = msg.Timestamp  // new top-level → becomes the thread
+    }
+    go d.processThread(threadTS, msg)
+}
+```
+
+### Concurrency
+
+v1 processed one conversation at a time. While Claude was thinking,
+all other messages were queued. If Claude took 2 minutes, users waited.
+
+v2 runs one goroutine per thread. User A asks about a bug in thread 1,
+user B asks about a feature in thread 2 — both get responses
+simultaneously.
+
+### Natural UX
+
+WhatsApp groups are flat — all messages in one stream. You can't tell
+where one conversation ends and another begins. The bot prefix `[BOT]`
+is a hack to filter bot messages.
+
+Slack threads are structured — each task lives in its own thread.
+Bot messages are identified natively (no prefix needed). You can
+collapse threads you don't care about. You can reference old threads.
+
+### Persistence & Searchability
+
+WhatsApp conversations are ephemeral from the bot's perspective
+(stored in local SQLite, not easily searchable). Slack threads are
+permanent, indexed, and searchable by the entire team.
+
+### Knowledge Flow
+
+```
+v1: Knowledge is local, trapped in one WhatsApp session
+    Claude learns things → session ends → knowledge lost (unless memory.md)
+
+v2: Knowledge flows through git
+    Claude learns things → writes to CLAUDE.md → PR merge → shared with all threads
+    Natural review gate: bad learnings get caught in PR review
+    Natural conflict resolution: git merge
+```
+
+### Team Scale
+
+v1 was designed for one person talking to one bot in one WhatsApp group.
+
+v2 naturally supports teams:
+- Multiple people can create threads in the same channel
+- Each thread is independent — no stepping on each other
+- Shared knowledge via CLAUDE.md in the repo
+- Slack's permission model handles access control
+
+### Summary
+
+| Aspect | v1 (WhatsApp) | v2 (Slack Threads) |
+|---|---|---|
+| State machine | ~300 lines, 4 states, 3 timers | None |
+| Concurrency | 1 conversation at a time | N concurrent threads |
+| UX | Flat chat, `[BOT]` prefix | Structured threads, native bot identity |
+| Knowledge sharing | Local memory.md | CLAUDE.md via PR merge |
+| Searchability | Local SQLite | Slack search (team-wide) |
+| Team support | Single user | Multi-user native |
+| Code complexity | ~630 lines daemon.go | ~200 lines estimated |
+| Authentication | QR code + phone linking | Bot token (one-time setup) |
+| Setup per repo | QR scan + group create | Just pick a channel |
