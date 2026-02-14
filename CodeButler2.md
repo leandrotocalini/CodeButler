@@ -236,9 +236,9 @@ CREATE TABLE sessions (
 | `internal/slack/channels.go` | List/create channels, get info |
 | `internal/slack/snippets.go` | Code block extraction, smart formatting, file upload |
 | `internal/github/github.go` | PR detection, merge polling, PR description updates via `gh` |
-| `internal/models/interfaces.go` | Orchestrator, Artist, Coder interfaces + shared types |
+| `internal/models/interfaces.go` | ProductManager, Artist, Coder interfaces + shared types |
 | `internal/provider/openai/client.go` | Shared OpenAI HTTP client (auth, rate limiting, retries) |
-| `internal/provider/openai/orchestrator.go` | Thin adapter: shared client → Orchestrator interface |
+| `internal/provider/openai/product_manager.go` | Thin adapter: shared client → ProductManager interface |
 | `internal/provider/openai/artist.go` | Thin adapter: shared client → Artist interface |
 | `internal/provider/openai/coder.go` | Thin adapter: shared client → Coder interface (future) |
 | `internal/provider/claude/coder.go` | Claude CLI Coder (exec.Command, not HTTP) |
@@ -676,7 +676,7 @@ This is the **central architectural decision** of CodeButler2.
 - [x] **memory.md coexistence**: local memory.md (Kimi) + shared CLAUDE.md (git) both exist
 - [x] **PR as journal**: thread summary goes in PR description (via `gh pr edit`), no files committed
 - [x] **Multi-model**: Claude executes code, cheap models (Kimi/GPT-4o-mini) orchestrate around it
-- [x] **Swappable providers**: three interfaces (Orchestrator, Artist, Coder), all configurable via config.json
+- [x] **Swappable providers**: three interfaces (ProductManager, Artist, Coder), all configurable via config.json
 - [x] **Kimi first, always**: Kimi starts every thread. Scans repo, asks questions, proposes plan. Claude never starts without approval
 - [x] **Approval gate**: user must explicitly approve before Claude runs. "yes"/"dale"/"go" triggers Phase 2
 - [x] **Questions never reach Claude**: Kimi answers questions directly (reads files, checks docs). Thread ends without Claude
@@ -898,9 +898,9 @@ produce better plans over time.
   - `Save(path, content string)` — write memory.md
   - `FormatProposal(ops []Op) string` — format ops as Slack message for user review
   - `ParseUserResponse(text string, ops []Op) []Op` — process user edits/approvals
-- **Orchestrator**: uses `models.Orchestrator` interface
+- **ProductManager**: uses `models.ProductManager` interface
   - Any provider that implements `Chat()` and `ChatJSON()`
-  - Requires orchestrator config in global config
+  - Requires productManager config in global config
 - **Daemon integration**: on PR merge event, launch goroutine:
   1. Call Kimi for memory analysis
   2. Post proposal in thread
@@ -1585,7 +1585,7 @@ No more `history/` folder. Two layers instead of three:
   - `IsMerged(prNumber int) (bool, error)`
   - `GetPRDiff(prNumber int) (string, error)`
   - `WatchPRs(tracker, onMerge)`
-- **Summary generation**: via `models.Orchestrator` interface (Kimi, GPT-4o-mini, etc.)
+- **Summary generation**: via `models.ProductManager` interface (Kimi, GPT-4o-mini, etc.)
 - **Thread fetching**: via Slack `conversations.replies` in `internal/slack/handler.go`
 - **Integration**: called in daemon after PR is detected in Claude's response
 
@@ -1598,7 +1598,7 @@ But the "extras" — everything that happens before, around, and after Claude �
 can be powered by cheaper, faster models. The principle:
 
 ```
-Orchestrator (Kimi, GPT-4o-mini, ...) = brain          (~$0.001/call)
+ProductManager (Kimi, GPT-4o-mini, ...) = brain          (~$0.001/call)
 Coder (Claude CLI)                     = hands          (~$0.10-1.00/call)
 Artist (gpt-image-1, DALL-E, ...)      = eyes           (~$0.01-0.04/image)
 Whisper                                = ears           (~$0.006/min)
@@ -1615,8 +1615,8 @@ are swappable via config without touching daemon code.
 | Interface | Default Provider | Role | Cost | Used For |
 |---|---|---|---|---|
 | **Coder** | Claude CLI (`claude -p`) | Code executor | $$$ | Write code, fix bugs, refactor, create PRs |
-| **Orchestrator** | Kimi (OpenAI-compat API) | Brain | ¢ | Triage, plan, memory, summarize, coordinate |
-| **Orchestrator** | GPT-4o-mini (alt) | Brain | ¢ | Same as Kimi, interchangeable |
+| **ProductManager** | Kimi (OpenAI-compat API) | Brain | ¢ | Triage, plan, memory, summarize, coordinate |
+| **ProductManager** | GPT-4o-mini (alt) | Brain | ¢ | Same as Kimi, interchangeable |
 | **Artist** | gpt-image-1 | Image creator | ¢¢ | Generate/edit images during Phase 1 |
 | *(direct)* | Whisper | Transcription | ¢ | Voice → text |
 
@@ -1911,12 +1911,12 @@ Memory: {memory.md contents}
 #### Implementation
 
 ```go
-// internal/orchestration/responder.go
+// internal/productmanager/responder.go
 
-// Respond handles a message in the orchestrator (Kimi) phase.
-// Uses the Orchestrator interface — works with any provider.
+// Respond handles a message in the product manager (Kimi) phase.
+// Uses the ProductManager interface — works with any provider.
 // Returns the response text and optionally a plan.
-func Respond(ctx context.Context, orch models.Orchestrator, repoDir string,
+func Respond(ctx context.Context, pm models.ProductManager, repoDir string,
     history []models.Message, newMessage string, memory string) (response string, plan *Plan, err error)
 
 type Plan struct {
@@ -2125,8 +2125,8 @@ branch = PR) is maintained.
 
 // internal/daemon/phase1_images.go
 
-// GenerateImage generates an image during the orchestrator phase.
-// The orchestrator (Kimi) provides the enriched prompt.
+// GenerateImage generates an image during the product manager phase.
+// The product manager (Kimi) provides the enriched prompt.
 func (d *Daemon) GenerateImage(thread *Thread, prompt string,
     reference []byte) (*models.ImageResult, error) {
 
@@ -2139,7 +2139,7 @@ func (d *Daemon) GenerateImage(thread *Thread, prompt string,
 }
 
 // PushAsset creates a branch, commits the image, and opens a PR.
-// Used when the orchestrator resolves the thread without the coder.
+// Used when the product manager resolves the thread without the coder.
 func (d *Daemon) PushAsset(thread *Thread, image *models.ImageResult,
     repoPath string) (prURL string, err error)
 ```
@@ -2555,9 +2555,9 @@ touching the daemon code.
 ```go
 // internal/models/interfaces.go
 
-// Orchestrator handles conversation, planning, memory, and triage.
+// ProductManager handles conversation, planning, memory, and triage.
 // Today: Kimi. Tomorrow: GPT-4o-mini, DeepSeek, Gemini, local LLM.
-type Orchestrator interface {
+type ProductManager interface {
     // Chat sends a message and returns the response text.
     Chat(ctx context.Context, system string, messages []Message) (string, error)
 
@@ -2599,7 +2599,7 @@ type Coder interface {
 #### Request/Result Types
 
 ```go
-// Orchestrator messages
+// ProductManager messages
 type Message struct {
     Role    string // "user", "assistant", "system"
     Content string
@@ -2643,7 +2643,7 @@ type CoderResult struct {
 
 #### Shared API Client Layer
 
-The key insight: if you use OpenAI for orchestrator (GPT-4o-mini), artist
+The key insight: if you use OpenAI for product manager (GPT-4o-mini), artist
 (gpt-image-1), and even coder (Codex/Responses API), they all talk to the
 same API with the same auth. Don't create three HTTP clients — create one.
 
@@ -2703,34 +2703,34 @@ implements the role interface and adds role-specific logic (prompt
 formatting, response parsing) but **zero HTTP/auth code**.
 
 ```go
-// internal/provider/openai/orchestrator.go
+// internal/provider/openai/product_manager.go
 //
-// Adapts the shared Client to the Orchestrator interface.
+// Adapts the shared Client to the ProductManager interface.
 // ~30 lines of code — just translates between types.
 
-type OrchestratorAdapter struct {
+type ProductManagerAdapter struct {
     client *Client   // shared
     model  string    // "gpt-4o-mini", "moonshot-v1-8k", etc.
 }
 
-func NewOrchestrator(client *Client, model string) models.Orchestrator {
-    return &OrchestratorAdapter{client: client, model: model}
+func NewProductManager(client *Client, model string) models.ProductManager {
+    return &ProductManagerAdapter{client: client, model: model}
 }
 
-func (a *OrchestratorAdapter) Chat(ctx context.Context, system string,
+func (a *ProductManagerAdapter) Chat(ctx context.Context, system string,
     messages []models.Message) (string, error) {
     // Convert models.Message → ChatRequest (with a.model)
     // Call a.client.ChatCompletion()
     // Return response text
 }
 
-func (a *OrchestratorAdapter) ChatJSON(ctx context.Context, system string,
+func (a *ProductManagerAdapter) ChatJSON(ctx context.Context, system string,
     messages []models.Message, out interface{}) error {
     // Same, but parse JSON response
     return a.client.ChatCompletionJSON(ctx, req, out)
 }
 
-func (a *OrchestratorAdapter) Name() string { return "openai:" + a.model }
+func (a *ProductManagerAdapter) Name() string { return "openai:" + a.model }
 ```
 
 ```go
@@ -2802,12 +2802,12 @@ When you use OpenAI for everything, the wiring looks like this:
 // internal/daemon/daemon.go — initialization
 
 func NewDaemon(cfg Config) *Daemon {
-    // If orchestrator and artist both use OpenAI,
+    // If productManager and artist both use OpenAI,
     // they SHARE the same underlying client.
     openaiClient := openai.NewOpenAI(cfg.OpenAI.APIKey)
 
     return &Daemon{
-        orchestrator: openai.NewOrchestrator(openaiClient, "gpt-4o-mini"),
+        productManager: openai.NewProductManager(openaiClient, "gpt-4o-mini"),
         artist:       openai.NewArtist(openaiClient, "gpt-image-1"),
         coder:        claude.NewCLICoder(cfg.Coder),  // different provider
         // ...
@@ -2815,14 +2815,14 @@ func NewDaemon(cfg Config) *Daemon {
 }
 ```
 
-If you use Kimi as orchestrator + OpenAI for images:
+If you use Kimi as product manager + OpenAI for images:
 
 ```go
     kimiClient   := openai.NewKimi(cfg.Kimi.APIKey)
     openaiClient := openai.NewOpenAI(cfg.OpenAI.APIKey)
 
     return &Daemon{
-        orchestrator: openai.NewOrchestrator(kimiClient, "moonshot-v1-8k"),
+        productManager: openai.NewProductManager(kimiClient, "moonshot-v1-8k"),
         artist:       openai.NewArtist(openaiClient, "gpt-image-1"),
         coder:        claude.NewCLICoder(cfg.Coder),
     }
@@ -2834,7 +2834,7 @@ If you use OpenAI for all three:
     client := openai.NewOpenAI(cfg.OpenAI.APIKey)  // ONE client
 
     return &Daemon{
-        orchestrator: openai.NewOrchestrator(client, "gpt-4o-mini"),
+        productManager: openai.NewProductManager(client, "gpt-4o-mini"),
         artist:       openai.NewArtist(client, "gpt-image-1"),
         coder:        openai.NewCoder(client, "codex-mini"),  // future
     }
@@ -2851,7 +2851,7 @@ with its own client:
 internal/provider/
   openai/          ← shared client + 3 adapters
     client.go      ← HTTP, auth, rate limiting (THE shared code)
-    orchestrator.go ← thin adapter → models.Orchestrator
+    product_manager.go ← thin adapter → models.ProductManager
     artist.go      ← thin adapter → models.Artist
     coder.go       ← thin adapter → models.Coder (future)
   claude/          ← exec-based, no HTTP client
@@ -2861,7 +2861,7 @@ internal/provider/
     artist.go      ← adapter → models.Artist
   ollama/          ← local, own client
     client.go      ← local HTTP client
-    orchestrator.go ← adapter → models.Orchestrator
+    product_manager.go ← adapter → models.ProductManager
 ```
 
 Each provider package owns its client. The `openai` package is the most
@@ -2875,7 +2875,7 @@ are OpenAI-compatible and share the same client code.
 // It only talks to interfaces.
 
 func (d *Daemon) runKimi(thread *Thread, msg Message) {
-    resp, _ := d.orchestrator.Chat(ctx, systemPrompt, thread.KimiHistory)
+    resp, _ := d.productManager.Chat(ctx, systemPrompt, thread.KimiHistory)
     // ...
 }
 
@@ -2895,7 +2895,7 @@ func (d *Daemon) startClaude(thread *Thread) {
 ```json
 // ~/.codebutler/config.json (global)
 {
-  "orchestrator": {
+  "productManager": {
     "provider": "kimi",
     "apiKey": "...",
     "model": "moonshot-v1-8k",
@@ -2921,7 +2921,7 @@ this and creates a single shared client automatically:
 ```json
 // All OpenAI — one API key, one shared client
 {
-  "orchestrator": { "provider": "openai", "model": "gpt-4o-mini", "apiKey": "sk-..." },
+  "productManager": { "provider": "openai", "model": "gpt-4o-mini", "apiKey": "sk-..." },
   "artist":       { "provider": "openai", "model": "gpt-image-1", "apiKey": "sk-..." },
   "coder":        { "provider": "openai", "model": "codex-mini",  "apiKey": "sk-..." }
 }
@@ -2929,7 +2929,7 @@ this and creates a single shared client automatically:
 
 ```go
 // Provider factory detects shared keys and reuses clients
-func BuildProviders(cfg Config) (models.Orchestrator, models.Artist, models.Coder) {
+func BuildProviders(cfg Config) (models.ProductManager, models.Artist, models.Coder) {
     clients := map[string]*openai.Client{} // key = baseURL+apiKey
 
     getOrCreate := func(baseURL, apiKey string) *openai.Client {
@@ -2945,7 +2945,7 @@ func BuildProviders(cfg Config) (models.Orchestrator, models.Artist, models.Code
 }
 ```
 
-The orchestrator is **required** in v2. Kimi-first is the core interaction
+The product manager is **required** in v2. Kimi-first is the core interaction
 model, not an optional optimization. Without it, messages would go directly
 to Claude — which defeats the architecture.
 
@@ -2955,7 +2955,7 @@ and Kimi tells the user: "Image generation is not configured."
 The coder defaults to Claude CLI. It's the only battle-tested option today,
 but the interface exists so it can be swapped if needed.
 
-If the orchestrator API is down, the circuit breaker (section 25) kicks in
+If the product manager API is down, the circuit breaker (section 25) kicks in
 and routes directly to Claude as a temporary fallback.
 
 ### 24.10 What This Means for CodeButler's Identity
@@ -2970,7 +2970,7 @@ The orchestration layer is invisible to the user. They still talk to
 "the bot" in Slack. They don't know (or care) that Kimi triaged their
 message, enriched the prompt, and extracted memory afterward.
 
-The coder is the only model that touches code. The orchestrator and
+The coder is the only model that touches code. The product manager and
 artist never write code, never run tools, never modify files. They
 only read, classify, summarize, generate images, and plan.
 
@@ -2989,7 +2989,7 @@ path that doesn't lose user messages.
 | Slack disconnect | Socket Mode auto-reconnect + state callback | Auto-reconnect (built into slack-go SDK) | Brief pause, messages queued by Slack |
 | Claude process hangs | `context.WithTimeout` (from config `timeout` min) | Kill process, reply in thread: "timed out, try again" | One thread affected |
 | Claude process crashes | Non-zero exit code from `exec.Command` | Reply in thread with error, session preserved for retry | User can say "try again" |
-| Kimi/orchestrator unreachable | HTTP timeout (10s) | Skip orchestration, send directly to Claude (fallback to v1 behavior) | Slightly more expensive, but works |
+| Kimi/product manager unreachable | HTTP timeout (10s) | Skip product manager, send directly to Claude (fallback to v1 behavior) | Slightly more expensive, but works |
 | SQLite locked | Busy timeout on connection (`_busy_timeout=5000`) | Retry with backoff, max 3 attempts | Brief delay |
 | Out of disk | Write failure on store.db | Log error, continue processing in-memory | New messages not persisted until resolved |
 | Machine reboot | systemd/launchd restarts daemon | Daemon starts, reconnects Slack, pending messages reprocessed | Brief downtime |
@@ -3035,11 +3035,11 @@ func (d *Daemon) Run() error {
 }
 ```
 
-### Circuit Breaker for Orchestrator
+### Circuit Breaker for ProductManager
 
 If Kimi fails 3 times in a row, disable orchestration for 5 minutes
 and route everything directly to Claude. This prevents cascading
-slowdowns when the orchestrator is down:
+slowdowns when the product manager is down:
 
 ```go
 type CircuitBreaker struct {
@@ -3055,7 +3055,7 @@ func (cb *CircuitBreaker) Allow() bool {
         cb.failures = 0 // reset
         return true
     }
-    return false // skip orchestrator
+    return false // skip product manager
 }
 ```
 
@@ -3357,7 +3357,7 @@ the 1:1:1 rule (that PR is already merged). Instead, they start a
 | `internal/github/github.go` | PR detection, merge polling | Regex tests + mock `gh` output |
 | `internal/ratelimit/limiter.go` | Rate limiting logic | Time-based tests with controlled clock |
 | `internal/provider/openai/*` | All OpenAI adapters | HTTP test server + shared mock client |
-| `internal/models/interfaces.go` | Role interfaces | Mock implementations (MockOrchestrator, MockArtist, MockCoder) |
+| `internal/models/interfaces.go` | Role interfaces | Mock implementations (MockProductManager, MockArtist, MockCoder) |
 
 ### Integration Tests (require tokens)
 
@@ -3400,12 +3400,12 @@ Two levels of testing:
 ```go
 // internal/models/mock.go (build tag: testing)
 
-// MockOrchestrator implements models.Orchestrator
-type MockOrchestrator struct {
+// MockProductManager implements models.ProductManager
+type MockProductManager struct {
     Responses map[string]string
 }
 
-func (m *MockOrchestrator) Chat(ctx context.Context, system string, msgs []Message) (string, error) {
+func (m *MockProductManager) Chat(ctx context.Context, system string, msgs []Message) (string, error) {
     for key, resp := range m.Responses {
         if strings.Contains(msgs[len(msgs)-1].Content, key) {
             return resp, nil
@@ -3413,7 +3413,7 @@ func (m *MockOrchestrator) Chat(ctx context.Context, system string, msgs []Messa
     }
     return `{"route": "code_task"}`, nil
 }
-func (m *MockOrchestrator) Name() string { return "mock-orchestrator" }
+func (m *MockProductManager) Name() string { return "mock-product-manager" }
 
 // MockArtist implements models.Artist
 type MockArtist struct{ ImageData []byte }
@@ -3453,10 +3453,10 @@ func TestSharedClient(t *testing.T) {
     client := openai.NewClient(server.URL, "test-key")
 
     // Same client, test all roles:
-    orch := openai.NewOrchestrator(client, "gpt-4o-mini")
+    pm := openai.NewProductManager(client, "gpt-4o-mini")
     art  := openai.NewArtist(client, "gpt-image-1")
 
-    resp, _ := orch.Chat(ctx, "system", []Message{{Role: "user", Content: "hello"}})
+    resp, _ := pm.Chat(ctx, "system", []Message{{Role: "user", Content: "hello"}})
     assert.Contains(t, resp, "expected")
 
     img, _ := art.Generate(ctx, ImageGenRequest{Prompt: "a cat"})
