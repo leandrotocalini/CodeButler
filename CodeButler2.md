@@ -66,6 +66,13 @@ Slack <-> slack-go SDK <-> Go daemon <-> spawns claude -p <-> repo context
   - Events API
   - Web API (chat.postMessage, files.upload, etc.)
 
+### System Requirements
+- `gh` (GitHub CLI) — **required**, must be installed and authenticated
+  - Used by Claude to create PRs, push branches, manage issues
+  - Used by the daemon to check PR status, detect merges, fetch PR diffs
+  - Auth: `gh auth login` (one-time setup, stored in `~/.config/gh/`)
+  - The setup wizard (`--setup`) verifies `gh auth status` and prompts if not configured
+
 ---
 
 ## 5. Slack App Setup (prerequisites)
@@ -572,6 +579,8 @@ This is the **central architectural decision** of CodeButler2.
 - [x] **Thread = Branch = PR**: each thread creates exactly one branch, one PR. Non-negotiable 1:1:1 mapping
 - [x] **PR merged = thread closed**: merge is the only way a thread ends. No stale timeouts, no manual close
 - [x] **Cross-thread references**: link old threads/PRs in new thread for read-only context. Rule stays: 1 thread = 1 branch = 1 PR
+- [x] **PR ↔ Thread link**: PR description includes Slack thread URL, thread shows PR URL. Bidirectional
+- [x] **`gh` CLI required**: all GitHub operations (PRs, merge detection, diffs) via `gh`. No API tokens needed
 - [x] **Merge coordination**: Kimi suggests merge order + notifies threads to rebase after PR merge
 
 ---
@@ -907,7 +916,18 @@ RESTRICTIONS — READ FIRST:
   DROP TABLE, etc.)
 - If a task requires any of the above, explain what is needed and STOP
 
-You are working in: {repo_path}
+ALLOWED TOOLS:
+- `gh` (GitHub CLI) — use for PRs, issues, checks. Already authenticated.
+- `git` — commit, push, branch operations on YOUR branch only.
+- Build/test tools native to this project (go test, npm test, xcodebuild, etc.)
+
+WHEN CREATING A PR:
+- Always use `gh pr create`
+- Include this thread link in the PR description: {slack_thread_url}
+- Format: ## Slack Thread\n{slack_thread_url}
+
+You are working in: {worktree_path}
+Your branch: {branch_name}
 ```
 
 ### Why
@@ -1205,7 +1225,59 @@ the cookie `MaxAge` was set to 0 (session cookie) instead of 30 days...
 - Kept session cookies (MaxAge=0) for non-remember-me logins
 ```
 
-### Detection: When to Generate
+### PR Description — Thread Link
+
+When Claude creates a PR via `gh pr create`, the sandbox prompt instructs
+it to include the Slack thread URL in the description. The daemon injects
+`{slack_thread_url}` into the prompt, so Claude has it available.
+
+The result: every PR links back to its Slack thread.
+
+```markdown
+## Summary
+Fixed timezone comparison in session validation and remember-me cookie.
+
+## Slack Thread
+https://myworkspace.slack.com/archives/C0123ABCDEF/p1732456789123456
+```
+
+From GitHub, reviewers click the thread link to see the full conversation.
+From Slack, users see the PR link in Claude's message. **Bidirectional.**
+
+### GitHub Operations via `gh`
+
+The daemon uses `gh` directly for all GitHub operations:
+
+```go
+// internal/github/github.go
+
+// IsMerged checks if a PR has been merged
+func IsMerged(prNumber int) (bool, error) {
+    out, err := exec.Command("gh", "pr", "view", strconv.Itoa(prNumber),
+        "--json", "state,mergedAt").Output()
+    // parse JSON: state == "MERGED"
+}
+
+// GetPRDiff fetches the diff for cross-thread references
+func GetPRDiff(prNumber int) (string, error) {
+    return exec.Command("gh", "pr", "diff", strconv.Itoa(prNumber)).Output()
+}
+
+// WatchPRs polls open PRs for merge status (runs every 60s)
+func WatchPRs(tracker *conflicts.Tracker, onMerge func(threadTS string, pr int)) {
+    for _, scope := range tracker.GetPRScopes() {
+        merged, _ := IsMerged(scope.PRNumber)
+        if merged {
+            onMerge(scope.ThreadTS, scope.PRNumber)
+        }
+    }
+}
+```
+
+No GitHub API tokens needed — `gh` handles authentication via its own
+config (`~/.config/gh/`). One less secret to manage.
+
+### Detection: When to Generate History
 
 The daemon watches Claude's response for PR creation signals:
 
