@@ -483,6 +483,14 @@ type Thread struct {
     Plan        string        // Kimi's approved plan (passed to Claude)
     Branch      string        // set when Phase transitions to claude
     SessionID   string        // Claude session ID (for --resume)
+    Images      []GeneratedImage // images created by Kimi during Phase 1
+}
+
+type GeneratedImage struct {
+    LocalPath   string // path on disk (e.g., .codebutler/images/favicon.png)
+    SlackFileID string // Slack file ID after upload
+    Prompt      string // generation prompt used
+    RepoPath    string // target path in repo (set if user wants to push)
 }
 ```
 
@@ -494,13 +502,16 @@ func (d *Daemon) onMessage(msg Message) {
 
     switch thread.Phase {
     case PhaseKimi:
-        // Check if user is approving Kimi's plan
+        // Check if user is approving Kimi's plan (code task → Claude)
         if isApproval(msg.Text) && thread.Plan != "" {
             thread.Phase = PhaseClaude
             d.startClaude(thread)
             return
         }
-        // Otherwise, Kimi continues the conversation
+        // Otherwise, Kimi continues the conversation.
+        // This includes: asking questions, scanning code, generating
+        // images, iterating on images, pushing assets, or ending
+        // the thread (all handled within Kimi's phase).
         d.runKimi(thread, msg)
 
     case PhaseClaude:
@@ -715,10 +726,16 @@ Injected as context into the Claude and Kimi prompts on each thread.
 
 ### Trigger
 
-When a PR is merged (detected via GitHub webhook or polling), the daemon:
+Memory extraction triggers when a thread ends, which can happen two ways:
+
+1. **PR merged** — the main path for code tasks and pushed assets
+2. **User says "done"** — for threads that don't produce a PR (questions,
+   images shown in Slack only)
+
+When triggered, the daemon:
 
 1. Reads current `memory.md`
-2. Reads the full thread conversation (Kimi Phase 1 + Claude Phase 2)
+2. Reads the full thread conversation (whatever phases occurred)
 3. Calls Kimi to analyze and propose memory updates
 4. **Posts the proposed changes in the Slack thread** for user review
 5. User approves, edits, or adds more learnings
@@ -764,6 +781,17 @@ Kimi proposes in thread:
   Reply *yes* to save all, or tell me what to change.
 ```
 
+**For image-only threads** (no Claude, no PR):
+```
+[Bot] 📝 Thread done! Here's what I'd like to remember:
+
+  1. ➕ Logo style: minimalist, blue #2563EB, no text
+  2. ➕ User prefers "lost astronaut" motif over robots for error pages
+  3. 📎 Planning: when generating images for this project, use blue #2563EB as primary color
+
+  Reply *yes* to save all, or tell me what to change.
+```
+
 The user can:
 - **"yes"** → save all proposed changes
 - **"remove 3"** → save 1 and 2, skip 3
@@ -775,19 +803,22 @@ The user can:
 
 ```
 You analyze completed conversations to extract learnings for memory.
-You receive the full thread: Kimi's planning phase, user interactions,
+You receive the full thread, which may include any combination of:
+Kimi's planning phase, image generation, user interactions,
 and Claude's implementation phase.
 
 Your job has TWO parts:
 
 PART 1 — General learnings:
 Extract useful decisions, conventions, and gotchas worth remembering.
+For image threads: style preferences, color choices, motifs, formats.
 
 PART 2 — Kimi self-improvement:
-Look at what Claude asked during implementation. If Claude asked
-something that could have been answered during the planning phase
-(by reading the codebase), propose a learning so Kimi handles it
-next time.
+- If Claude ran: look at what Claude asked. If it could have been
+  answered during planning, propose a planning note.
+- If images were generated: note style preferences, prompt adjustments
+  the user made, preferred formats/sizes. Next time Kimi generates
+  images for this project, it should use these preferences by default.
 
 Respond with a JSON array of operations:
 - {"op": "append", "line": "- ...", "category": "project"}
@@ -835,11 +866,16 @@ Thread conversation:
 - Registration at POST /register, uses JWT (same as login)
 - Tests use testify, not stdlib testing
 - Deploy: make build → docker push → kubectl apply
+- Visual style: blue #2563EB primary, flat design, rounded corners
+- Error pages use "lost astronaut" motif (not robots)
+- Icons: 24px, 2px stroke, outlined style (see static/icons/)
 
 # Planning Notes
 - When task touches auth, pre-read auth/login.go and auth/session.go
 - When task involves models, check existing models/ for GORM conventions
 - Always mention the test framework (testify) in plans so Claude doesn't ask
+- Image generation: default to blue #2563EB, flat design, transparent background
+- When generating icons, reference existing set in static/icons/ for consistency
 ```
 
 Two sections: **Project Knowledge** (what the codebase does) and
@@ -869,7 +905,7 @@ produce better plans over time.
 ### The Virtuous Cycle
 
 ```
-Thread N:
+Thread N (code task):
   Kimi plans → Claude implements → Claude asks "JWT or cookies?"
   → User: "JWT" → PR merged
   → Kimi proposes: "always JWT" + "pre-check auth pattern"
@@ -880,15 +916,30 @@ Thread N+1 (touches auth):
   Kimi reads memory → knows JWT pattern → includes it in plan
   → Claude never asks → faster, cheaper, better
 
-Thread N+2:
-  Kimi catches something else Claude would have asked
+Thread N+2 (image task):
+  User: "create an icon for settings"
+  → Kimi shows prompt with blue #2563EB (from memory)
+  → User: "perfect, go"
+  → Kimi generates, user says "push it"
+  → PR merged → Kimi learns: "settings icon is a gear"
+
+Thread N+3 (code + image):
+  User: "add a loading spinner to the dashboard"
+  → Kimi generates spinner icon (blue, flat, matching existing style —
+    all from memory) → shows prompt, user approves
+  → Kimi plans: "save spinner + update dashboard template"
+  → Claude implements → no style questions needed
+
+Thread N+4:
+  Kimi catches something else Claude or itself would have asked
   → Another planning note added
   → System keeps improving
 ```
 
-Over time, Kimi's plans get more complete because memory accumulates
-the patterns and decisions that matter. The user drives this process —
-nothing gets remembered without their approval.
+Over time, Kimi's plans get more complete and its image prompts get
+more accurate because memory accumulates the patterns and decisions
+that matter. The user drives this process — nothing gets remembered
+without their approval.
 
 ---
 
@@ -930,6 +981,7 @@ of plain, structured logs with good information.
 | `DBG` | Debug: only if verbose mode is enabled |
 | `MSG` | Incoming user message |
 | `KMI` | Kimi activity: responding, planning |
+| `IMG` | Image generation: prompt shown, generating, uploaded |
 | `CLD` | Claude activity: start, done, resume |
 | `RSP` | Response sent to channel (from Kimi or Claude) |
 | `MEM` | Memory operations: propose, approve, save |
@@ -1557,7 +1609,7 @@ effective by doing the cheap work before and after.**
 | **Kimi** (OpenAI-compat API) | Orchestrator | ¢ | Triage, enrich prompts, extract memory, summarize |
 | **GPT-4o-mini** | Orchestrator alt | ¢ | Same as Kimi, interchangeable |
 | **Whisper** | Transcription | ¢ | Voice → text |
-| **gpt-image-1** | Image generation | ¢¢ | /create-image |
+| **gpt-image-1** | Image generation | ¢¢ | Kimi generates/edits images during Phase 1 |
 
 ### 24.1 Pre-flight: Enrich Before Claude Runs
 
@@ -1634,8 +1686,9 @@ WITH Kimi first (v2):
 2. **Scans the codebase**: grep, read files, check git log (cheap operations)
 3. **Answers questions directly**: "what does X do?" → Kimi reads the file and explains (no Claude needed)
 4. **Proposes a plan for code tasks**: lists files to change, approach, estimated complexity
-5. **Detects conflicts**: checks if other threads touch the same files
-6. **Waits for approval**: user must say "yes" before Claude starts
+5. **Generates images**: if the task involves creating visual assets (icons, logos, mockups), Kimi generates them via OpenAI gpt-image-1 — then asks what to do next (see below)
+6. **Detects conflicts**: checks if other threads touch the same files
+7. **Waits for approval**: user must say "yes" before Claude starts
 
 #### Conversation Examples
 
@@ -1693,6 +1746,100 @@ User: "dale"
 → Claude executes the refined plan
 ```
 
+**Image generation — just show it (thread ends, no Claude):**
+```
+User: "create a logo for the app, minimalist, blue tones"
+Kimi: (reads README, checks existing assets/ folder, notes the app name)
+Kimi: "I'd send this prompt to the image generator:
+  'Minimalist logo for CodeButler, a developer tool. Clean lines,
+   blue tones (#2563EB), no text, abstract butler/code motif,
+   SVG-friendly flat design'
+  Want me to adjust anything?"
+User: "go"
+Kimi: generates via gpt-image-1
+Kimi: [uploads image] "Here it is. What do you want to do?
+   ✅ Done  ·  🔄 Adjust  ·  📁 Push to repo  ·  🔧 Use with Claude"
+User: "looks good"
+→ Phase 3 (memory). Kimi learns: "logo style: minimalist, blue #2563EB"
+```
+
+**Image generation — iterate then push to repo:**
+```
+User: "need a favicon for the web dashboard"
+Kimi: (reads internal/daemon/web.go, sees HTML template, checks static/)
+Kimi: "I'd generate with this prompt:
+  'Favicon 32x32px, flat design, blue (#2563EB) on transparent
+   background, matches existing icon style in static/icons/'
+  Adjust?"
+User: "looks good"
+Kimi: generates via gpt-image-1
+Kimi: [uploads image] "What do you think?"
+User: "make it rounder"
+Kimi: "Updated prompt: '...rounded corners, circular shape...' Generating."
+Kimi: [uploads new image] "Better?"
+User: "yes, push it"
+Kimi: creates branch, adds favicon to static/, commits, opens PR
+→ Phase 3 (memory) on PR merge. Kimi learns: "favicon is round, blue"
+```
+
+**Image generation — then hand off to Claude for implementation:**
+```
+User: "create an error illustration for the 404 page"
+Kimi: (reads routes, finds 404 handler, checks templates)
+Kimi: "I'd generate: 'Friendly 404 error illustration, cartoon style,
+  confused robot, matches the blue/white theme in templates/base.html'
+  Want to adjust the prompt?"
+User: "make it a lost astronaut instead of a robot"
+Kimi: "Updated: '...lost astronaut floating in space, friendly...'"
+User: "dale"
+Kimi: generates via gpt-image-1
+Kimi: [uploads image] "Here it is. What next?"
+User: "use it in the 404 page, replace the current text-only error"
+Kimi: "Plan:
+  1. Save illustration to static/images/404.png
+  2. Update templates/error.html to show the image
+  3. Update the CSS for centered layout
+  Say *yes* to start Claude."
+User: "yes"
+→ Phase 2: Claude gets the plan + the generated image in worktree
+```
+
+**Image with user reference — Kimi asks for inspiration:**
+```
+User: "need icons for the settings page"
+Kimi: (checks static/icons/, sees existing icon style)
+Kimi: "I see existing icons in static/icons/ use a flat, 24px style.
+  Do you have a reference image for the style you want? Or should I
+  match the existing set?"
+User: [sends screenshot of Material Design icons]
+Kimi: "Got it. I'd generate: 'Settings gear icon, Material Design
+  style, 24x24px, matching the attached reference, outlined, 2px
+  stroke, #333 on transparent'
+  Adjust?"
+User: "perfect"
+Kimi: generates using edit API with reference
+Kimi: [uploads result] "What next?"
+```
+
+**Image editing — user sends a photo directly:**
+```
+User: [attaches screenshot] "remove the watermark and use this as the hero image"
+Kimi: "I'd edit with this prompt: 'Remove watermark, clean up
+  artifacts, maintain original colors and composition'
+  Adjust?"
+User: "also make it wider, 1920x1080"
+Kimi: "Updated: '...remove watermark, extend to 1920x1080,
+  fill edges naturally...' Generating."
+Kimi: [uploads edited image] "What next?"
+User: "push it and have Claude add it to the landing page"
+Kimi: "Plan:
+  1. Save to static/images/hero.png (branch + PR)
+  2. Claude updates templates/landing.html to use the new hero
+  Say *yes*."
+User: "dale"
+→ Kimi pushes image first, then Claude implements the template change
+```
+
 #### Kimi's System Prompt
 
 ```
@@ -1704,6 +1851,9 @@ You have access to these tools:
 - read files
 - check git log
 - check gh pr/issue status
+- generate images (OpenAI gpt-image-1: generate or edit)
+- upload images to Slack
+- create branch + commit + open PR (for pushing assets)
 
 Your job is to fully define the task before handing it to Claude.
 Claude should NEVER need to ask "what do you mean?" or "what should
@@ -1712,18 +1862,33 @@ this do?". By the time Claude starts, the task must be unambiguous.
 Workflow:
 1. Understand what the user wants — ask questions until it's clear
 2. If it's a question → answer it directly (read files, check docs)
-3. If it's a code task → scan the codebase, then propose a plan:
+3. If it involves creating images/visual assets:
+   a. Scan the codebase for context (existing assets, styles, where
+      images are used, project name, branding)
+   b. Generate/edit the image with a context-aware prompt
+   c. Show the result in Slack
+   d. Ask the user what to do next:
+      - Done → thread ends (Phase 3: memory)
+      - Iterate → adjust and re-generate
+      - Push to repo → create branch, commit image, open PR
+      - Continue with Claude → build a plan that uses the image
+   e. The user drives — you don't assume which path
+4. If it's a code task → scan the codebase, then propose a plan:
    - Which files will be created/modified
    - What specifically changes in each file
    - What patterns to follow (reference existing code)
    - What edge cases to handle
    - What tests to add
-4. If the request is vague, ask follow-up questions. Be specific:
+5. If the request is vague, ask follow-up questions. Be specific:
    BAD:  "Can you give more details?"
    GOOD: "I see auth/login.go returns a JWT. Should registration
           also return a JWT, or redirect to /login?"
-5. Present the plan and wait for approval
-6. If the user adjusts, update the plan and re-present
+6. Present the plan and wait for approval
+7. If the user adjusts, update the plan and re-present
+
+Image generation can happen at any point during Phase 1. You might
+generate an image as part of planning (e.g., "here's the icon, now
+here's the plan for adding it to the app") or as the entire task.
 
 Your plan must be detailed enough that an engineer (Claude) can
 implement it without asking requirements questions. Implementation
@@ -1837,6 +2002,149 @@ INTERACTION RULES:
 
 Claude gets a **well-defined task** with a clear plan and relevant code.
 The *what* is settled. Claude focuses on the *how*.
+
+If images were generated during Phase 1, they're included in the prompt:
+
+```
+GENERATED ASSETS (from planning phase):
+---
+Image: static/images/404.png (already in worktree)
+  Prompt used: "minimalist 404 error illustration, blue tones"
+  User approved this design.
+---
+```
+
+### 24.3b Image Generation in Phase 1
+
+Image generation is a **Kimi capability**, not a separate phase. It happens
+within Phase 1 whenever the conversation involves visual assets. Kimi uses
+the OpenAI gpt-image-1 API directly — same API the v1 `/create-image` used,
+but now orchestrated by Kimi with project context.
+
+#### Why Kimi Handles Images
+
+- Kimi already has the repo context (project name, existing assets, styles)
+- Image generation is cheap (~$0.01-0.04 per image)
+- No need for Claude — generating images doesn't require code execution
+- Kimi can iterate with the user before deciding what to do with the result
+
+#### How It Works
+
+```
+User message mentions images/visuals/icons/logos/etc.
+    ↓
+Kimi: scan repo for context
+  - check existing assets (static/, images/, public/)
+  - read any design tokens / CSS variables
+  - note project name, branding, existing style
+    ↓
+Kimi: build context-aware prompt, SHOW IT to the user
+  "I'd send this to the image generator:
+   'Minimalist 32x32 favicon, flat design, blue (#2563EB) on
+    transparent background, matching the existing icon set in
+    static/icons/ which uses rounded corners and 2px stroke'
+   Want me to adjust anything before generating?"
+    ↓
+User: "looks good" / "make it green instead" / adjusts prompt
+    ↓
+gpt-image-1: generate/edit with approved prompt
+    ↓
+Kimi: upload to Slack thread + ask user what to do next
+    ↓
+User chooses:
+  ├─ "looks good"        → thread done → Phase 3 (memory)
+  ├─ "make it rounder"   → Kimi adjusts prompt, shows it, re-generates
+  ├─ "push it"           → Kimi creates branch + PR with asset
+  ├─ "use it in the app" → Kimi builds plan → user approves → Phase 2
+  └─ (sends a photo)     → Kimi uses it as input for edit/inspiration
+```
+
+**The prompt preview is important.** Users learn how prompt engineering
+works by seeing Kimi's enriched prompt. They can adjust it, and those
+adjustments become memory ("user prefers green tones over blue").
+
+#### Image Input: Reference Images
+
+Kimi handles three cases for input images:
+
+1. **Kimi asks** — when the task would benefit from a reference, Kimi
+   proactively asks: "Do you have a reference image?"
+2. **User sends unprompted** — user attaches a photo with their message.
+   Kimi uses it as input for the gpt-image-1 edit API.
+3. **No reference** — Kimi generates purely from the enriched text prompt.
+
+In all cases, Kimi shows the prompt before generating.
+
+#### Thread Outcomes After Image Generation
+
+The key insight: image generation can **resolve the thread entirely**
+or be a **stepping stone to Claude**. Kimi asks, the user decides.
+
+| User says | What happens | Phase 2? | PR? |
+|---|---|---|---|
+| "looks good" / "done" | Thread ends | No | No |
+| "make it X" / "try again" | Re-generate, loop | No (yet) | No |
+| "push it to the repo" | Kimi: branch + commit + PR | No | Yes |
+| "push it and implement" | Kimi: push asset, then plan for Claude | Yes | Yes |
+| "use it in the app" | Kimi: plan includes the image | Yes | Yes |
+| [sends new image] | Kimi: use as reference, re-generate | No (yet) | No |
+
+#### Kimi Pushing Assets (Without Claude)
+
+When the user says "push it", Kimi handles it directly:
+
+```
+1. Create branch: git checkout -b asset/<slug>
+2. Copy image to target path (Kimi asks or infers from repo structure)
+3. git add + commit
+4. git push + gh pr create
+5. Post PR link in thread
+→ On merge → Phase 3 (memory)
+```
+
+This is lightweight — no worktree needed, no Claude, just a simple
+git operation. The PR exists for review and the 1:1:1 rule (thread =
+branch = PR) is maintained.
+
+#### Implementation
+
+```go
+// internal/imagegen/generate.go (already exists from v1, reused)
+
+type ImageRequest struct {
+    Prompt      string // enriched by Kimi with project context
+    InputImage  []byte // optional: user-provided reference image
+    Size        string // "1024x1024", "512x512", etc.
+    EditMode    bool   // true = edit existing image, false = generate new
+}
+
+type ImageResult struct {
+    Data      []byte // PNG image data
+    LocalPath string // saved to .codebutler/images/<hash>.png
+}
+
+// internal/daemon/kimi_images.go (new)
+
+// GenerateImage generates an image during Kimi's phase.
+// Kimi provides the enriched prompt (with project context).
+func (d *Daemon) GenerateImage(thread *Thread, prompt string,
+    reference []byte) (*ImageResult, error)
+
+// PushAsset creates a branch, commits the image, and opens a PR.
+// Used when Kimi resolves the thread without Claude.
+func (d *Daemon) PushAsset(thread *Thread, image *ImageResult,
+    repoPath string) (prURL string, err error)
+```
+
+#### Cost
+
+| Operation | Cost |
+|---|---|
+| Image generation (gpt-image-1) | ~$0.01-0.04 |
+| Image edit (gpt-image-1) | ~$0.01-0.04 |
+| Kimi orchestration per message | ~$0.001 |
+| Full image thread (3 iterations) | ~$0.10-0.15 |
+| Image thread + Claude implementation | ~$0.40-2.10 |
 
 #### What Claude Can and Cannot Ask
 
@@ -2121,7 +2429,13 @@ Thread 1732456789.123456: "fix login bug"
     Claude: 2 calls  ·  $0.84
     Total:            ·  $0.843
 
-Daily: Claude $12.40 · Kimi $0.15 · Whisper $0.02 · Total $12.57
+Thread 1732460000.654321: "create app favicon"
+    Kimi:   4 calls  ·  $0.004
+    Images: 2 gens   ·  $0.06
+    Claude: 0 calls  ·  $0.00
+    Total:            ·  $0.064
+
+Daily: Claude $12.40 · Kimi $0.15 · Images $0.18 · Whisper $0.02 · Total $12.75
 ```
 
 Exposed in the web dashboard (`/api/costs`) and optionally posted
@@ -2130,7 +2444,9 @@ to Slack weekly.
 ### 24.7 The Full Pipeline
 
 Every thread follows this pipeline. Kimi owns the conversation until
-the user approves. Claude only appears after approval.
+the user approves. Claude only appears after approval. Some threads
+never leave Phase 1 — Kimi can resolve questions, generate images,
+and even push assets to the repo without Claude.
 
 ```
 ┌──────────────────────────────────────────────────────┐
@@ -2139,8 +2455,8 @@ the user approves. Claude only appears after approval.
 └──────────────────────┬───────────────────────────────┘
                        ↓
     ╔══════════════════════════════════════╗
-    ║        PHASE 1: KIMI (cheap)        ║
-    ║     ~$0.001-0.005 per message       ║
+    ║        PHASE 1: KIMI (cheap)         ║
+    ║     ~$0.001-0.005 per message        ║
     ╠══════════════════════════════════════╣
     ║                                      ║
     ║  Kimi: scan repo, understand request ║
@@ -2149,16 +2465,30 @@ the user approves. Claude only appears after approval.
     ║      ↓                               ║     (loop until
     ║  Kimi: refine plan                   ║←── plan is right)
     ║      ↓                               ║
+    ║  (optional) generate/edit images     ║
+    ║      ↓                               ║
     ║  Kimi: "Here's the plan. Yes?"       ║
     ║                                      ║
-    ╚══════════════════╤═══════════════════╝
-                       ↓
-              ┌────────────────┐
-              │  User: "yes"   │
-              └────────┬───────┘
-                       ↓
-         ┌─── create worktree + branch
+    ╚════╤═════════════════╤═══════════════╝
+         │                 │
+         │              ┌──┴──────────────────────────┐
+         │              │  Thread resolved by Kimi:    │
+         │              │  question answered, or       │
+         │              │  images delivered, or        │
+         │              │  assets pushed via PR         │
+         │              └──┬──────────────────────────┘
+         │                 ↓
+         │        ┌────────────────┐
+         │        │  PR merged or  │
+         │        │  user: "done"  │───→ Phase 3 (memory)
+         │        └────────────────┘
          ↓
+┌────────────────┐
+│  User: "yes"   │  (approves code task)
+└────────┬───────┘
+         ↓
+    ┌─── create worktree + branch
+    ↓
     ╔══════════════════════════════════════╗
     ║       PHASE 2: CLAUDE (expensive)    ║
     ║          ~$0.30-2.00 per run         ║
@@ -2166,6 +2496,8 @@ the user approves. Claude only appears after approval.
     ║                                      ║
     ║  Claude: execute approved plan       ║
     ║  Claude: edit files, run tests       ║
+    ║  (images from Phase 1 available      ║
+    ║   in worktree if generated)          ║
     ║  Claude: commit, push, open PR       ║
     ║      ↓                               ║
     ║  User replies → Claude --resume      ║
@@ -2200,8 +2532,11 @@ the user approves. Claude only appears after approval.
               └────────────────┘
 ```
 
-**Some threads never reach Phase 2.** If the user asks a question,
-Kimi answers it directly. Thread done. $0.002 total. Claude never ran.
+**Threads that skip Phase 2:**
+- **Question** → Kimi answers directly. Thread done. ~$0.002.
+- **Image only** → Kimi generates, user says "looks good". Thread done. ~$0.01.
+- **Image + push** → Kimi generates, pushes to repo via PR. Memory on merge. ~$0.01.
+- **Image + Claude** → Kimi generates, then transitions to Phase 2 with images ready.
 
 ### 24.8 Model Client Abstraction
 
