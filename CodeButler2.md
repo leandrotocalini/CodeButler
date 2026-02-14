@@ -236,10 +236,12 @@ CREATE TABLE sessions (
 | `internal/slack/channels.go` | List/create channels, get info |
 | `internal/slack/snippets.go` | Code block extraction, smart formatting, file upload |
 | `internal/github/github.go` | PR detection, merge polling, PR description updates via `gh` |
-| `internal/models/interfaces.go` | Orchestrator, Artist, Coder interfaces |
-| `internal/models/orchestrator_openai.go` | OpenAI-compatible Orchestrator (Kimi, GPT-4o-mini, DeepSeek) |
-| `internal/models/artist_openai.go` | OpenAI Artist (gpt-image-1, DALL-E 3) |
-| `internal/models/coder_claude.go` | Claude CLI Coder wrapper |
+| `internal/models/interfaces.go` | Orchestrator, Artist, Coder interfaces + shared types |
+| `internal/provider/openai/client.go` | Shared OpenAI HTTP client (auth, rate limiting, retries) |
+| `internal/provider/openai/orchestrator.go` | Thin adapter: shared client → Orchestrator interface |
+| `internal/provider/openai/artist.go` | Thin adapter: shared client → Artist interface |
+| `internal/provider/openai/coder.go` | Thin adapter: shared client → Coder interface (future) |
+| `internal/provider/claude/coder.go` | Claude CLI Coder (exec.Command, not HTTP) |
 | `internal/preflight/preflight.go` | Pre-Claude enrichment: grep repo, read files, build focused prompt |
 | `internal/router/router.go` | Message classifier: question vs code_task vs clarify |
 | `internal/conflicts/tracker.go` | Thread lifecycle tracking, file overlap detection, merge order |
@@ -2639,75 +2641,239 @@ type CoderResult struct {
 }
 ```
 
-#### Concrete Implementations
+#### Shared API Client Layer
+
+The key insight: if you use OpenAI for orchestrator (GPT-4o-mini), artist
+(gpt-image-1), and even coder (Codex/Responses API), they all talk to the
+same API with the same auth. Don't create three HTTP clients — create one.
 
 ```go
-// internal/models/orchestrator_openai.go
-// Handles any OpenAI-compatible API: Kimi, GPT-4o-mini, DeepSeek, etc.
-type OpenAIOrchestrator struct {
-    baseURL string
-    apiKey  string
-    model   string
+// internal/provider/openai/client.go
+//
+// Shared OpenAI API client. Handles HTTP, auth, rate limiting, retries.
+// Used by any role that talks to OpenAI-compatible APIs.
+
+type Client struct {
+    httpClient  *http.Client
+    baseURL     string  // "https://api.openai.com/v1" or compatible
+    apiKey      string
+    rateLimiter *rate.Limiter  // shared across all roles
 }
 
-func NewKimi(apiKey string) Orchestrator {
-    return &OpenAIOrchestrator{
-        baseURL: "https://api.moonshot.cn/v1",
-        apiKey: apiKey, model: "moonshot-v1-8k",
+// NewClient creates a shared client for an OpenAI-compatible provider.
+func NewClient(baseURL, apiKey string) *Client {
+    return &Client{
+        httpClient:  &http.Client{Timeout: 120 * time.Second},
+        baseURL:     baseURL,
+        apiKey:      apiKey,
+        rateLimiter: rate.NewLimiter(rate.Every(100*time.Millisecond), 10),
     }
 }
 
-func NewGPT4oMini(apiKey string) Orchestrator {
-    return &OpenAIOrchestrator{
-        baseURL: "https://api.openai.com/v1",
-        apiKey: apiKey, model: "gpt-4o-mini",
-    }
+// Low-level methods shared by all roles:
+
+func (c *Client) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResponse, error)
+func (c *Client) ChatCompletionJSON(ctx context.Context, req ChatRequest, out interface{}) error
+func (c *Client) ImageGenerate(ctx context.Context, req ImageAPIRequest) (*ImageAPIResponse, error)
+func (c *Client) ImageEdit(ctx context.Context, req ImageEditAPIRequest) (*ImageAPIResponse, error)
+
+// Convenience constructors for known providers:
+
+func NewOpenAI(apiKey string) *Client {
+    return NewClient("https://api.openai.com/v1", apiKey)
 }
 
-func NewDeepSeek(apiKey string) Orchestrator {
-    return &OpenAIOrchestrator{
-        baseURL: "https://api.deepseek.com/v1",
-        apiKey: apiKey, model: "deepseek-chat",
-    }
+func NewKimi(apiKey string) *Client {
+    return NewClient("https://api.moonshot.cn/v1", apiKey)
 }
 
-// internal/models/artist_openai.go
-type OpenAIArtist struct {
-    apiKey string
-    model  string // "gpt-image-1", "dall-e-3"
+func NewDeepSeek(apiKey string) *Client {
+    return NewClient("https://api.deepseek.com/v1", apiKey)
 }
 
-func NewOpenAIArtist(apiKey, model string) Artist {
-    return &OpenAIArtist{apiKey: apiKey, model: model}
+func NewOllama(baseURL string) *Client {
+    return NewClient(baseURL, "") // no API key for local
+}
+```
+
+#### Role Adapters (Thin Wrappers)
+
+Each role adapter is a thin wrapper around the shared client. It
+implements the role interface and adds role-specific logic (prompt
+formatting, response parsing) but **zero HTTP/auth code**.
+
+```go
+// internal/provider/openai/orchestrator.go
+//
+// Adapts the shared Client to the Orchestrator interface.
+// ~30 lines of code — just translates between types.
+
+type OrchestratorAdapter struct {
+    client *Client   // shared
+    model  string    // "gpt-4o-mini", "moonshot-v1-8k", etc.
 }
 
-// internal/models/coder_claude.go
-type ClaudeCoder struct {
+func NewOrchestrator(client *Client, model string) models.Orchestrator {
+    return &OrchestratorAdapter{client: client, model: model}
+}
+
+func (a *OrchestratorAdapter) Chat(ctx context.Context, system string,
+    messages []models.Message) (string, error) {
+    // Convert models.Message → ChatRequest (with a.model)
+    // Call a.client.ChatCompletion()
+    // Return response text
+}
+
+func (a *OrchestratorAdapter) ChatJSON(ctx context.Context, system string,
+    messages []models.Message, out interface{}) error {
+    // Same, but parse JSON response
+    return a.client.ChatCompletionJSON(ctx, req, out)
+}
+
+func (a *OrchestratorAdapter) Name() string { return "openai:" + a.model }
+```
+
+```go
+// internal/provider/openai/artist.go
+//
+// Adapts the shared Client to the Artist interface.
+
+type ArtistAdapter struct {
+    client *Client
+    model  string  // "gpt-image-1", "dall-e-3"
+}
+
+func NewArtist(client *Client, model string) models.Artist {
+    return &ArtistAdapter{client: client, model: model}
+}
+
+func (a *ArtistAdapter) Generate(ctx context.Context,
+    req models.ImageGenRequest) (*models.ImageResult, error) {
+    // Convert → ImageAPIRequest, call a.client.ImageGenerate()
+}
+
+func (a *ArtistAdapter) Edit(ctx context.Context,
+    req models.ImageEditRequest) (*models.ImageResult, error) {
+    // Convert → ImageEditAPIRequest, call a.client.ImageEdit()
+}
+
+func (a *ArtistAdapter) Name() string { return "openai:" + a.model }
+```
+
+```go
+// internal/provider/openai/coder.go
+//
+// Adapts the shared Client for an OpenAI-based coding agent.
+// (Future: Codex, Responses API with code execution, etc.)
+
+type CoderAdapter struct {
+    client *Client
+    model  string
+}
+
+func NewCoder(client *Client, model string) models.Coder {
+    return &CoderAdapter{client: client, model: model}
+}
+// ...
+```
+
+```go
+// internal/provider/claude/coder.go
+//
+// Claude CLI coder — not OpenAI-based, uses exec.Command.
+// Doesn't share the OpenAI client at all.
+
+type CLICoder struct {
     permissionMode string
     maxTurns       int
     timeout        time.Duration
 }
 
-func NewClaudeCoder(cfg CoderConfig) Coder {
-    return &ClaudeCoder{...}
+func NewCLICoder(cfg CoderConfig) models.Coder {
+    return &CLICoder{...}
 }
 ```
+
+#### The Point: One API Key, One Connection, Three Roles
+
+When you use OpenAI for everything, the wiring looks like this:
+
+```go
+// internal/daemon/daemon.go — initialization
+
+func NewDaemon(cfg Config) *Daemon {
+    // If orchestrator and artist both use OpenAI,
+    // they SHARE the same underlying client.
+    openaiClient := openai.NewOpenAI(cfg.OpenAI.APIKey)
+
+    return &Daemon{
+        orchestrator: openai.NewOrchestrator(openaiClient, "gpt-4o-mini"),
+        artist:       openai.NewArtist(openaiClient, "gpt-image-1"),
+        coder:        claude.NewCLICoder(cfg.Coder),  // different provider
+        // ...
+    }
+}
+```
+
+If you use Kimi as orchestrator + OpenAI for images:
+
+```go
+    kimiClient   := openai.NewKimi(cfg.Kimi.APIKey)
+    openaiClient := openai.NewOpenAI(cfg.OpenAI.APIKey)
+
+    return &Daemon{
+        orchestrator: openai.NewOrchestrator(kimiClient, "moonshot-v1-8k"),
+        artist:       openai.NewArtist(openaiClient, "gpt-image-1"),
+        coder:        claude.NewCLICoder(cfg.Coder),
+    }
+```
+
+If you use OpenAI for all three:
+
+```go
+    client := openai.NewOpenAI(cfg.OpenAI.APIKey)  // ONE client
+
+    return &Daemon{
+        orchestrator: openai.NewOrchestrator(client, "gpt-4o-mini"),
+        artist:       openai.NewArtist(client, "gpt-image-1"),
+        coder:        openai.NewCoder(client, "codex-mini"),  // future
+    }
+```
+
+**One `*http.Client`, one API key, one rate limiter. Three roles.**
+
+#### Non-OpenAI Providers
+
+For providers that aren't OpenAI-compatible, create a separate package
+with its own client:
+
+```
+internal/provider/
+  openai/          ← shared client + 3 adapters
+    client.go      ← HTTP, auth, rate limiting (THE shared code)
+    orchestrator.go ← thin adapter → models.Orchestrator
+    artist.go      ← thin adapter → models.Artist
+    coder.go       ← thin adapter → models.Coder (future)
+  claude/          ← exec-based, no HTTP client
+    coder.go       ← CLI wrapper → models.Coder
+  stability/       ← different API, own client
+    client.go      ← Stability AI HTTP client
+    artist.go      ← adapter → models.Artist
+  ollama/          ← local, own client
+    client.go      ← local HTTP client
+    orchestrator.go ← adapter → models.Orchestrator
+```
+
+Each provider package owns its client. The `openai` package is the most
+reusable because many providers (Kimi, DeepSeek, Groq, Together AI)
+are OpenAI-compatible and share the same client code.
 
 #### How the Daemon Uses Them
 
 ```go
-// internal/daemon/daemon.go
+// The daemon never knows which provider is behind each role.
+// It only talks to interfaces.
 
-type Daemon struct {
-    orchestrator models.Orchestrator  // Kimi, GPT-4o-mini, etc.
-    artist       models.Artist        // OpenAI images, etc.
-    coder        models.Coder         // Claude CLI
-    slack        *slack.Client
-    store        *store.Store
-    // ...
-}
-
-// Everything goes through the interface:
 func (d *Daemon) runKimi(thread *Thread, msg Message) {
     resp, _ := d.orchestrator.Chat(ctx, systemPrompt, thread.KimiHistory)
     // ...
@@ -2724,42 +2890,6 @@ func (d *Daemon) startClaude(thread *Thread) {
 }
 ```
 
-#### Swapping Providers
-
-To try a new orchestrator, you just implement the interface and change config:
-
-```json
-// Before: Kimi
-{"orchestrator": {"provider": "kimi", "apiKey": "..."}}
-
-// After: GPT-4o-mini
-{"orchestrator": {"provider": "openai-mini", "apiKey": "..."}}
-
-// After: DeepSeek
-{"orchestrator": {"provider": "deepseek", "apiKey": "..."}}
-
-// After: local Ollama
-{"orchestrator": {"provider": "ollama", "baseURL": "http://localhost:11434"}}
-```
-
-Same for artist:
-```json
-// Before: gpt-image-1
-{"artist": {"provider": "openai", "model": "gpt-image-1", "apiKey": "..."}}
-
-// After: DALL-E 3
-{"artist": {"provider": "openai", "model": "dall-e-3", "apiKey": "..."}}
-
-// After: Stability AI
-{"artist": {"provider": "stability", "apiKey": "..."}}
-```
-
-And coder (though Claude CLI is the expected default):
-```json
-// Default: Claude CLI
-{"coder": {"provider": "claude-cli", "maxTurns": 10, "timeout": 30}}
-```
-
 ### 24.9 Config
 
 ```json
@@ -2768,6 +2898,7 @@ And coder (though Claude CLI is the expected default):
   "orchestrator": {
     "provider": "kimi",
     "apiKey": "...",
+    "model": "moonshot-v1-8k",
     "conflictDetection": true
   },
   "artist": {
@@ -2781,6 +2912,36 @@ And coder (though Claude CLI is the expected default):
     "timeout": 30,
     "permissionMode": "bypassPermissions"
   }
+}
+```
+
+When two roles share the same provider and API key, the daemon detects
+this and creates a single shared client automatically:
+
+```json
+// All OpenAI — one API key, one shared client
+{
+  "orchestrator": { "provider": "openai", "model": "gpt-4o-mini", "apiKey": "sk-..." },
+  "artist":       { "provider": "openai", "model": "gpt-image-1", "apiKey": "sk-..." },
+  "coder":        { "provider": "openai", "model": "codex-mini",  "apiKey": "sk-..." }
+}
+```
+
+```go
+// Provider factory detects shared keys and reuses clients
+func BuildProviders(cfg Config) (models.Orchestrator, models.Artist, models.Coder) {
+    clients := map[string]*openai.Client{} // key = baseURL+apiKey
+
+    getOrCreate := func(baseURL, apiKey string) *openai.Client {
+        key := baseURL + "|" + apiKey
+        if c, ok := clients[key]; ok {
+            return c  // reuse existing client
+        }
+        c := openai.NewClient(baseURL, apiKey)
+        clients[key] = c
+        return c
+    }
+    // ...
 }
 ```
 
@@ -3195,7 +3356,8 @@ the 1:1:1 rule (that PR is already merged). Instead, they start a
 | `internal/conflicts/tracker.go` | File overlap detection, merge ordering | In-memory tracker with test data |
 | `internal/github/github.go` | PR detection, merge polling | Regex tests + mock `gh` output |
 | `internal/ratelimit/limiter.go` | Rate limiting logic | Time-based tests with controlled clock |
-| `internal/models/*.go` | All provider implementations | Mock interfaces (MockOrchestrator, MockArtist, MockCoder) |
+| `internal/provider/openai/*` | All OpenAI adapters | HTTP test server + shared mock client |
+| `internal/models/interfaces.go` | Role interfaces | Mock implementations (MockOrchestrator, MockArtist, MockCoder) |
 
 ### Integration Tests (require tokens)
 
@@ -3231,12 +3393,16 @@ Tests:
 
 ### Mock Providers for Tests
 
+Two levels of testing:
+
+**1. Interface mocks** — for testing daemon logic without any API calls:
+
 ```go
 // internal/models/mock.go (build tag: testing)
 
-// MockOrchestrator implements models.Orchestrator for tests
+// MockOrchestrator implements models.Orchestrator
 type MockOrchestrator struct {
-    Responses map[string]string  // prompt substring → response
+    Responses map[string]string
 }
 
 func (m *MockOrchestrator) Chat(ctx context.Context, system string, msgs []Message) (string, error) {
@@ -3247,30 +3413,55 @@ func (m *MockOrchestrator) Chat(ctx context.Context, system string, msgs []Messa
     }
     return `{"route": "code_task"}`, nil
 }
-
 func (m *MockOrchestrator) Name() string { return "mock-orchestrator" }
 
-// MockArtist implements models.Artist for tests
-type MockArtist struct {
-    ImageData []byte  // returned for all generate/edit calls
-}
+// MockArtist implements models.Artist
+type MockArtist struct{ ImageData []byte }
 
 func (m *MockArtist) Generate(ctx context.Context, req ImageGenRequest) (*ImageResult, error) {
     return &ImageResult{Data: m.ImageData, LocalPath: "/tmp/mock.png"}, nil
 }
-
 func (m *MockArtist) Name() string { return "mock-artist" }
 
-// MockCoder implements models.Coder for tests
-type MockCoder struct {
-    Response string
-}
+// MockCoder implements models.Coder
+type MockCoder struct{ Response string }
 
 func (m *MockCoder) Run(ctx context.Context, req CoderRequest) (*CoderResult, error) {
     return &CoderResult{Response: m.Response, SessionID: "mock-session"}, nil
 }
-
 func (m *MockCoder) Name() string { return "mock-coder" }
+```
+
+**2. Shared client mock** — for testing the OpenAI adapters themselves:
+
+```go
+// internal/provider/openai/client_test.go
+
+// httptest.NewServer that mimics OpenAI API responses.
+// One test server, test all three adapters against it.
+
+func TestSharedClient(t *testing.T) {
+    server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        switch {
+        case strings.HasSuffix(r.URL.Path, "/chat/completions"):
+            // return canned chat response
+        case strings.HasSuffix(r.URL.Path, "/images/generations"):
+            // return canned image response
+        }
+    }))
+
+    client := openai.NewClient(server.URL, "test-key")
+
+    // Same client, test all roles:
+    orch := openai.NewOrchestrator(client, "gpt-4o-mini")
+    art  := openai.NewArtist(client, "gpt-image-1")
+
+    resp, _ := orch.Chat(ctx, "system", []Message{{Role: "user", Content: "hello"}})
+    assert.Contains(t, resp, "expected")
+
+    img, _ := art.Generate(ctx, ImageGenRequest{Prompt: "a cat"})
+    assert.NotNil(t, img.Data)
+}
 ```
 
 ---
