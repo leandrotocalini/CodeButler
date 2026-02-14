@@ -381,10 +381,11 @@ if msg.BotID != "" || msg.User == c.botUserID { skip }
 - Slack identifica bots por `bot_id` en el evento
 - Los mensajes del bot se envían sin prefijo (más limpio)
 
-### Read Receipts → Reactions (opcional)
+### Read Receipts → Reactions
 - WhatsApp: `MarkRead()` muestra ticks azules
-- Slack: no hay equivalente directo
-- Opción: agregar reaction (ej: `eyes` 👀) cuando se empieza a procesar
+- Slack: usar reactions como feedback visual
+  - 👀 (`eyes`) cuando se empieza a procesar
+  - ✅ (`white_check_mark`) cuando Claude termina de responder
 
 ### Typing Indicator → Eliminado
 - WhatsApp: `SendPresence(composing=true)` muestra "typing..."
@@ -392,11 +393,9 @@ if msg.BotID != "" || msg.User == c.botUserID { skip }
 - Se puede omitir sin impacto funcional
 
 ### Threads (nuevo en Slack)
-- Los mensajes en Slack pueden estar en threads
-- **Decisión pendiente**: ¿responder en thread o en el canal principal?
-- Opción A: siempre responder en el canal (como WhatsApp)
-- Opción B: si el mensaje viene de un thread, responder en ese thread
-- **Recomendación**: Opción B — más natural en Slack
+- **Decidido**: siempre responder en thread del mensaje original
+- Mantiene el canal limpio
+- Agrupa conversación con Claude en un hilo visual
 
 ### Voice Messages
 - WhatsApp: voz inline, descarga con `DownloadAudio()`
@@ -410,16 +409,17 @@ if msg.BotID != "" || msg.User == c.botUserID { skip }
 
 ---
 
-## 13. Decisiones Pendientes
+## 13. Decisiones Tomadas
 
-- [ ] **Threads**: ¿responder en thread o canal? (recomiendo thread)
-- [ ] **Reactions**: ¿usar reactions como indicador de "procesando"?
-- [ ] **Nombres de columnas en SQLite**: ¿renombrar `from_jid`/`chat`/`wa_msg_id` o dejar como están?
-- [ ] **Múltiples canales**: ¿soportar más de un canal por repo? (WhatsApp era 1 grupo)
-- [ ] **Mention del bot**: ¿requerir `@CodeButler` para activar, o responder a todo?
+- [x] **Threads**: responder en thread del mensaje original
+- [x] **Reactions**: sí, usar 👀 al empezar a procesar y ✅ al terminar
+- [x] **Nombres de columnas en SQLite**: renombrar a `from_id`, `channel_id`, `platform_msg_id`
+- [x] **Múltiples canales**: no, un canal por repo (como WhatsApp)
+- [x] **Mention del bot**: responder a todos los mensajes del canal, sin requerir @mention
+- [x] **Message length**: splitear en múltiples mensajes de ~4000 chars en el thread
+
+### Pendientes
 - [ ] **Markdown**: Slack usa mrkdwn (distinto de Markdown standard). ¿Convertir output de Claude?
-- [ ] **Rate limiting**: Slack tiene rate limits estrictos (1 msg/s por canal). ¿Cómo manejar respuestas largas?
-- [ ] **Message length**: Slack limita a 4000 chars por mensaje. ¿Splitear respuestas largas?
 
 ---
 
