@@ -450,14 +450,22 @@ PHASE 1 — KIMI (definition & planning)
 PHASE 2 — CLAUDE (implementation)
     Daemon creates worktree + branch
         ↓
-    Claude executes the approved plan
+    Claude receives: approved plan + context + relevant files
         ↓
-    User can reply → Claude resumes (--resume)
+    Claude implements (can ask implementation questions via --resume)
         ↓
     Claude opens PR → thread lifecycle continues
 ```
 
-**Kimi handles all conversation until approval. Claude only touches code.**
+**Kimi defines WHAT to build. Claude decides HOW to build it.**
+
+Kimi resolves all product/scope questions before Claude starts. By the
+time Claude runs, the feature/bug/task is well-defined. Claude can still
+ask the user questions, but they should be **implementation questions**
+(e.g., "should I use a middleware or a handler for this?", "the test
+suite uses testify but this module uses stdlib — which do you prefer?"),
+not **requirements questions** (e.g., "what do you mean by login bug?",
+"what fields should the user have?"). Those were already resolved with Kimi.
 
 ### Thread State in the Daemon
 
@@ -497,6 +505,8 @@ func (d *Daemon) onMessage(msg Message) {
 
     case PhaseClaude:
         // User replied after Claude started — resume Claude
+        // These are implementation interactions: answering Claude's
+        // questions, requesting adjustments, providing feedback
         d.resumeClaude(thread, msg)
     }
 }
@@ -1580,7 +1590,7 @@ User: "dale"
 
 ```
 You are an AI development assistant working in a code repository.
-Your role is to UNDERSTAND and PLAN, never to write code.
+Your role is to UNDERSTAND, DEFINE, and PLAN — never to write code.
 
 You have access to these tools:
 - grep/search the codebase
@@ -1588,18 +1598,30 @@ You have access to these tools:
 - check git log
 - check gh pr/issue status
 
-Your job:
-1. Understand what the user wants
-2. If it's a question → answer it directly (read the relevant files)
-3. If it's a code task → scan the codebase, propose a specific plan
-4. Ask clarifying questions when the request is vague
-5. When the plan is ready, present it clearly and wait for approval
-6. Never say "I can't do that" — if it's a code task, plan it for Claude
+Your job is to fully define the task before handing it to Claude.
+Claude should NEVER need to ask "what do you mean?" or "what should
+this do?". By the time Claude starts, the task must be unambiguous.
 
-When proposing a plan, always include:
-- Which files will be created/modified
-- What the approach is (patterns found in the codebase)
-- Estimated complexity
+Workflow:
+1. Understand what the user wants — ask questions until it's clear
+2. If it's a question → answer it directly (read files, check docs)
+3. If it's a code task → scan the codebase, then propose a plan:
+   - Which files will be created/modified
+   - What specifically changes in each file
+   - What patterns to follow (reference existing code)
+   - What edge cases to handle
+   - What tests to add
+4. If the request is vague, ask follow-up questions. Be specific:
+   BAD:  "Can you give more details?"
+   GOOD: "I see auth/login.go returns a JWT. Should registration
+          also return a JWT, or redirect to /login?"
+5. Present the plan and wait for approval
+6. If the user adjusts, update the plan and re-present
+
+Your plan must be detailed enough that an engineer (Claude) can
+implement it without asking requirements questions. Implementation
+questions ("bcrypt or argon2?") are fine — scope questions ("what
+fields should User have?") mean your plan wasn't complete enough.
 
 Repository: {repo_path}
 Memory: {memory.md contents}
@@ -1668,8 +1690,11 @@ User: "yes"
 ```
 {sandbox prefix}
 
-APPROVED PLAN (implement this):
+TASK (well-defined, approved by user):
 ---
+Add basic user registration without email verification.
+
+Plan:
 1. Create models/user.go — User struct with GORM tags
 2. Create auth/register.go — POST /register with bcrypt
 3. Update routes.go — add POST /register route
@@ -1689,13 +1714,38 @@ auth/login.go (existing auth pattern):
   func Login(w http.ResponseWriter, r *http.Request) { ... }
 ---
 
-USER REQUEST: "add basic user registration without email verification"
+INTERACTION RULES:
+- The task above has been defined and approved by the user. Do NOT
+  ask questions about scope, requirements, or what to build — that's
+  already decided.
+- You CAN ask implementation questions if you hit a genuine ambiguity
+  (e.g., "auth/login.go uses JWT but auth/session.go uses cookies —
+  which pattern should I follow for registration?").
+- Prefer making reasonable decisions over asking. Only ask when the
+  wrong choice would be costly to undo.
+- When done, commit, push, and open a PR.
 
 {memory context}
 ```
 
-Claude gets a **precise, focused prompt** with a clear plan and relevant
-code. No exploration needed. This is why Kimi-first saves money.
+Claude gets a **well-defined task** with a clear plan and relevant code.
+The *what* is settled. Claude focuses on the *how*.
+
+#### What Claude Can and Cannot Ask
+
+| Claude asks | OK? | Why |
+|---|---|---|
+| "should I use bcrypt or argon2?" | Yes | implementation choice, either works |
+| "the tests use testify but this module uses stdlib, which?" | Yes | codebase ambiguity |
+| "I found a race condition in the existing auth — fix it too?" | Yes | discovered issue, needs scope approval |
+| "what fields should the user model have?" | **No** | requirements — Kimi should have defined this |
+| "what does 'fix the login bug' mean?" | **No** | this was resolved in Phase 1 |
+| "should I add email verification?" | **No** | scope was explicitly set in the plan |
+
+If Claude hits a question that should have been resolved by Kimi, it
+means Kimi's plan wasn't detailed enough. Over time, Kimi's system
+prompt gets refined to produce more complete plans (auto-memory helps
+with this — see section 16).
 
 ### 24.4 Post-flight: After Claude Responds
 
