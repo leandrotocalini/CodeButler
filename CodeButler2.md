@@ -2100,7 +2100,8 @@ tells the full story of the thread, oriented to the user (not to models).
 # Thread Journal: "fix the login bug"
 
 **Started**: 2026-02-14 14:30 · **Closed**: 2026-02-14 15:12
-**Branch**: codebutler/fix-login · **PR**: #42
+**Branch**: codebutler/fix-login · **PR**: [#42](https://github.com/user/repo/pull/42)
+**Slack thread**: [View conversation](https://myworkspace.slack.com/archives/C0123ABCDEF/p1732456789123456)
 **PM model**: Kimi (switched to Claude at 14:45, back to Kimi at 14:52)
 
 ---
@@ -2189,9 +2190,12 @@ end by summarizing the conversation (that would lose detail).
 // internal/journal/journal.go
 
 type Journal struct {
-    threadTS string
-    branch   string
-    entries  []Entry
+    threadTS   string
+    branch     string
+    title      string // thread title (from PM classification)
+    slackURL   string // link to Slack thread
+    prURL      string // link to GitHub PR (set when PR is created)
+    entries    []Entry
 }
 
 type Entry struct {
@@ -2254,7 +2258,12 @@ is committed directly to main on thread close.
 | **Includes PM model switches** | No | Yes | Only the switch messages |
 | **Includes which files PM read** | No | Yes | No |
 | **Searchable in repo** | No (GitHub only) | Yes (`grep -r "timezone" .codebutler/journals/`) | No (Slack search) |
+| **Links to others** | Has Slack thread link | Has Slack thread link + PR link | Has PR link (bot message) |
 | **Lives** | GitHub PR | Git repo | Slack |
+
+All three are cross-linked: from the journal you can jump to the PR or
+the Slack thread. From the PR description you can jump to the Slack thread.
+From Slack you can see the PR link. Full traceability.
 
 The key insight: the thread journal shows **what happened behind the
 scenes** — the PM reading files, the internal exchanges between PM and
