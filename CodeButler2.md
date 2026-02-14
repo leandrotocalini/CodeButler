@@ -232,6 +232,8 @@ CREATE TABLE sessions (
 | `internal/llm/client.go` | OpenAI-compatible client for cheap models (Kimi, GPT-4o-mini, DeepSeek) |
 | `internal/preflight/preflight.go` | Pre-Claude enrichment: grep repo, read files, build focused prompt |
 | `internal/router/router.go` | Message classifier: question vs code_task vs clarify |
+| `internal/conflicts/tracker.go` | Thread lifecycle tracking, file overlap detection, merge order |
+| `internal/conflicts/notify.go` | Slack notifications for conflicts, rebase reminders, merge order |
 
 ### Modify
 | File | Changes |
@@ -567,6 +569,8 @@ This is the **central architectural decision** of CodeButler2.
 - [x] **Smart routing**: Kimi classifies messages — questions answered directly, code tasks go to Claude
 - [x] **Pre-flight enrichment**: Kimi scans repo + memory before Claude runs, builds focused prompt
 - [x] **Workflow planning**: Kimi generates execution plans for complex tasks, user approves before Claude runs
+- [x] **Thread = Branch = PR**: each thread creates its own branch, conflicts detected proactively
+- [x] **Merge coordination**: Kimi suggests merge order + notifies threads to rebase after PR merge
 
 ---
 
@@ -1463,31 +1467,231 @@ Claude response arrives
     └─ Kimi: detect if Claude left TODO/FIXME → warn in thread
 ```
 
-### 24.5 Multi-Thread Conflict Detection
+### 24.5 Thread = Branch = PR: Conflict Coordination
 
-When multiple threads are active, Kimi monitors for conflicts:
+Each thread potentially becomes a branch and then a PR. With N concurrent
+threads, you have N branches being modified simultaneously. Kimi acts as
+a **merge coordinator** — detecting conflicts before they happen and
+orchestrating the merge order.
+
+#### The Problem
 
 ```
-Thread A: "refactor auth module" → Claude working on auth/
-Thread B: "fix login timeout"    → Claude working on auth/
+Thread A: "refactor auth module"     → branch: refactor/auth
+Thread B: "fix login timeout"        → branch: fix/login-timeout
+Thread C: "add 2FA to login"         → branch: feat/2fa
 
-Kimi detects overlap:
-    → Posts in Thread B: "⚠️ Thread A is also modifying auth/.
-       Consider waiting for Thread A to finish, or coordinate."
+All three touch auth/login.go. If they all open PRs, at least two
+will have merge conflicts. Without coordination, developers discover
+this at PR review time — too late.
 ```
 
-**Implementation**:
+#### Lifecycle Tracking
+
+The daemon tracks each thread's lifecycle from message to merged PR:
+
+```
+Thread created
+    → Kimi classifies as code_task
+    → Claude starts working
+    → Claude creates branch (detected from response)
+    → Claude modifies files (tracked per response)
+    → Claude opens PR (detected from response)
+    → PR merged (detected via GitHub webhook or polling)
+    → Thread scope cleared
+```
+
 ```go
-// Track which files each thread is touching
+// internal/conflicts/tracker.go
+
+type ThreadState string
+const (
+    StateWorking  ThreadState = "working"   // Claude is active
+    StatePR       ThreadState = "pr"        // PR opened, awaiting merge
+    StateMerged   ThreadState = "merged"    // PR merged, scope cleared
+)
+
 type ThreadScope struct {
-    ThreadTS string
-    Files    []string  // files modified by Claude in this thread
+    ThreadTS  string
+    Branch    string        // branch name (e.g., "fix/login-timeout")
+    PRNumber  int           // 0 if no PR yet
+    State     ThreadState
+    Files     []string      // files modified by Claude in this thread
+    StartedAt time.Time
 }
 
-// On each Claude response, Kimi extracts modified files
-// and checks against active threads
-func DetectConflicts(activeThreads []ThreadScope, newThread ThreadScope) []Conflict
+type Tracker struct {
+    mu      sync.Mutex
+    threads map[string]*ThreadScope  // threadTS → scope
+}
 ```
+
+#### Conflict Detection Levels
+
+Three levels of conflict, from obvious to subtle:
+
+```
+Level 1 — SAME FILE
+    Thread A modifies auth/login.go
+    Thread B modifies auth/login.go
+    → "⚠️ Both threads modify auth/login.go"
+
+Level 2 — SAME PACKAGE/DIRECTORY
+    Thread A modifies auth/login.go
+    Thread B modifies auth/session.go
+    → "⚠️ Both threads modify files in auth/"
+
+Level 3 — SEMANTIC OVERLAP (Kimi analyzes)
+    Thread A modifies auth/login.go (changes bcrypt rounds)
+    Thread B modifies config/security.go (adds password policy)
+    → Kimi: "Both threads affect authentication behavior.
+       Thread A changes password hashing, Thread B changes password rules.
+       These might need coordinated testing."
+```
+
+#### When Conflicts Are Checked
+
+```
+                          ┌─ check conflicts
+                          ↓
+New thread starts → Kimi pre-flight:
+    1. Classify message
+    2. Predict which files will be touched (from message content)
+    3. Check against active threads
+    4. If overlap detected:
+       → Warn in thread BEFORE Claude starts
+       → Suggest: wait, proceed with caution, or coordinate
+
+After each Claude response:
+    1. Extract modified files from Claude's output (git diff or response text)
+    2. Update thread scope
+    3. Check for NEW conflicts with other active threads
+    4. If new overlap detected:
+       → Warn in both threads
+```
+
+#### Merge Order Suggestions
+
+When multiple threads have open PRs touching the same files, Kimi suggests
+a merge order to minimize conflicts:
+
+```
+Kimi (posted in channel, not in thread):
+
+    📋 *Merge Order Recommendation*
+
+    3 PRs touch overlapping files in auth/:
+
+    1. PR #42 "fix login timeout" (Thread A)
+       → Smallest change (1 file, +3/-2 lines)
+       → Merge first to minimize rebase work
+
+    2. PR #44 "add 2FA" (Thread C)
+       → Medium change (3 files, +120/-15 lines)
+       → Will need minor rebase after #42
+
+    3. PR #43 "refactor auth" (Thread B)
+       → Largest change (8 files, +300/-250 lines)
+       → Merge last, rebase after #42 and #44
+```
+
+#### Post-Merge Notifications
+
+When a PR merges, Kimi notifies other active threads that touch
+overlapping files:
+
+```
+PR #42 (Thread A) merged
+    ↓
+Kimi checks: which other threads touch the same files?
+    ↓
+Thread B (auth/login.go overlap) →
+    "ℹ️ PR #42 just merged and modified auth/login.go,
+     which this thread also modifies. Consider rebasing
+     your branch before continuing."
+
+Thread C (auth/ directory overlap) →
+    "ℹ️ PR #42 merged changes to auth/. Your branch
+     might need a rebase."
+```
+
+#### PR Merge Detection
+
+Two options for detecting when a PR is merged:
+
+**Option A: GitHub webhook** (real-time, requires public endpoint or ngrok)
+```go
+// internal/github/webhook.go
+func HandlePRMerged(event PullRequestEvent) {
+    tracker.MarkMerged(event.PRNumber)
+    notifyOverlappingThreads(event.PRNumber)
+}
+```
+
+**Option B: Polling** (simpler, no public endpoint needed)
+```go
+// Poll every 60s for merged PRs
+func (d *Daemon) prWatchdog() {
+    for _, scope := range tracker.GetPRScopes() {
+        merged, _ := gh.IsMerged(scope.PRNumber)
+        if merged {
+            tracker.MarkMerged(scope.ThreadTS)
+            d.notifyOverlappingThreads(scope)
+        }
+    }
+}
+```
+
+#### Conflict Detection Prompt (Kimi)
+
+```
+Given these active threads and their modified files, identify conflicts:
+
+Active threads:
+---
+Thread A (1732456789.123456): branch "refactor/auth"
+  Files: auth/login.go, auth/session.go, auth/middleware.go
+
+Thread B (1732460000.654321): branch "fix/login-timeout"
+  Files: auth/login.go, auth/config.go
+
+Thread C (1732470000.111111): branch "feat/2fa"
+  Files: auth/login.go, auth/totp.go, models/user.go
+---
+
+New thread message: "optimize the password hashing in auth"
+
+Respond with JSON:
+{
+  "predicted_files": ["auth/login.go", "auth/hash.go"],
+  "conflicts": [
+    {
+      "with_thread": "1732456789.123456",
+      "level": "same_file",
+      "files": ["auth/login.go"],
+      "recommendation": "Thread A is refactoring auth/login.go extensively. Wait for Thread A to finish or coordinate changes."
+    }
+  ],
+  "merge_order": ["B", "C", "A"],
+  "merge_reason": "B is smallest, C adds new files, A is a large refactor that should go last"
+}
+```
+
+#### Implementation
+
+- **File**: `internal/conflicts/tracker.go`
+- **Functions**:
+  - `Track(threadTS, branch string)` — start tracking a thread
+  - `UpdateFiles(threadTS string, files []string)` — update modified files
+  - `SetPR(threadTS string, prNumber int)` — mark PR opened
+  - `MarkMerged(threadTS string)` — mark PR merged
+  - `DetectConflicts(threadTS string, predictedFiles []string) []Conflict`
+  - `SuggestMergeOrder() []MergeStep`
+  - `GetOverlapping(threadTS string) []ThreadScope`
+- **File**: `internal/conflicts/notify.go`
+  - `NotifyConflict(slackClient, threadTS string, conflict Conflict)`
+  - `NotifyRebase(slackClient, threadTS string, mergedPR int)`
+  - `PostMergeOrder(slackClient, channelID string, steps []MergeStep)`
 
 ### 24.6 Cost Dashboard
 
