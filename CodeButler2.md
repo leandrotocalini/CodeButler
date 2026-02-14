@@ -242,7 +242,9 @@ CREATE TABLE sessions (
 | `internal/provider/openai/artist.go` | Thin adapter: shared client → Artist interface |
 | `internal/provider/openai/coder.go` | Thin adapter: shared client → Coder interface (future) |
 | `internal/provider/claude/coder.go` | Claude CLI Coder (exec.Command, not HTTP) |
-| `internal/preflight/preflight.go` | Pre-Claude enrichment: grep repo, read files, build focused prompt |
+| `internal/tools/definition.go` | PM tool definitions (ReadFile, Grep, ListFiles, etc.) + PMTools() factory |
+| `internal/tools/executor.go` | Sandboxed tool execution: read files, grep, git ops — all read-only |
+| `internal/tools/loop.go` | Provider-agnostic tool-calling loop (ChatFunc + Executor → final response) |
 | `internal/router/router.go` | Message classifier: question vs code_task vs clarify |
 | `internal/conflicts/tracker.go` | Thread lifecycle tracking, file overlap detection, merge order |
 | `internal/conflicts/notify.go` | Slack notifications for conflicts, rebase reminders, merge order |
@@ -1655,43 +1657,338 @@ are swappable via config without touching daemon code.
 | **Artist** | gpt-image-1 | Image creator | ¢¢ | Generate/edit images during Phase 1 |
 | *(direct)* | Whisper | Transcription | ¢ | Voice → text |
 
-### 24.1 Pre-flight: Enrich Before Claude Runs
+### 24.1 PM Tools — Autonomous Codebase Exploration
 
-When a user sends "fix the login bug", Claude wastes expensive turns
-exploring the codebase to find what "login" means. Kimi can do this
-cheaper and faster.
+The ProductManager doesn't receive pre-digested context. Instead, it gets
+**tools** — read-only functions it can call autonomously during conversation.
+This is fundamentally different from the old "preflight enrichment" approach:
 
 ```
-User: "fix the login bug"
-    ↓
-Kimi pre-flight (cheap, fast):
-    1. grep repo for "login" → finds auth/login.go, auth/session.go
-    2. Read those files (or summaries)
-    3. Check recent git log for login-related changes
-    4. Check memory.md for known login conventions
-    5. Build enriched prompt:
-       "Fix the login bug. Relevant files:
-        - auth/login.go (handles POST /login, bcrypt check)
-        - auth/session.go (session creation, 24h expiry)
-        - Recent: commit abc123 changed session timeout
-        - Memory: auth uses bcrypt, sessions expire after 24h"
-    ↓
-Claude receives focused, enriched prompt
-    → Fewer exploration turns → faster, cheaper
+OLD (pre-flight — hardcoded, brittle):
+    User: "fix the login bug"
+    → CodeButler code greps for "login", reads files, checks git log
+    → Builds a fixed prompt and sends it to Kimi
+    → Kimi only sees what CodeButler decided to fetch
+    → If CodeButler missed relevant context, Kimi can't explore further
+
+NEW (PM tools — autonomous, flexible):
+    User: "fix the login bug"
+    → Kimi receives the message + available tools
+    → Kimi decides: "I should search for login-related files"
+    → Kimi calls Grep(pattern="login|Login", glob="*.go")
+    → Kimi sees results, decides: "auth/login.go looks relevant"
+    → Kimi calls ReadFile(path="auth/login.go")
+    → Kimi calls ReadFile(path="auth/session.go")
+    → Kimi calls GitLog(path="auth/")
+    → Kimi: "Found the issue. auth/session.go:42 hardcodes 1h..."
+    → Kimi proposes plan with full context it gathered itself
 ```
 
-**Implementation**:
+The PM is the one deciding what to explore, not CodeButler. This makes the
+system adaptive — different questions trigger different exploration patterns.
+
+#### Tool-Calling Flow
+
+The ProductManager uses the standard OpenAI function-calling protocol.
+This works with any OpenAI-compatible API (Kimi, GPT-4o-mini, DeepSeek, etc).
+
+```
+┌──────────┐     messages + tool_defs      ┌──────────┐
+│          │ ──────────────────────────────→ │          │
+│ CodeButler│                               │  Kimi    │
+│ (Go)     │ ←──── finish_reason: tool_calls│  (LLM)   │
+│          │       tool_calls: [{           │          │
+│          │         name: "Grep",          │          │
+│          │         arguments: {...}       │          │
+│          │       }]                       │          │
+│          │                                │          │
+│ execute  │     messages + tool_results    │          │
+│ locally  │ ──────────────────────────────→│          │
+│          │                                │          │
+│          │ ←──── finish_reason: tool_calls│          │
+│          │       (more tools...)          │          │
+│          │                                │          │
+│          │     messages + tool_results    │          │
+│          │ ──────────────────────────────→│          │
+│          │                                │          │
+│          │ ←──── finish_reason: stop      │          │
+│          │       content: "Found it..."  │          │
+└──────────┘                                └──────────┘
+```
+
+Each round-trip is ~100-300 tokens extra. A typical exploration is 3-5 tool
+calls. Total cost per PM interaction: ~$0.002-0.005 (still 100x cheaper
+than one Claude turn).
+
+#### Tool Definitions
+
+All PM tools are **strictly read-only** and **sandboxed to the repo directory**.
+The PM never writes files, never executes arbitrary commands, never escapes
+the repo root.
+
+**`ReadFile`** — Read file contents with line numbers
+
+```json
+{
+  "name": "ReadFile",
+  "description": "Read the contents of a file in the repository. Returns file text with line numbers. Use offset/limit for large files.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "path":   { "type": "string",  "description": "Relative path from repo root (e.g. 'internal/daemon/daemon.go')" },
+      "offset": { "type": "integer", "description": "Start from this line number (1-based). Omit for beginning." },
+      "limit":  { "type": "integer", "description": "Max lines to return. Omit to read whole file (capped at 500)." }
+    },
+    "required": ["path"]
+  }
+}
+```
+
+Example output:
+```
+   1│ package daemon
+   2│
+   3│ import (
+   4│     "context"
+   5│     "sync"
+  ...
+  42│     sessionExpiry = 1 * time.Hour  // BUG: should use config value
+  ...
+```
+
+**`Grep`** — Search for patterns across the codebase
+
+```json
+{
+  "name": "Grep",
+  "description": "Search for a regex pattern across files. Returns matching lines with file paths and line numbers. Max 100 results.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "pattern": { "type": "string", "description": "Regex pattern (e.g. 'func.*Login', 'TODO', 'session.*expir')" },
+      "glob":    { "type": "string", "description": "File filter (e.g. '*.go', '*.ts'). Omit for all files." },
+      "path":    { "type": "string", "description": "Subdirectory to search. Omit for entire repo." }
+    },
+    "required": ["pattern"]
+  }
+}
+```
+
+Example output:
+```
+auth/login.go:23:func HandleLogin(w http.ResponseWriter, r *http.Request) {
+auth/login.go:58:    http.Redirect(w, r, "/dashboard", http.StatusFound)
+auth/session.go:42:    sessionExpiry = 1 * time.Hour
+auth/middleware.go:15:func RequireLogin(next http.Handler) http.Handler {
+```
+
+**`ListFiles`** — Find files by glob pattern
+
+```json
+{
+  "name": "ListFiles",
+  "description": "List files matching a glob pattern. Returns paths relative to repo root. Max 200 results.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "pattern": { "type": "string", "description": "Glob pattern (e.g. '*.go', '*.md', '*.test.ts')" },
+      "path":    { "type": "string", "description": "Subdirectory to search. Omit for entire repo." }
+    },
+    "required": ["pattern"]
+  }
+}
+```
+
+Example output:
+```
+auth/login.go
+auth/middleware.go
+auth/session.go
+cmd/server/main.go
+models/user.go
+routes.go
+```
+
+**`GitLog`** — Recent commit history
+
+```json
+{
+  "name": "GitLog",
+  "description": "Show recent git commits. Returns hash, author, date, and message.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "n":    { "type": "integer", "description": "Number of commits (default 10, max 50)." },
+      "path": { "type": "string",  "description": "Only commits touching this file/dir. Omit for all." }
+    }
+  }
+}
+```
+
+Example output:
+```
+a1b2c3d Fix session timeout configuration
+e4f5g6h Add login rate limiting
+i7j8k9l Refactor auth middleware
+```
+
+**`GitDiff`** — Uncommitted or ref-based changes
+
+```json
+{
+  "name": "GitDiff",
+  "description": "Show git diff (stat format). Uncommitted changes or between refs.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "ref":  { "type": "string", "description": "Diff against this ref (e.g. 'HEAD~3', 'main'). Omit for uncommitted." },
+      "path": { "type": "string", "description": "Only this file/dir. Omit for all changes." }
+    }
+  }
+}
+```
+
+**`ReadMemory`** — Access the project memory
+
+```json
+{
+  "name": "ReadMemory",
+  "description": "Read the project's memory.md file. Contains learned conventions, decisions, and context from previous conversations.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "section": { "type": "string", "description": "Only return this section (e.g. 'auth', 'deployment'). Omit for full file." }
+    }
+  }
+}
+```
+
+**`ListThreads`** — See active work across threads
+
+```json
+{
+  "name": "ListThreads",
+  "description": "List active threads with their current phase, branch, and files being modified. Useful for conflict detection.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "status": { "type": "string", "description": "Filter: 'active', 'pending_review', 'all'. Default: 'active'." }
+    }
+  }
+}
+```
+
+Example output:
+```
+Thread ts_001 [Phase: Claude] branch: feat/user-auth
+  Files: models/user.go, auth/register.go, routes.go
+Thread ts_002 [Phase: Kimi] branch: (not yet created)
+  Plan touches: auth/middleware.go
+```
+
+**`GHStatus`** — GitHub PR/issue context
+
+```json
+{
+  "name": "GHStatus",
+  "description": "Check GitHub PR or issue status using the gh CLI. Returns title, state, checks, and recent comments.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "type":   { "type": "string", "description": "'pr' or 'issue'" },
+      "number": { "type": "integer", "description": "PR or issue number" }
+    },
+    "required": ["type", "number"]
+  }
+}
+```
+
+#### Tool Execution — Safety Guarantees
+
+All tools run in the CodeButler Go process (not shelled out) with these
+invariants:
+
+1. **Path sandboxing**: Every `path` parameter is resolved relative to
+   `repoDir` and validated. Absolute paths rejected. Symlinks resolved
+   and checked. `../../etc/passwd` → error.
+
+2. **Read-only**: No tool can write, delete, or modify anything. The PM
+   observes, never acts.
+
+3. **Output limits**: Each tool caps its output (ReadFile: 500 lines,
+   Grep: 100 matches, ListFiles: 200 files, GitLog: 50 commits,
+   GitDiff: 300 lines). Results over 8KB are truncated before sending
+   back to the LLM to avoid blowing up context.
+
+4. **Iteration limit**: The tool loop runs at most 15 round-trips. After
+   that, one final call without tools forces a text response. In practice,
+   PMs converge in 3-7 iterations.
+
+5. **No shell execution**: Grep uses `os/exec` with fixed command
+   arguments (no shell interpolation). Git commands use explicit args.
+   No `sh -c` anywhere.
+
+6. **Timeout**: The entire tool loop inherits the context timeout. If the
+   PM takes too long exploring, the context cancels everything cleanly.
+
 ```go
-// internal/preflight/preflight.go
+// internal/tools/executor.go
 
-type Context struct {
-    RelevantFiles []FileInfo   // paths + summaries
-    RecentCommits []string     // related git log entries
-    MemoryHits    []string     // relevant memory.md lines
-    EnrichedPrompt string     // final prompt for Claude
+type Executor struct {
+    repoDir string
 }
 
-func Enrich(kimiClient, repoDir, userMessage, memory string) (*Context, error)
+func NewExecutor(repoDir string) *Executor
+
+// Execute dispatches a tool call to the appropriate handler.
+// Returns content string + error flag. Never panics.
+func (e *Executor) Execute(ctx context.Context, call models.ToolCall) models.ToolResult
+
+// safePath resolves and validates a relative path stays within repoDir.
+func (e *Executor) safePath(rel string) (string, error)
+```
+
+#### Tool Loop Implementation
+
+The loop is provider-agnostic. It takes a `ChatFunc` (any function that
+does one LLM completion with tools) and an `Executor` (runs tool calls).
+
+```go
+// internal/tools/loop.go
+
+const MaxToolIterations = 15
+
+// ChatFunc: one LLM completion call. Returns text or tool calls.
+type ChatFunc func(ctx context.Context, system string, messages []LoopMessage,
+    toolDefs []ToolDef) (*LoopResponse, error)
+
+// RunLoop executes the tool-calling loop until the LLM produces text.
+func RunLoop(ctx context.Context, chatFn ChatFunc, executor *Executor,
+    system string, messages []models.Message, tools []models.Tool,
+    maxIter int) (string, error)
+```
+
+The loop handles:
+- Converting `models.Tool` → OpenAI `function` format
+- Appending assistant tool_calls messages
+- Executing tools and appending tool result messages
+- Truncating large tool outputs (>8KB)
+- Final call without tools if iterations exhausted
+
+#### What This Replaces
+
+The old `internal/preflight/preflight.go` concept is **removed**. There is
+no separate enrichment step. The PM does its own enrichment via tools
+during natural conversation. The `preflight` package does not exist.
+
+```
+OLD architecture:
+    message → preflight.Enrich() → enriched prompt → Kimi Chat() → response
+                  ↑ hardcoded                             ↑ passive
+
+NEW architecture:
+    message → Kimi ChatWithTools() → [Grep] → [ReadFile] → [GitLog] → response
+                                       ↑ PM decides what to explore
 ```
 
 ### 24.2 Kimi as First Responder — The Core Flow
@@ -1891,14 +2188,33 @@ User: "dale"
 You are an AI development assistant working in a code repository.
 Your role is to UNDERSTAND, DEFINE, and PLAN — never to write code.
 
-You have access to these tools:
-- grep/search the codebase
-- read files
-- check git log
-- check gh pr/issue status
-- generate images (OpenAI gpt-image-1: generate or edit)
-- upload images to Slack
-- create branch + commit + open PR (for pushing assets)
+You have tools to explore the codebase autonomously:
+
+EXPLORATION TOOLS (read-only, use freely):
+- ReadFile(path, offset?, limit?) — read file contents with line numbers
+- Grep(pattern, glob?, path?) — search for regex patterns across files
+- ListFiles(pattern, path?) — find files by glob pattern
+- GitLog(n?, path?) — see recent commits
+- GitDiff(ref?, path?) — see uncommitted or ref-based changes
+- ReadMemory(section?) — read project memory (conventions, decisions)
+- ListThreads(status?) — see active threads and their files (conflict detection)
+- GHStatus(type, number) — check GitHub PR/issue status
+
+ACTION TOOLS (use when the user requests):
+- GenerateImage(prompt, size?) — create image via gpt-image-1
+- EditImage(prompt, image, size?) — edit an existing image
+- UploadImage(path) — send image to Slack
+- CreateBranch(name) — create git branch
+- CommitAndPush(files, message) — commit files and push
+- OpenPR(title, body) — open a pull request
+
+RULES:
+- Use exploration tools proactively. Don't guess — look.
+- When a user asks about code, READ the actual files before answering.
+- When planning a code task, GREP and READ to find existing patterns.
+- When detecting conflicts, LIST active threads and compare file lists.
+- Never make claims about code you haven't read with ReadFile.
+- Never propose changes to files you haven't read.
 
 Your job is to fully define the task before handing it to Claude.
 Claude should NEVER need to ask "what do you mean?" or "what should
@@ -1906,10 +2222,17 @@ this do?". By the time Claude starts, the task must be unambiguous.
 
 Workflow:
 1. Understand what the user wants — ask questions until it's clear
-2. If it's a question → answer it directly (read files, check docs)
-3. If it involves creating images/visual assets:
-   a. Scan the codebase for context (existing assets, styles, where
-      images are used, project name, branding)
+2. Explore the codebase with your tools to build context:
+   - ListFiles to understand project structure
+   - Grep to find relevant code
+   - ReadFile to understand implementations
+   - GitLog to see recent changes
+   - ReadMemory for project conventions
+3. If it's a question → answer it directly (you have the tools to read
+   any file and search anything — no need for Claude)
+4. If it involves creating images/visual assets:
+   a. Scan the codebase for context (Grep for existing assets, ReadFile
+      for styles, check where images are used)
    b. Generate/edit the image with a context-aware prompt
    c. Show the result in Slack
    d. Ask the user what to do next:
@@ -1918,18 +2241,18 @@ Workflow:
       - Push to repo → create branch, commit image, open PR
       - Continue with Claude → build a plan that uses the image
    e. The user drives — you don't assume which path
-4. If it's a code task → scan the codebase, then propose a plan:
-   - Which files will be created/modified
+5. If it's a code task → explore with tools, then propose a plan:
+   - Which files will be created/modified (cite line numbers from ReadFile)
    - What specifically changes in each file
-   - What patterns to follow (reference existing code)
+   - What patterns to follow (reference actual code you read)
    - What edge cases to handle
    - What tests to add
-5. If the request is vague, ask follow-up questions. Be specific:
+6. If the request is vague, ask follow-up questions. Be specific:
    BAD:  "Can you give more details?"
-   GOOD: "I see auth/login.go returns a JWT. Should registration
-          also return a JWT, or redirect to /login?"
-6. Present the plan and wait for approval
-7. If the user adjusts, update the plan and re-present
+   GOOD: "I see auth/login.go:58 returns a JWT (I just read it).
+          Should registration also return a JWT, or redirect to /login?"
+7. Present the plan and wait for approval
+8. If the user adjusts, update the plan and re-present
 
 Image generation can happen at any point during Phase 1. You might
 generate an image as part of planning (e.g., "here's the icon, now
@@ -1941,7 +2264,7 @@ questions ("bcrypt or argon2?") are fine — scope questions ("what
 fields should User have?") mean your plan wasn't complete enough.
 
 Repository: {repo_path}
-Memory: {memory.md contents}
+
 ```
 
 #### Implementation
@@ -1950,10 +2273,16 @@ Memory: {memory.md contents}
 // internal/productmanager/responder.go
 
 // Respond handles a message in the product manager (Kimi) phase.
-// Uses the ProductManager interface — works with any provider.
-// Returns the response text and optionally a plan.
+// Uses ChatWithTools — the PM explores the repo autonomously via tools
+// (ReadFile, Grep, GitLog, etc.) before responding.
 func Respond(ctx context.Context, pm models.ProductManager, repoDir string,
-    history []models.Message, newMessage string, memory string) (response string, plan *Plan, err error)
+    history []models.Message, newMessage string) (response string, plan *Plan, err error) {
+
+    tools := tools.PMTools(repoDir)   // read-only tools sandboxed to repoDir
+    msgs := append(history, models.Message{Role: "user", Content: newMessage})
+    text, err := pm.ChatWithTools(ctx, kimiSystemPrompt, msgs, tools)
+    // Parse plan from response if present...
+}
 
 type Plan struct {
     Summary   string   // one-line description
@@ -1963,6 +2292,10 @@ type Plan struct {
     Estimated string   // "~3 Claude turns"
 }
 ```
+
+Note: the `memory` parameter is gone from `Respond()` — the PM reads memory
+itself via the `ReadMemory` tool when it needs it, instead of always receiving
+the full file. This means the PM only loads memory when relevant, saving tokens.
 
 ### 24.3 The Approval Gate
 
@@ -2476,7 +2809,7 @@ Respond with JSON:
   - `NotifyRebase(slackClient, threadTS string, mergedPR int)`
   - `PostMergeOrder(slackClient, channelID string, steps []MergeStep)`
 
-### 24.6 Cost Dashboard
+### 24.6 Cost Dashboard & Thread Usage Report
 
 Track and display cost per model, per thread, per day:
 
@@ -2497,6 +2830,183 @@ Daily: Claude $12.40 · Kimi $0.15 · Images $0.18 · Whisper $0.02 · Total $12
 
 Exposed in the web dashboard (`/api/costs`) and optionally posted
 to Slack weekly.
+
+#### Thread Usage Report (posted at close)
+
+When a thread closes (merge/done), the PM posts a usage summary in the
+thread before cleanup. This shows exactly where tokens went and helps
+the user learn to interact more efficiently with the PM.
+
+```
+📊 *Thread Summary: "fix login bug"*
+
+*PM (Kimi)*
+  Calls: 4 (3 conversation + 1 memory extraction)
+  Tools used: Grep ×2, ReadFile ×3, GitLog ×1
+  Tokens: 2,340 in → 1,180 out
+  Cost: $0.004
+
+*Coder (Claude)*
+  Calls: 1 (5 turns)
+  Tokens: 18,400 in → 6,200 out
+  Cost: $0.62
+
+*Total: $0.624*
+
+💡 *Tips for next time:*
+  • You gave a vague request ("fix the login bug") which required 2
+    clarification rounds. Try: "fix the session expiry bug in auth/session.go"
+  • The PM explored 6 files to find the issue. If you know the file,
+    mention it — saves ~3 tool calls.
+```
+
+The tips are generated by the PM itself, analyzing the thread conversation
+to identify where the user could have been more specific. This is a learning
+loop: the user gets better at prompting, the PM needs fewer tool calls,
+threads get cheaper.
+
+#### What Gets Tracked (per thread)
+
+```go
+// internal/models/interfaces.go (additions to existing types)
+
+type ThreadUsage struct {
+    ThreadTS   string
+    Summary    string        // one-line thread description
+
+    PM         ModelUsage    // all PM calls in this thread
+    Coder      ModelUsage    // all Coder calls
+    Artist     ModelUsage    // all Artist calls (image gen)
+    Whisper    ModelUsage    // voice transcription
+
+    ToolCalls  []ToolUsage   // breakdown of PM tool calls
+}
+
+type ModelUsage struct {
+    Calls        int           // number of API calls
+    TokensIn     int           // prompt tokens (sum across all calls)
+    TokensOut    int           // completion tokens
+    Cost         float64       // estimated cost (USD)
+    Duration     time.Duration // wall clock time
+}
+
+type ToolUsage struct {
+    Name   string // "ReadFile", "Grep", etc.
+    Count  int    // how many times called
+}
+```
+
+#### How Tokens Are Tracked
+
+The OpenAI API returns `usage.prompt_tokens` and `usage.completion_tokens`
+in every response. The shared client accumulates these per-thread:
+
+```go
+// internal/provider/openai/client.go
+
+type ChatResponse struct {
+    // ... existing fields ...
+    Usage *Usage `json:"usage"`
+}
+
+type Usage struct {
+    PromptTokens     int `json:"prompt_tokens"`
+    CompletionTokens int `json:"completion_tokens"`
+    TotalTokens      int `json:"total_tokens"`
+}
+```
+
+For Claude (Coder), the `claude -p --output-format json` response already
+includes `num_turns` and cost data in the result JSON. The agent parser
+extracts this.
+
+The daemon maintains a `ThreadUsage` struct per active thread, updated
+after every API call. At thread close, the PM reads this data and
+generates the summary + tips.
+
+#### The Tips: How the PM Generates Them
+
+The PM analyzes the thread conversation to generate actionable tips.
+This is a separate `Chat` call (not `ChatWithTools` — no tools needed):
+
+```
+System: "Analyze this thread conversation and generate 1-3 actionable
+tips for the user to interact more efficiently next time. Focus on:
+- Was the initial request vague? Suggest how to be more specific.
+- Did the PM need many tool calls to find context? Suggest mentioning
+  file names or areas of the codebase.
+- Did the user change requirements after Claude started? Suggest
+  defining scope better upfront.
+- Was the task simple enough that the user could have been more direct?
+Be concrete and reference the actual conversation. Keep each tip
+to 1-2 sentences."
+
+User: {full thread conversation + usage data}
+```
+
+#### Conversation Examples
+
+**Efficient thread (short report, no tips):**
+```
+📊 *Thread Summary: "add CORS header to /api/ endpoints"*
+
+*PM (Kimi)*
+  Calls: 2 (1 conversation + 1 memory)
+  Tools used: Grep ×1, ReadFile ×1
+  Tokens: 890 in → 420 out · $0.001
+
+*Coder (Claude)*
+  Calls: 1 (3 turns)
+  Tokens: 12,100 in → 4,800 out · $0.38
+
+*Total: $0.381*
+
+✅ Efficient thread — clear request with file context.
+```
+
+**Question-only thread (no Claude):**
+```
+📊 *Thread Summary: "how do we handle auth tokens?"*
+
+*PM (Kimi)*
+  Calls: 2 (1 conversation + 1 memory)
+  Tools used: Grep ×1, ReadFile ×2
+  Tokens: 1,200 in → 680 out · $0.002
+
+*Coder (Claude)*
+  Not used — PM answered directly.
+
+*Total: $0.002*
+```
+
+**Expensive thread (lots of tips):**
+```
+📊 *Thread Summary: "refactor the whole auth module"*
+
+*PM (Kimi)*
+  Calls: 6 (5 conversation + 1 memory)
+  Tools used: ListFiles ×1, Grep ×4, ReadFile ×8, GitLog ×2
+  Tokens: 8,400 in → 3,200 out · $0.012
+
+*Coder (Claude)*
+  Calls: 3 (12 turns total)
+  Tokens: 68,000 in → 24,000 out · $2.84
+
+*Total: $2.852*
+
+💡 *Tips for next time:*
+  • Your initial request was broad ("refactor the whole auth module").
+    The PM needed 15 tool calls to understand scope. Try breaking it
+    into smaller tasks: "extract session logic from auth/login.go
+    into its own file".
+  • You changed requirements twice after Claude started ("actually
+    also change the middleware", "wait, keep the old API"). Each
+    change cost ~$0.80 in Claude turns. Finalize scope with the PM
+    before approving.
+  • The PM read 8 files to understand the auth module. Consider
+    asking about specific files first: "what does auth/middleware.go
+    do?" — the PM answers these for free.
+```
 
 ### 24.7 The Full Pipeline
 
@@ -2589,6 +3099,7 @@ and even push assets to the repo without Claude.
     ║  User: "merge" / "done" / "dale"     ║
     ║      ↓                               ║
     ║  Kimi: generate summary → PR desc    ║
+    ║  Kimi: post thread usage report      ║
     ║  gh pr merge --squash                ║
     ║  Delete branch + worktree            ║
     ║                                      ║
@@ -2619,13 +3130,43 @@ touching the daemon code.
 // Today: Kimi. Tomorrow: GPT-4o-mini, DeepSeek, Gemini, local LLM.
 type ProductManager interface {
     // Chat sends a message and returns the response text.
+    // Use for simple operations: memory extraction, summarization, routing.
     Chat(ctx context.Context, system string, messages []Message) (string, error)
 
     // ChatJSON sends a message and parses the response as JSON.
     ChatJSON(ctx context.Context, system string, messages []Message, out interface{}) error
 
+    // ChatWithTools runs the tool-calling loop: the PM can autonomously
+    // call read-only tools (ReadFile, Grep, GitLog, etc.) to explore the
+    // codebase until it produces a final text response.
+    // Use for: Phase 1 conversation (Kimi exploring and planning).
+    // See section 24.1 for tool definitions and safety guarantees.
+    ChatWithTools(ctx context.Context, system string, messages []Message, tools []Tool) (string, error)
+
     // Name returns the provider name for logging.
     Name() string
+}
+
+// Tool defines a function-calling tool available to the ProductManager.
+// Tools are defined in section 24.1 (ReadFile, Grep, ListFiles, etc.)
+type Tool struct {
+    Name        string                 // e.g. "ReadFile", "Grep"
+    Description string                 // shown to the LLM
+    Parameters  map[string]interface{} // JSON Schema for arguments
+}
+
+// ToolCall represents a tool invocation requested by the LLM.
+type ToolCall struct {
+    ID        string // provider-assigned call ID
+    Name      string // tool name (must match a Tool.Name)
+    Arguments string // raw JSON arguments
+}
+
+// ToolResult is the output of executing a tool call.
+type ToolResult struct {
+    CallID  string // matches ToolCall.ID
+    Content string // text output (file contents, grep matches, etc.)
+    IsError bool   // true if the tool call failed
 }
 
 // Artist handles image generation and editing.
@@ -2769,12 +3310,13 @@ formatting, response parsing) but **zero HTTP/auth code**.
 // ~30 lines of code — just translates between types.
 
 type ProductManagerAdapter struct {
-    client *Client   // shared
-    model  string    // "gpt-4o-mini", "moonshot-v1-8k", etc.
+    client  *Client   // shared HTTP client
+    model   string    // "gpt-4o-mini", "moonshot-v1-8k", etc.
+    repoDir string    // repo root for tool execution
 }
 
-func NewProductManager(client *Client, model string) models.ProductManager {
-    return &ProductManagerAdapter{client: client, model: model}
+func NewProductManager(client *Client, model, repoDir string) models.ProductManager {
+    return &ProductManagerAdapter{client: client, model: model, repoDir: repoDir}
 }
 
 func (a *ProductManagerAdapter) Chat(ctx context.Context, system string,
@@ -2788,6 +3330,15 @@ func (a *ProductManagerAdapter) ChatJSON(ctx context.Context, system string,
     messages []models.Message, out interface{}) error {
     // Same, but parse JSON response
     return a.client.ChatCompletionJSON(ctx, req, out)
+}
+
+func (a *ProductManagerAdapter) ChatWithTools(ctx context.Context, system string,
+    messages []models.Message, tools []models.Tool) (string, error) {
+    // Create executor sandboxed to a.repoDir
+    // Run tools.RunLoop() with a.client as ChatFunc
+    // See section 24.1 for the loop implementation
+    executor := tools.NewExecutor(a.repoDir)
+    return tools.RunLoop(ctx, a.chatFn, executor, system, messages, tools, 15)
 }
 
 func (a *ProductManagerAdapter) Name() string { return "openai:" + a.model }
@@ -2867,7 +3418,7 @@ func NewDaemon(cfg Config) *Daemon {
     openaiClient := openai.NewOpenAI(cfg.OpenAI.APIKey)
 
     return &Daemon{
-        productManager: openai.NewProductManager(openaiClient, "gpt-4o-mini"),
+        productManager: openai.NewProductManager(openaiClient, "gpt-4o-mini", cfg.RepoDir),
         artist:       openai.NewArtist(openaiClient, "gpt-image-1"),
         coder:        claude.NewCLICoder(cfg.Coder),  // different provider
         // ...
@@ -2882,7 +3433,7 @@ If you use Kimi as product manager + OpenAI for images:
     openaiClient := openai.NewOpenAI(cfg.OpenAI.APIKey)
 
     return &Daemon{
-        productManager: openai.NewProductManager(kimiClient, "moonshot-v1-8k"),
+        productManager: openai.NewProductManager(kimiClient, "moonshot-v1-8k", cfg.RepoDir),
         artist:       openai.NewArtist(openaiClient, "gpt-image-1"),
         coder:        claude.NewCLICoder(cfg.Coder),
     }
@@ -2894,7 +3445,7 @@ If you use OpenAI for all three:
     client := openai.NewOpenAI(cfg.OpenAI.APIKey)  // ONE client
 
     return &Daemon{
-        productManager: openai.NewProductManager(client, "gpt-4o-mini"),
+        productManager: openai.NewProductManager(client, "gpt-4o-mini", cfg.RepoDir),
         artist:       openai.NewArtist(client, "gpt-image-1"),
         coder:        openai.NewCoder(client, "codex-mini"),  // future
     }
@@ -2935,7 +3486,9 @@ are OpenAI-compatible and share the same client code.
 // It only talks to interfaces.
 
 func (d *Daemon) runKimi(thread *Thread, msg Message) {
-    resp, _ := d.productManager.Chat(ctx, systemPrompt, thread.KimiHistory)
+    // Phase 1: PM explores the repo autonomously via tools
+    tools := tools.PMTools(d.repoDir)
+    resp, _ := d.productManager.ChatWithTools(ctx, systemPrompt, thread.KimiHistory, tools)
     // ...
 }
 
@@ -3030,9 +3583,10 @@ The orchestration layer is invisible to the user. They still talk to
 "the bot" in Slack. They don't know (or care) that Kimi triaged their
 message, enriched the prompt, and extracted memory afterward.
 
-The coder is the only model that touches code. The product manager and
-artist never write code, never run tools, never modify files. They
-only read, classify, summarize, generate images, and plan.
+The coder is the only model that touches code. The product manager runs
+**read-only tools** (ReadFile, Grep, GitLog — see section 24.1) to explore
+the codebase, but never writes, edits, or deletes anything. The artist
+generates images but never modifies code. Only the coder writes code.
 
 ---
 
@@ -3292,22 +3846,26 @@ func (d *Daemon) onUserClose(threadTS string) {
     // 1. Generate PR summary → update PR description
     d.updatePRDescription(threadTS, scope.PRNumber)
 
-    // 2. Merge the PR
+    // 2. Post thread usage report (tokens, costs, tips)
+    //    See section 24.6 for format details.
+    d.postThreadUsageReport(threadTS, scope)
+
+    // 3. Merge the PR
     d.github.MergePR(scope.PRNumber) // gh pr merge --squash
 
-    // 3. Notify in thread
+    // 4. Notify in thread
     d.slack.SendMessage(scope.ChannelID,
         fmt.Sprintf("PR #%d merged. Thread closed.", scope.PRNumber),
         threadTS)
 
-    // 4. Cleanup: delete remote branch + remove worktree
+    // 5. Cleanup: delete remote branch + remove worktree
     d.github.DeleteBranch(scope.Branch)
     worktree.Remove(d.repoDir, scope.Branch)
 
-    // 5. Remove from active tracking
+    // 6. Remove from active tracking
     d.tracker.Close(threadTS)
 
-    // 6. Notify overlapping threads to rebase
+    // 7. Notify overlapping threads to rebase
     d.notifyOverlappingThreads(scope)
 }
 ```
@@ -3463,7 +4021,8 @@ the 1:1:1 rule (that PR is already merged). Instead, they start a
 |---|---|---|
 | `internal/slack/snippets.go` | Code block extraction, size-based routing | Markdown input → expected snippets output |
 | `internal/router/router.go` | Message classification | Mock LLM client, verify routing decisions |
-| `internal/preflight/preflight.go` | Prompt enrichment | Mock grep/git results, verify enriched prompt |
+| `internal/tools/executor.go` | Tool execution (ReadFile, Grep, etc.) | Create temp repo, verify sandboxing, output limits |
+| `internal/tools/loop.go` | Tool-calling loop | Mock ChatFunc, verify iteration, truncation, max-iter |
 | `internal/conflicts/tracker.go` | File overlap detection, merge ordering | In-memory tracker with test data |
 | `internal/github/github.go` | PR detection, merge polling | Regex tests + mock `gh` output |
 | `internal/ratelimit/limiter.go` | Rate limiting logic | Time-based tests with controlled clock |
@@ -3513,7 +4072,8 @@ Two levels of testing:
 
 // MockProductManager implements models.ProductManager
 type MockProductManager struct {
-    Responses map[string]string
+    Responses     map[string]string  // keyword → response (for Chat)
+    ToolResponses map[string]string  // keyword → response (for ChatWithTools)
 }
 
 func (m *MockProductManager) Chat(ctx context.Context, system string, msgs []Message) (string, error) {
@@ -3524,6 +4084,24 @@ func (m *MockProductManager) Chat(ctx context.Context, system string, msgs []Mes
     }
     return `{"route": "code_task"}`, nil
 }
+
+func (m *MockProductManager) ChatJSON(ctx context.Context, system string, msgs []Message, out interface{}) error {
+    text, err := m.Chat(ctx, system, msgs)
+    if err != nil { return err }
+    return json.Unmarshal([]byte(text), out)
+}
+
+func (m *MockProductManager) ChatWithTools(ctx context.Context, system string, msgs []Message, tools []Tool) (string, error) {
+    // Mock skips tool execution — returns canned response directly.
+    // For tool-loop testing, use the httptest-based shared client mock instead.
+    for key, resp := range m.ToolResponses {
+        if strings.Contains(msgs[len(msgs)-1].Content, key) {
+            return resp, nil
+        }
+    }
+    return m.Chat(ctx, system, msgs)
+}
+
 func (m *MockProductManager) Name() string { return "mock-product-manager" }
 
 // MockArtist implements models.Artist
