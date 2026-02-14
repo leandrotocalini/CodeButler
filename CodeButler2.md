@@ -242,6 +242,7 @@ CREATE TABLE sessions (
 | `internal/provider/openai/artist.go` | Thin adapter: shared client → Artist interface |
 | `internal/provider/openai/coder.go` | Thin adapter: shared client → Coder interface (future) |
 | `internal/provider/claude/coder.go` | Claude CLI Coder (exec.Command, not HTTP) |
+| `internal/provider/claude/product_manager.go` | Claude CLI as PM (read-only mode, same binary, PM system prompt) |
 | `internal/tools/definition.go` | PM tool definitions (ReadFile, Grep, ListFiles, etc.) + PMTools() factory |
 | `internal/tools/executor.go` | Sandboxed tool execution: read files, grep, git ops — all read-only |
 | `internal/tools/loop.go` | Provider-agnostic tool-calling loop (ChatFunc + Executor → final response) |
@@ -4313,47 +4314,39 @@ When you use OpenAI for everything, the wiring looks like this:
 
 ```go
 // internal/daemon/daemon.go — initialization
+// See 24.9 for the full PM pool initialization.
+// The daemon holds a pool of PM models, not a single one.
 
 func NewDaemon(cfg Config) *Daemon {
-    // If productManager and artist both use OpenAI,
-    // they SHARE the same underlying client.
-    openaiClient := openai.NewOpenAI(cfg.OpenAI.APIKey)
-
-    return &Daemon{
-        productManager: openai.NewProductManager(openaiClient, "gpt-4o-mini", cfg.RepoDir),
-        artist:       openai.NewArtist(openaiClient, "gpt-image-1"),
-        coder:        claude.NewCLICoder(cfg.Coder),  // different provider
-        // ...
+    d := &Daemon{
+        pmModels:  buildPMPool(cfg),      // map[string]models.ProductManager
+        pmDefault: cfg.ProductManager.Default,
+        artist:    buildArtist(cfg),       // single artist
+        coder:     claude.NewCLICoder(cfg.Coder),
     }
+    return d
+}
+
+// Getting the PM for a thread:
+func (d *Daemon) pmForThread(thread *Thread) models.ProductManager {
+    return d.pmModels[thread.ActivePM]
 }
 ```
 
-If you use Kimi as product manager + OpenAI for images:
+**Typical config: Kimi default + Claude pro + OpenAI for images:**
 
 ```go
-    kimiClient   := openai.NewKimi(cfg.Kimi.APIKey)
-    openaiClient := openai.NewOpenAI(cfg.OpenAI.APIKey)
-
-    return &Daemon{
-        productManager: openai.NewProductManager(kimiClient, "moonshot-v1-8k", cfg.RepoDir),
-        artist:       openai.NewArtist(openaiClient, "gpt-image-1"),
-        coder:        claude.NewCLICoder(cfg.Coder),
+    pmModels = {
+        "kimi":      openai.NewProductManager(kimiClient, "moonshot-v1-8k", repoDir),
+        "claude":    claude.NewCLIProductManager(repoDir, "claude-sonnet-4-5-20250929"),
+        "gpt4o-mini": openai.NewProductManager(openaiClient, "gpt-4o-mini", repoDir),
     }
+    artist = openai.NewArtist(openaiClient, "gpt-image-1")
+    coder  = claude.NewCLICoder(coderCfg)
 ```
 
-If you use OpenAI for all three:
-
-```go
-    client := openai.NewOpenAI(cfg.OpenAI.APIKey)  // ONE client
-
-    return &Daemon{
-        productManager: openai.NewProductManager(client, "gpt-4o-mini", cfg.RepoDir),
-        artist:       openai.NewArtist(client, "gpt-image-1"),
-        coder:        openai.NewCoder(client, "codex-mini"),  // future
-    }
-```
-
-**One `*http.Client`, one API key, one rate limiter. Three roles.**
+When providers share an API key, the daemon still reuses the same
+`*http.Client` across all adapters that share the key.
 
 #### Non-OpenAI Providers
 
@@ -4369,6 +4362,7 @@ internal/provider/
     coder.go       ← thin adapter → models.Coder (future)
   claude/          ← exec-based, no HTTP client
     coder.go       ← CLI wrapper → models.Coder
+    product_manager.go ← CLI wrapper → models.ProductManager (Claude as PM)
   stability/       ← different API, own client
     client.go      ← Stability AI HTTP client
     artist.go      ← adapter → models.Artist
@@ -4387,10 +4381,12 @@ are OpenAI-compatible and share the same client code.
 // The daemon never knows which provider is behind each role.
 // It only talks to interfaces.
 
-func (d *Daemon) runKimi(thread *Thread, msg Message) {
-    // Phase 1: PM explores the repo autonomously via tools
-    tools := tools.PMTools(d.repoDir)
-    resp, _ := d.productManager.ChatWithTools(ctx, systemPrompt, thread.KimiHistory, tools)
+func (d *Daemon) runPM(thread *Thread, msg Message) {
+    // Phase 1: PM explores the repo autonomously via tools.
+    // Uses whichever PM model is active for this thread.
+    pm := d.pmForThread(thread)
+    pmTools := tools.PMTools(d.repoDir)
+    resp, _ := pm.ChatWithTools(ctx, systemPrompt, thread.PMHistory, pmTools)
     // ...
 }
 
@@ -4405,16 +4401,40 @@ func (d *Daemon) startClaude(thread *Thread) {
 }
 ```
 
-### 24.9 Config
+### 24.9 Config — PM Model Pool + Hot Swap
+
+The PM role is not tied to one model. The config defines a **pool of
+PM models** with a default. Users can switch between them mid-thread
+via a Slack command.
 
 ```json
 // ~/.codebutler/config.json (global)
 {
   "productManager": {
-    "provider": "kimi",
-    "apiKey": "...",
-    "model": "moonshot-v1-8k",
-    "conflictDetection": true
+    "default": "kimi",
+    "conflictDetection": true,
+    "models": {
+      "kimi": {
+        "provider": "kimi",
+        "apiKey": "...",
+        "model": "moonshot-v1-8k",
+        "label": "Kimi",
+        "costPerMToken": 0.02
+      },
+      "claude": {
+        "provider": "claude-cli",
+        "model": "claude-sonnet-4-5-20250929",
+        "label": "Claude (Pro)",
+        "costPerMToken": 3.00
+      },
+      "gpt4o-mini": {
+        "provider": "openai",
+        "apiKey": "sk-...",
+        "model": "gpt-4o-mini",
+        "label": "GPT-4o Mini",
+        "costPerMToken": 0.15
+      }
+    }
   },
   "artist": {
     "provider": "openai",
@@ -4430,65 +4450,323 @@ func (d *Daemon) startClaude(thread *Thread) {
 }
 ```
 
-When two roles share the same provider and API key, the daemon detects
-this and creates a single shared client automatically:
+**Key design decisions:**
 
-```json
-// All OpenAI — one API key, one shared client
-{
-  "productManager": { "provider": "openai", "model": "gpt-4o-mini", "apiKey": "sk-..." },
-  "artist":       { "provider": "openai", "model": "gpt-image-1", "apiKey": "sk-..." },
-  "coder":        { "provider": "openai", "model": "codex-mini",  "apiKey": "sk-..." }
-}
+- **Default is cheap** (Kimi). 90% of PM work is routine: grep, read,
+  propose plan. Kimi handles this fine at $0.001/message.
+- **Claude as PM is available for hard tasks.** Complex architecture
+  decisions, subtle bugs, cross-cutting refactors — when the user wants
+  a smarter brain, they switch. $0.01-0.05/message.
+- **Switch is per-thread.** Thread A can use Kimi while Thread B uses
+  Claude. They're independent.
+- **Switch is instant.** The new model gets the full conversation history.
+  No context is lost.
+- **Switch back anytime.** Use Claude to think through the hard part,
+  switch back to Kimi for the mechanical planning.
+
+#### The `/pm` Command
+
+Users switch PM models mid-conversation with a Slack command:
+
+```
+/pm                     → show current PM model + available options
+/pm claude              → switch to Claude as PM for this thread
+/pm kimi                → switch back to Kimi
+/pm gpt4o-mini          → switch to GPT-4o Mini
+```
+
+**What happens on switch:**
+
+```
+User: /pm claude
+PM: "🔄 Switched to *Claude (Pro)* for this thread.
+     I have the full conversation so far. What do you need?"
+```
+
+The new PM model receives:
+1. The full system prompt (same for all PM models)
+2. The complete conversation history (all user + PM messages)
+3. The tool definitions (same tools available to all PM models)
+4. Memory files (same memory available to all PM models)
+
+Nothing is lost. The new model picks up exactly where the old one
+left off — it just thinks differently.
+
+#### When to Switch — The User Decides
+
+```
+Routine bugfix (stay on Kimi):
+  User: "fix the typo in the README"
+  PM (Kimi): "Found it. Line 42, 'teh' → 'the'. Say *yes*."
+  → No need for Claude. $0.001.
+
+Complex architecture (switch to Claude):
+  User: "we need to redesign the auth system to support SSO"
+  PM (Kimi): "I see the auth module. There's login.go, session.go,
+     middleware.go. What SSO provider?"
+  User: /pm claude
+  PM (Claude): "🔄 Switched. Looking at the full auth architecture...
+     I see three approaches:
+     1. SAML-based SSO via auth middleware — minimal changes
+     2. OAuth2 + OIDC — more flexible, requires new dependencies
+     3. Auth0/Okta integration — fastest but vendor lock-in
+     Given your JWT pattern (memory-pm.md) and chi router, I'd
+     recommend approach 2. Here's a detailed plan:
+     [detailed multi-file plan with trade-offs]
+     Say *yes* to start."
+  → Claude's deeper reasoning justifies the $0.05 cost.
+
+Switch mid-planning:
+  User: "add a notification system"
+  PM (Kimi): "I see the project doesn't have notifications yet.
+     What kind? Email? Push? In-app?"
+  User: "in-app, real-time, with WebSockets"
+  User: /pm claude
+  PM (Claude): "🔄 Switched. I've read the full conversation.
+     Real-time in-app notifications with WebSockets — here's what I'd do:
+     [reads existing WebSocket code if any, checks go.mod for ws libs,
+      proposes architecture with channels, subscriptions, and persistence]"
+  User: "perfect, that's the plan"
+  User: /pm kimi
+  PM (Kimi): "🔄 Switched back. I have the plan Claude laid out.
+     Ready to refine details or start Coder. Say *yes*."
+  → Claude designed, Kimi manages execution. Best of both worlds.
+
+Switch for summary:
+  User: "merge"
+  → PM (Kimi) does the standard memory extraction
+  OR
+  User: /pm claude
+  User: "merge"
+  → PM (Claude) does the memory extraction with deeper analysis
+```
+
+#### Claude as PM — How It Works Technically
+
+Claude as PM uses `claude -p` with the PM system prompt and read-only
+permissions. This is fundamentally different from Claude as Coder:
+
+```
+Claude as Coder:
+  claude -p "<task>" --output-format json --permission-mode bypassPermissions
+  → Can edit files, run tests, create PRs
+  → Full coding agent with all tools
+
+Claude as PM:
+  claude -p "<message>" --output-format json --permission-mode default
+  → Read-only: can ReadFile, Grep, list files, git log
+  → CANNOT edit, write, delete, or run commands
+  → Same restrictions as Kimi — only the brain changes
 ```
 
 ```go
-// Provider factory detects shared keys and reuses clients
-func BuildProviders(cfg Config) (models.ProductManager, models.Artist, models.Coder) {
-    clients := map[string]*openai.Client{} // key = baseURL+apiKey
+// internal/provider/claude/product_manager.go
+//
+// Claude CLI as ProductManager — same claude binary, different mode.
+// Uses exec.Command like the Coder, but with PM system prompt and
+// read-only tools.
 
-    getOrCreate := func(baseURL, apiKey string) *openai.Client {
-        key := baseURL + "|" + apiKey
-        if c, ok := clients[key]; ok {
-            return c  // reuse existing client
-        }
-        c := openai.NewClient(baseURL, apiKey)
-        clients[key] = c
-        return c
-    }
-    // ...
+type CLIProductManager struct {
+    repoDir string
+    model   string // "claude-sonnet-4-5-20250929", etc.
+}
+
+func NewCLIProductManager(repoDir, model string) models.ProductManager {
+    return &CLIProductManager{repoDir: repoDir, model: model}
+}
+
+func (c *CLIProductManager) Chat(ctx context.Context, system string,
+    messages []models.Message) (string, error) {
+    // Build prompt from system + messages
+    // Spawn: claude -p "<prompt>" --output-format json --model <model>
+    // Parse JSON response
+}
+
+func (c *CLIProductManager) ChatWithTools(ctx context.Context, system string,
+    messages []models.Message, tools []models.Tool) (string, error) {
+    // Claude CLI handles tool-calling natively — no need for our own
+    // tool loop. Pass the PM tool definitions and let Claude call them.
+    // The tools are still sandboxed read-only by the executor.
+}
+
+func (c *CLIProductManager) Name() string {
+    return "claude-cli:" + c.model
 }
 ```
 
-The product manager is **required** in v2. Kimi-first is the core interaction
-model, not an optional optimization. Without it, messages would go directly
-to Claude — which defeats the architecture.
+**Key insight:** When Claude is the PM, it uses its own built-in tool-calling
+which is more sophisticated than the API-based loop. It can reason about
+which tools to call, chain them naturally, and produce better plans. This
+is why Claude as PM is worth the extra cost for complex tasks.
+
+#### The PM Model Pool
+
+The daemon initializes ALL configured PM models at startup and keeps
+them ready. Switching is just changing a pointer — no initialization cost.
+
+```go
+// internal/daemon/daemon.go
+
+type Daemon struct {
+    // PM model pool — all initialized at startup
+    pmModels    map[string]models.ProductManager // "kimi", "claude", "gpt4o-mini"
+    pmDefault   string                           // config default
+
+    // Per-thread active PM
+    // (stored in thread state, not daemon-level)
+
+    artist      models.Artist
+    coder       models.Coder
+    // ...
+}
+
+func NewDaemon(cfg Config) *Daemon {
+    d := &Daemon{
+        pmModels:  make(map[string]models.ProductManager),
+        pmDefault: cfg.ProductManager.Default,
+    }
+
+    // Initialize all configured PM models
+    for name, pmCfg := range cfg.ProductManager.Models {
+        switch pmCfg.Provider {
+        case "kimi":
+            client := openai.NewKimi(pmCfg.APIKey)
+            d.pmModels[name] = openai.NewProductManager(client, pmCfg.Model, cfg.RepoDir)
+        case "openai":
+            client := openai.NewOpenAI(pmCfg.APIKey)
+            d.pmModels[name] = openai.NewProductManager(client, pmCfg.Model, cfg.RepoDir)
+        case "claude-cli":
+            d.pmModels[name] = claude.NewCLIProductManager(cfg.RepoDir, pmCfg.Model)
+        }
+    }
+
+    return d
+}
+```
+
+#### Thread State — Active PM Model
+
+Each thread tracks which PM model is currently active:
+
+```go
+// internal/conflicts/tracker.go (Thread struct additions)
+
+type Thread struct {
+    // ... existing fields ...
+    ActivePM     string   // current PM model name ("kimi", "claude", etc.)
+    PMHistory    []PMSwap // log of model switches for the usage report
+}
+
+type PMSwap struct {
+    At       time.Time
+    From     string // "kimi"
+    To       string // "claude"
+    Message  int    // message index where the switch happened
+}
+```
+
+When a thread starts, `ActivePM` is set to `pmDefault`. The `/pm`
+command updates it and logs the swap.
+
+#### Thread Usage Report — Multi-Model Breakdown
+
+When a thread uses multiple PM models, the report shows cost per model:
+
+```
+📊 *Thread Summary: "redesign auth for SSO"*
+
+*PM*
+  Kimi: 3 calls · $0.003 (initial exploration + memory)
+  Claude (Pro): 2 calls · $0.08 (architecture design)
+  Total PM: $0.083
+
+*Coder*
+  Calls: 2 (8 turns) · $1.20
+
+🔍 *Behind the scenes:*
+  1. Coder: "SAML or OAuth2 for SSO?"
+     → PM (Claude): "OAuth2+OIDC — we decided in the planning phase.
+       See the plan step 2."
+     ✅ Added to memory.
+
+*Total: $1.283*
+```
+
+#### Cost Controls
+
+To prevent accidental expensive usage, the config supports a cost cap:
+
+```json
+{
+  "productManager": {
+    "default": "kimi",
+    "models": { ... },
+    "costCap": {
+      "perThread": 0.50,
+      "perDay": 5.00,
+      "warnAt": 0.80
+    }
+  }
+}
+```
+
+- `perThread`: max PM cost per thread. At cap, PM warns and switches to default.
+- `perDay`: max PM cost across all threads. At cap, all threads use default.
+- `warnAt`: fraction (0-1) at which PM posts a cost warning in the thread.
+
+```
+PM (Claude): "⚠️ PM cost for this thread is $0.40 (cap: $0.50).
+  Switching back to Kimi to stay within budget.
+  Use /pm claude to override."
+```
+
+#### What This Changes
+
+The product manager is no longer a single model — it's a **role with a
+pool of brains**. The user picks the right brain for the job:
+
+- **Kimi** (default): fast, cheap, good for routine work. $0.001/msg.
+- **Claude** (pro): deep reasoning, complex architecture, subtle bugs. $0.01-0.05/msg.
+- **GPT-4o-mini**: middle ground, OpenAI ecosystem. $0.002/msg.
+- **DeepSeek, Gemini, local LLM**: future additions — just add to config.
+
+The switch command is deliberately simple (`/pm claude`) because switching
+should be frictionless. The user shouldn't have to think about it — they
+just notice "this is getting complex" and switch.
+
+When two roles share the same provider and API key, the daemon still
+detects this and creates a single shared client automatically.
 
 The artist is **optional**. If not configured, image generation is disabled
-and Kimi tells the user: "Image generation is not configured."
+and PM tells the user: "Image generation is not configured."
 
 The coder defaults to Claude CLI. It's the only battle-tested option today,
 but the interface exists so it can be swapped if needed.
 
-If the product manager API is down, the circuit breaker (section 25) kicks in
-and routes directly to Claude as a temporary fallback.
+If the default PM model is down, the circuit breaker (section 25) tries
+the next configured model before falling back to routing directly to the
+Coder.
 
 ### 24.10 What This Means for CodeButler's Identity
 
-CodeButler remains **Claude Code with extras**. The core loop is unchanged:
+CodeButler is a **multi-brain orchestrator** with Claude at its core.
 
 ```
-message → claude -p → response
+Default flow (cheap):    message → Kimi PM → plan → Claude Coder → result
+Pro flow (when needed):  message → Claude PM → plan → Claude Coder → result
+Mixed flow:              message → Kimi PM → /pm claude → Claude PM → plan → Kimi PM → Claude Coder → result
 ```
 
-The orchestration layer is invisible to the user. They still talk to
-"the bot" in Slack. They don't know (or care) that Kimi triaged their
-message, enriched the prompt, and extracted memory afterward.
+The user talks to "the bot" in Slack. They see role prefixes (PM:,
+Artist:, Coder:) and can switch the PM brain when they need more
+power. The orchestration is visible but not intrusive — like choosing
+between a calculator and a whiteboard.
 
-The coder is the only model that touches code. The product manager runs
-**read-only tools** (ReadFile, Grep, GitLog — see section 24.1) to explore
-the codebase, but never writes, edits, or deletes anything. The artist
-generates images but never modifies code. Only the coder writes code.
+The **Coder is always Claude**. It's the only model that touches code.
+The PM (any model) runs **read-only tools** to explore the codebase
+but never writes, edits, or deletes anything. The Artist generates
+images but never modifies code. The separation of powers is absolute:
+only the Coder writes, regardless of which brain the PM uses.
 
 ---
 
@@ -4553,27 +4831,23 @@ func (d *Daemon) Run() error {
 
 ### Model Fallback for ProductManager and Artist
 
-Each role can have a **fallback model** configured. If the primary fails,
-try the fallback before giving up. This is especially useful because PM
-and Artist use cheap models — having two options costs almost nothing.
+With the PM model pool (section 24.9), fallback is natural: if the
+active PM model fails, try the next one in the pool.
 
+The fallback chain:
+1. **Try active model** — whichever the thread is using (e.g., Kimi)
+2. **Try other pool models** — in order of cost (cheapest first)
+3. **Skip to Coder** — if all PM models fail, route directly to Coder (v1 behavior)
+
+For the Artist, a separate fallback is still configured:
 ```json
 {
-  "productManager": {
-    "provider": "openai", "model": "gpt-4o-mini", "apiKey": "sk-...",
-    "fallback": { "provider": "openai", "model": "gpt-4o", "apiKey": "sk-..." }
-  },
   "artist": {
     "provider": "openai", "model": "gpt-image-1", "apiKey": "sk-...",
     "fallback": { "provider": "stability", "model": "sd3", "apiKey": "sk-..." }
   }
 }
 ```
-
-The fallback chain:
-1. **Try primary** — e.g., Kimi (cheapest)
-2. **Try fallback** — e.g., GPT-4o-mini (still cheap)
-3. **Skip to Claude** — if both fail, route directly to Claude (v1 behavior)
 
 ### Circuit Breaker
 
