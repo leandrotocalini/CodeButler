@@ -106,39 +106,58 @@ Antes de que el daemon funcione, el usuario necesita crear una Slack App:
 }
 ```
 
-### Propuesta (`config.json`)
+### Propuesta: Config Global + Per-Repo
+
+Dos niveles de config. La global tiene las keys compartidas, la per-repo
+solo lo específico del canal. Per-repo puede override valores globales.
+
+**Global** (`~/.codebutler/config.json`) — se configura una sola vez:
 ```json
 {
   "slack": {
     "botToken": "xoxb-...",
-    "appToken": "xapp-...",
-    "channelID": "C0123ABCDEF",
-    "channelName": "codebutler-myrepo"
+    "appToken": "xapp-..."
   },
-  "claude":   { "maxTurns": 10, "timeout": 30, "permissionMode": "bypassPermissions" },
-  "openai":   { "apiKey": "sk-..." }
+  "openai": { "apiKey": "sk-..." }
 }
 ```
 
-**Cambios:**
+**Per-repo** (`<repo>/.codebutler/config.json`) — uno por repo:
+```json
+{
+  "slack": {
+    "channelID": "C0123ABCDEF",
+    "channelName": "codebutler-myrepo"
+  },
+  "claude": { "maxTurns": 10, "timeout": 30, "permissionMode": "bypassPermissions" }
+}
+```
+
+**Merge strategy**: per-repo override global (campo por campo).
+Si per-repo define `slack.botToken`, usa ese en vez del global.
+
+**Cambios vs actual:**
 - `whatsapp` → `slack`
 - `groupJID` → `channelID`
 - `groupName` → `channelName`
-- `botPrefix` → **eliminado** (Slack identifica bots por `bot_id`, no necesita prefijo)
-- Nuevos: `botToken`, `appToken`
+- `botPrefix` → **eliminado** (Slack identifica bots por `bot_id`)
+- Nuevos: `botToken`, `appToken` (en global)
+- `openai.apiKey` se mueve a global (compartido entre repos)
 
 ---
 
 ## 7. Storage Changes
 
-### Directorio `.codebutler/`
+### Directorios
 
 ```
-.codebutler/
-  config.json                    # channelID, tokens, Claude settings, OpenAI key
+~/.codebutler/
+  config.json                    # Global: tokens de Slack, OpenAI key
+
+<repo>/.codebutler/
+  config.json                    # Per-repo: channelID, Claude settings
   store.db                       # Messages + Claude session IDs (SQLite) — SIN CAMBIOS
   images/                        # Generated images — SIN CAMBIOS
-  whatsapp-session/session.db    # ELIMINAR (no hay sesión persistente en Slack)
 ```
 
 ### SQLite `messages` table
@@ -194,12 +213,12 @@ CREATE TABLE sessions (
 | Archivo | Cambios |
 |---------|---------|
 | `cmd/codebutler/main.go` | Setup wizard: pedir tokens en vez de QR, seleccionar canal en vez de grupo |
-| `internal/config/types.go` | `WhatsAppConfig` → `SlackConfig` con nuevos campos |
-| `internal/config/load.go` | Cargar/guardar nueva estructura |
+| `internal/config/types.go` | `WhatsAppConfig` → `SlackConfig`, separar `GlobalConfig` y `RepoConfig` |
+| `internal/config/load.go` | Load global (`~/.codebutler/`) + per-repo, merge, save ambos |
 | `internal/daemon/daemon.go` | Reemplazar `whatsapp.Client` por `slack.Client`, adaptar filtros |
 | `internal/daemon/imagecmd.go` | `SendImage` → Slack `files.upload` |
 | `internal/daemon/web.go` | Cambiar "WhatsApp state" por "Slack state" en status API |
-| `internal/store/store.go` | (Opcional) renombrar columnas |
+| `internal/store/store.go` | Renombrar columnas: `from_id`, `channel_id`, `platform_msg_id` |
 | `go.mod` / `go.sum` | Nuevas dependencias |
 
 ### Sin cambios
@@ -316,19 +335,30 @@ func (c *Client) GetChannelInfo(channelID string) (*Channel, error)
 6. Save config
 ```
 
-### Propuesto (Slack)
+### Propuesto (Slack) — con config global
+
+**Primera vez (no existe `~/.codebutler/config.json`):**
 ```
 1. Prompt: "Bot Token (xoxb-...):"
 2. Prompt: "App Token (xapp-...):"
 3. Validate tokens (api.AuthTest)
-4. Connect Socket Mode
-5. List channels → select or create
-6. (Optional) OpenAI API key
-7. Save config
+4. (Optional) Prompt: "OpenAI API key:"
+5. Save → ~/.codebutler/config.json (global)
+6. Connect Socket Mode
+7. List channels → select or create
+8. Save → <repo>/.codebutler/config.json (per-repo)
 ```
 
-**Diferencia clave**: no hay QR, no hay `botPrefix`. La autenticación es
-por tokens que el usuario copia de la Slack App config page.
+**Repos siguientes (global ya existe):**
+```
+1. Load ~/.codebutler/config.json → tokens ya configurados
+2. Connect Socket Mode
+3. List channels → select or create
+4. Save → <repo>/.codebutler/config.json (per-repo)
+```
+
+**Diferencia clave**: tokens y API keys se piden una sola vez y se guardan
+en `~/.codebutler/`. Cada repo solo configura su canal.
 
 ---
 
