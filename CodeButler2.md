@@ -571,6 +571,7 @@ This is the **central architectural decision** of CodeButler2.
 - [x] **Workflow planning**: Kimi generates execution plans for complex tasks, user approves before Claude runs
 - [x] **Thread = Branch = PR**: each thread creates exactly one branch, one PR. Non-negotiable 1:1:1 mapping
 - [x] **PR merged = thread closed**: merge is the only way a thread ends. No stale timeouts, no manual close
+- [x] **Cross-thread references**: link old threads/PRs in new thread for read-only context. Rule stays: 1 thread = 1 branch = 1 PR
 - [x] **Merge coordination**: Kimi suggests merge order + notifies threads to rebase after PR merge
 
 ---
@@ -2103,6 +2104,90 @@ codebutler --cleanup-orphans
 Lists worktrees with no PR and no activity in 30+ days.
 User confirms before deletion. The branch is NOT deleted — only the
 worktree. The user can always re-create the worktree from the branch.
+
+### Cross-Thread References
+
+A thread is isolated: 1 branch, 1 PR. But sometimes a new task needs
+context from a previous thread or PR. The user can **link** another
+thread to give Claude context without breaking the 1:1:1 rule.
+
+#### How It Works
+
+The user pastes a Slack thread link or PR URL in their message:
+
+```
+User (in new thread): "Add rate limiting to the auth endpoints.
+  Context: https://myworkspace.slack.com/archives/C0123/p1732456789123456"
+
+User (in new thread): "The login fix from PR #42 broke the remember-me
+  feature. Fix it. See: https://github.com/org/repo/pull/42"
+```
+
+The daemon detects the reference and fetches context:
+
+```
+Slack thread link → fetch thread messages via conversations.replies
+PR URL            → fetch PR description + diff via gh pr view
+history/ file     → read history/<threadTS>.md if it exists
+```
+
+This context is injected into Claude's prompt as **read-only background**:
+
+```
+CONTEXT FROM RELATED THREAD (read-only, for reference):
+---
+Thread "fix login bug" (PR #42, merged 2026-02-10):
+  - Fixed timezone comparison in auth/session.go
+  - Set cookie MaxAge to 30 days for remember-me
+  - Decision: kept session cookies (MaxAge=0) for non-remember-me
+---
+
+YOUR TASK (work in THIS thread's branch only):
+"The login fix from PR #42 broke the remember-me feature. Fix it."
+```
+
+#### The Rule Stays
+
+The reference is **read-only context**. Claude still works only in
+this thread's branch, this thread's worktree, this thread's PR.
+It cannot modify the referenced thread's branch or PR.
+
+```
+Thread A (closed): PR #42 "fix login"     ← referenced for context
+Thread B (new):    PR #45 "fix remember-me" ← all work happens here
+```
+
+#### Detection
+
+```go
+// internal/references/detect.go
+
+var (
+    slackThreadPattern = regexp.MustCompile(`https://\S+\.slack\.com/archives/(\w+)/p(\d+)`)
+    githubPRPattern    = regexp.MustCompile(`https://github\.com/[^/]+/[^/]+/pull/(\d+)`)
+)
+
+type Reference struct {
+    Type     string  // "thread" or "pr"
+    ThreadTS string  // for thread references
+    PRNumber int     // for PR references
+    Context  string  // fetched content (messages or PR diff)
+}
+
+func ExtractReferences(message string) []Reference
+func FetchContext(ref Reference, slackClient, repoDir string) (string, error)
+```
+
+#### Why This Is Better Than Resuming Old Threads
+
+The user could reply in the old closed thread, but that would violate
+the 1:1:1 rule (that PR is already merged). Instead, they start a
+**new thread** and link the old one. Clean separation:
+
+| Approach | Result |
+|---|---|
+| Reply in closed thread | Bot says "Thread closed. Start a new one." |
+| New thread + link old one | New branch, new PR, with context from old thread |
 
 ---
 
