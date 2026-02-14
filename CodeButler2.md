@@ -715,8 +715,8 @@ This is the **central architectural decision** of CodeButler2.
 - [x] **Markdown**: convert Claude output (standard Markdown) to Slack mrkdwn before sending
 - [x] **Code snippets**: short (<20 lines) inline, long (>=20 lines) as file upload
 - [x] **Knowledge sharing**: CLAUDE.md committed to branches, shared via PR merge
-- [x] **memory.md with approval**: after PR creation, Kimi proposes memory updates in thread, user approves/edits, committed to PR branch
-- [x] **Kimi self-improvement**: Kimi analyzes what Claude asked → adds "Planning Notes" so it handles it next time
+- [x] **memory.md with approval**: after PR creation, Claude (always) analyzes thread + diff → proposes memory updates in thread, user approves/edits, committed to PR branch
+- [x] **PM self-improvement**: memory extraction analyzes what Coder asked → adds "Planning Notes" so PM handles it next time
 - [x] **memory.md via git flow**: memory.md committed to repo, follows PR flow, merges to main with the PR
 - [x] **PR as journal**: thread summary goes in PR description (via `gh pr edit`), no files committed
 - [x] **Multi-model**: Claude executes code, cheap models (Kimi/GPT-4o-mini) orchestrate around it
@@ -825,41 +825,73 @@ Memory extraction triggers after a PR is created:
 3. **User says "done"** — for threads that don't produce a PR (questions,
    images shown in Slack only) → committed directly to main
 
+Memory extraction **always uses Claude** regardless of the thread's active
+PM model. This is a deliberate design choice:
+
+- Claude is the best model for identifying subtle patterns and learnings
+- The diff is complex code — Claude understands it better than any other model
+- The cost is one extra Claude call (~$0.02-0.05) — worth it for quality learnings
+- This is the most valuable output of the entire thread: the learnings compound
+
 When triggered, the daemon:
 
 1. Reads current `memory.md` from the PR branch
 2. Reads the full thread conversation (whatever phases occurred)
-3. Calls Kimi to analyze and propose memory updates
-4. **Posts the proposed changes in the Slack thread** for user review
-5. User approves, edits, or adds more learnings
-6. Daemon commits approved changes to `memory.md` on the PR branch and pushes
+3. **Gets the git diff** (`git diff main...<branch>`) to see exactly what changed
+4. **Calls Claude** (not the active PM) to analyze conversation + diff → propose memory updates
+5. **Posts the proposed changes in the Slack thread** for user review
+6. User approves, edits, or adds more learnings
+7. Daemon commits approved changes to `memory.md` on the PR branch and pushes
+
+Why the diff matters: the conversation shows what was *discussed*, but the
+diff shows what was *actually done*. Claude can spot:
+- Patterns the Coder established that should become conventions
+- Decisions that were made implicitly (not discussed) but visible in code
+- Files/packages that were created — future context for the PM
+- Test patterns, error handling choices, naming conventions
+- Dependencies added (`go.mod` changes) worth remembering
 
 ### The Feedback Loop
 
-Kimi doesn't just extract general learnings — it specifically analyzes
-what Claude asked during implementation. If Claude asked something that
-Kimi should have resolved in Phase 1, that becomes a learning for Kimi.
+Claude doesn't just extract general learnings — it analyzes the full
+conversation AND the diff to find patterns worth remembering. It
+specifically looks at:
+
+1. **What the Coder asked** — if the PM could have pre-resolved it in
+   Phase 1, that becomes a learning for the PM.
+2. **What the diff shows** — patterns, conventions, and decisions that
+   were made in code but never discussed explicitly.
 
 ```
 Thread conversation:
-  [Kimi] Plan: 1. Create user model  2. Add POST /register  3. Tests
+  [PM] Plan: 1. Create user model  2. Add POST /register  3. Tests
   [User] yes
-  [Claude] auth/login.go uses JWT but auth/session.go uses cookies.
+  [Coder] auth/login.go uses JWT but auth/session.go uses cookies.
            Which pattern for registration?
   [User] JWT, always JWT
-  [Claude] Done. PR opened.
+  [Coder] Done. PR opened.
   → PR merged
 
-Kimi's analysis:
-  Claude asked an implementation question that Kimi could have
-  pre-resolved by reading auth/login.go and auth/session.go.
+Diff shows:
+  + auth/register.go (new file, uses JWT)
+  + auth/register_test.go (test with mock JWT)
+  ~ go.mod: added github.com/golang-jwt/jwt/v5
 
-Kimi proposes in thread:
+Claude's analysis (from conversation + diff):
+  1. Coder asked about JWT vs cookies — PM should have pre-resolved
+     by reading auth/login.go and auth/session.go.
+  2. Diff shows jwt/v5 is now a dependency — worth remembering.
+  3. Diff shows a test pattern: mock JWT with fixed claims.
+     This pattern should be noted for future auth tests.
+
+Claude proposes in thread:
   📝 *Proposed memory updates:*
-  1. ➕ `- Auth pattern: always use JWT, never cookies (auth/login.go is the reference)`
-  2. ➕ `- When planning auth-related tasks, check auth/login.go for the JWT pattern`
+  1. ➕ PM: `Auth pattern: always use JWT, never cookies (auth/login.go is the reference)`
+  2. ➕ PM: `When planning auth tasks, check auth/login.go for the JWT pattern`
+  3. ➕ PM: `JWT dependency: github.com/golang-jwt/jwt/v5`
+  4. 💡 CLAUDE.md: `Auth tests: mock JWT with fixed claims (see auth/register_test.go)`
 
-  Reply *yes* to save, or suggest changes.
+  Reply *yes* to save all, or tell me what to change.
 ```
 
 ### What the User Sees in the Thread
@@ -899,15 +931,19 @@ The user can:
 - **"change 1 to: Auth uses JWT everywhere except WebSocket handlers"** → edit before saving
 - **"no"** → discard all, save nothing
 
-### Kimi Prompt (Memory Extraction)
+### Memory Extraction Prompt (Always Claude)
+
+Memory extraction always uses Claude, regardless of the thread's active
+PM model. Claude receives the conversation AND the git diff.
 
 ```
-You analyze completed conversations to extract learnings for memory.
-You receive the full thread, which may include any combination of:
-Kimi's planning phase, image generation, user interactions,
-and Claude's implementation phase.
+You analyze completed conversations AND code diffs to extract learnings.
+You receive:
+1. The full thread (PM planning, image generation, user interactions,
+   Coder implementation)
+2. The git diff (main..branch) showing exactly what code changed
 
-Your job has THREE parts:
+Your job has FOUR parts:
 
 PART 1 — General learnings:
 Extract useful decisions, conventions, and gotchas worth remembering.
@@ -930,6 +966,19 @@ PART 3 — Inter-role learning:
   a mismatch (wrong size, wrong path), both roles should learn.
 - Route inter-role learnings to the "Working with Other Roles" section
   of the right memory file.
+
+PART 4 — Diff analysis:
+Analyze the git diff (main..branch) for patterns NOT discussed in
+conversation but visible in the code changes:
+- New files/packages created → PM should know about them
+- Dependencies added (go.mod, package.json) → worth remembering
+- Test patterns established → suggest for CLAUDE.md
+- Error handling patterns → suggest for CLAUDE.md
+- Naming conventions → suggest for CLAUDE.md
+- Architecture patterns (new interfaces, new abstractions) → PM memory
+- Config changes (new env vars, new flags) → PM memory
+Only extract learnings from the diff that are GENUINELY USEFUL for
+future threads. Don't note trivial changes.
 
 Respond with a JSON array of operations. Each op targets a specific
 memory file — route learnings to the right role:
@@ -1710,13 +1759,13 @@ split needed.
 Thread A: "fix the login bug"
     → Claude works on branch fix/login
     → PR created
-    → Kimi extracts learnings → user approves → committed to memory.md on branch
+    → Claude extracts learnings (thread + diff) → user approves → committed to memory.md on branch
     → PR merged to main
     → memory.md now on main ✓
 
 Thread B: "add password reset" (started after merge)
     → Branches from main → memory.md already has Thread A's learnings
-    → Kimi reads memory → knows "auth uses bcrypt, sessions expire after 24h"
+    → PM reads memory → knows "auth uses bcrypt, sessions expire after 24h"
     → Builds on existing knowledge ✓
 
 Thread C: "refactor the API" (started BEFORE Thread A merged)
@@ -1809,7 +1858,7 @@ v1: Knowledge is local, trapped in one WhatsApp session
     Claude learns things → session ends → knowledge lost
 
 v2: Knowledge flows through git
-    Thread ends → Kimi extracts learnings → commits to memory.md on PR branch
+    Thread ends → Claude extracts learnings (thread + diff) → commits to memory.md on PR branch
     → PR merged → memory.md on main → all future threads inherit it
     Natural review gate: memory updates visible in PR diff
     Natural conflict resolution: git merge
@@ -2011,7 +2060,7 @@ No more `history/` folder. Two layers instead of three:
 | Layer | Loaded by Claude | Audience | Purpose |
 |---|---|---|---|
 | `CLAUDE.md` | Yes (auto) | Claude + humans | Codebase conventions, project guide |
-| `memory.md` | Yes (injected) | Kimi + Claude | Learnings from conversations, planning notes |
+| `memory.md` | Yes (injected) | Claude (extraction) + PM (reads) | Learnings from conversations + diffs, planning notes |
 | PR description | No | Humans (reviewers) | What happened and why (lives on GitHub) |
 
 ### Implementation
@@ -2962,21 +3011,27 @@ Post-flight has two stages:
 ```
 PR created (detected in Claude's response)
     ↓
-    ├─ Kimi: add thread URL to PR body
-    ├─ Kimi: detect if Claude left TODO/FIXME in code
-    │   → warn in thread: "Claude left 2 TODOs — want a new thread to resolve them?"
+    ├─ PM (active model): add thread URL to PR body
+    ├─ PM (active model): detect if Coder left TODO/FIXME in code
+    │   → warn in thread: "Coder left 2 TODOs — want a new thread to resolve them?"
     │
-    └─ Kimi: analyze full thread → propose memory updates (section 16)
+    └─ Claude (always): memory extraction
+        → git diff main..branch → get the full diff
+        → analyze full thread + diff → propose memory updates (section 16)
         → post in thread → wait for user approval
         → commit approved memory.md changes to PR branch → push
 ```
+
+Memory extraction always uses Claude regardless of the thread's active
+PM model. This is the one phase where we always want the best brain —
+learnings compound over time and a missed pattern now costs future threads.
 
 **Stage 2: User closes thread** — when the PR is approved and user says
 "done"/"merge"/"dale", CodeButler finishes the thread:
 ```
 User: "merge" / "done" / "dale"
     ↓
-    ├─ Kimi: generate PR summary → update PR description via `gh pr edit`
+    ├─ PM (active model): generate PR summary → update PR description via `gh pr edit`
     ├─ Merge PR: `gh pr merge --squash`
     ├─ Delete remote branch: `git push origin --delete <branch>`
     └─ Clean up worktree: `git worktree remove`
@@ -2991,7 +3046,7 @@ post-processing is practical:
 ```
 Claude response arrives
     ↓
-    └─ Kimi: summarize for Slack (if response > 4000 chars)
+    └─ PM (active model): summarize for Slack (if response > 4000 chars)
 ```
 
 ### 24.5 Thread = Branch = PR: Conflict Coordination
@@ -4412,6 +4467,7 @@ via a Slack command.
 {
   "productManager": {
     "default": "kimi",
+    "memoryExtraction": "claude",
     "conflictDetection": true,
     "models": {
       "kimi": {
@@ -4454,6 +4510,10 @@ via a Slack command.
 
 - **Default is cheap** (Kimi). 90% of PM work is routine: grep, read,
   propose plan. Kimi handles this fine at $0.001/message.
+- **Memory extraction always uses Claude** (`memoryExtraction` field).
+  This is the most valuable output — learnings compound. Claude reads
+  the conversation + git diff to find patterns. ~$0.02-0.05 per extraction.
+  Override to another model if needed, but Claude is strongly recommended.
 - **Claude as PM is available for hard tasks.** Complex architecture
   decisions, subtle bugs, cross-cutting refactors — when the user wants
   a smarter brain, they switch. $0.01-0.05/message.
@@ -4532,13 +4592,12 @@ Switch mid-planning:
      Ready to refine details or start Coder. Say *yes*."
   → Claude designed, Kimi manages execution. Best of both worlds.
 
-Switch for summary:
+Memory extraction (always Claude, no switch needed):
   User: "merge"
-  → PM (Kimi) does the standard memory extraction
-  OR
-  User: /pm claude
-  User: "merge"
-  → PM (Claude) does the memory extraction with deeper analysis
+  → Memory extraction always uses Claude, regardless of active PM.
+    Claude reads the full thread + git diff → proposes learnings.
+    No need to switch — Claude handles this by default.
+  → The PR summary (description update) uses the active PM.
 ```
 
 #### Claude as PM — How It Works Technically
@@ -4974,7 +5033,7 @@ Thread "fix login bug"
     → worktree: .codebutler/branches/fix-login/
     → PR #42 created → memory committed to branch
     → User: "dale merge"
-    → Kimi: summary → PR description updated
+    → PM: summary → PR description updated
     → PR #42 merged (squash)
     → thread CLOSED ✓
     → branch deleted, worktree removed, resources freed
@@ -5003,11 +5062,48 @@ Only 4 states. No "idle", no "stale", no "archived":
 func (d *Daemon) onPRCreated(threadTS string, prNumber int) {
     scope := d.tracker.Get(threadTS)
 
-    // 1. Add thread URL to PR body
+    // 1. Add thread URL to PR body (uses active PM — cheap)
     go d.addThreadLinkToPR(threadTS, prNumber)
 
-    // 2. Extract memory (proposes in thread, waits for approval, commits to PR branch)
-    go d.extractMemory(threadTS, scope.Branch) // commit memory.md + push
+    // 2. Extract memory — ALWAYS uses Claude, regardless of thread's active PM.
+    //    Gets the diff to analyze what actually changed, not just what was discussed.
+    go d.extractMemory(threadTS, scope.Branch) // Claude + diff → propose → approve → commit
+}
+
+// extractMemory always uses Claude (d.pmModels["claude"]) even if the
+// thread's active PM is Kimi or another model. If Claude is not in the
+// PM pool (unlikely but possible), falls back to the active PM.
+//
+// The diff gives Claude concrete code context that the conversation alone
+// doesn't capture: new files, new deps, patterns established in code.
+func (d *Daemon) extractMemory(threadTS, branch string) {
+    // 1. Get the diff
+    diff := d.git.Diff("main", branch) // git diff main...<branch>
+
+    // 2. Get conversation history
+    thread := d.tracker.Get(threadTS)
+    conversation := d.formatConversation(thread)
+
+    // 3. Get current memory files
+    pmMemory := d.readFileFromBranch(branch, "memory-pm.md")
+    artistMemory := d.readFileFromBranch(branch, "memory-artist.md")
+
+    // 4. Choose Claude for extraction (always)
+    extractor := d.pmModels["claude"]
+    if extractor == nil {
+        extractor = d.pmForThread(thread) // fallback to active PM
+    }
+
+    // 5. Call Claude with conversation + diff + current memory
+    prompt := buildExtractionPrompt(conversation, diff, pmMemory, artistMemory)
+    result, _ := extractor.Chat(ctx, memoryExtractionSystemPrompt, prompt)
+
+    // 6. Parse JSON ops, format for Slack, post in thread
+    ops := parseMemoryOps(result)
+    d.postMemoryProposal(threadTS, ops)
+
+    // 7. Wait for user approval (handled by message handler)
+    // 8. On approval: commit to branch + push
 }
 ```
 
@@ -5461,8 +5557,9 @@ Worktrees are the clear winner: instant creation, minimal disk, full isolation.
 7. User replies in thread → Claude resumes IN SAME worktree:
        cd .codebutler/branches/fix-login && claude -p --resume <id> "..."
        ↓
-8. PR created → memory extraction:
-       - Kimi analyzes thread → proposes learnings → user approves
+8. PR created → memory extraction (always Claude):
+       - git diff main..branch → get full diff
+       - Claude analyzes thread + diff → proposes learnings → user approves
        - memory.md committed to PR branch + pushed
        ↓
 9. User: "dale merge" → THREAD CLOSED:
