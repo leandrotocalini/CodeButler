@@ -577,3 +577,63 @@ O si no hay nada nuevo:
 ```
 
 Si no hay Kimi API key configurada, auto-memory se desactiva silenciosamente.
+
+---
+
+## 17. Logging — Plain Structured Logs
+
+Reemplazar el sistema dual (ring buffer + TUI con ANSI) por un único canal
+de logs planos, estructurados, con buena información.
+
+### Formato
+
+```
+2026-02-14 15:04:05 INF  slack connected
+2026-02-14 15:04:08 MSG  leandro: "che arreglá el bug del login"
+2026-02-14 15:04:08 MSG  leandro: "y fijate el CSS también"
+2026-02-14 15:04:11 CLD  processing 2 messages (new session)
+2026-02-14 15:04:45 CLD  done · 34s · 3 turns · $0.12
+2026-02-14 15:04:45 RSP  "Arreglé el bug del login y ajusté el CSS..."
+2026-02-14 15:05:45 INF  conversation ended (60s silence)
+2026-02-14 15:05:46 MEM  kimi: append "Login usa bcrypt, no md5"
+2026-02-14 15:06:00 WRN  slack reconnecting...
+2026-02-14 15:06:01 ERR  kimi API timeout after 10s
+```
+
+### Niveles
+
+| Tag | Significado |
+|-----|-------------|
+| `INF` | Info del sistema: conexión, config, estado |
+| `WRN` | Warnings: reconexiones, timeouts recuperables |
+| `ERR` | Errores: fallos de API, crashes recuperados |
+| `DBG` | Debug: solo si se habilita verbose mode |
+| `MSG` | Mensaje entrante del usuario |
+| `CLD` | Actividad de Claude: start, done, resume |
+| `RSP` | Respuesta enviada al canal |
+| `MEM` | Operaciones de auto-memory |
+
+### Qué se elimina
+
+- `Clear()` — no más clear screen
+- `Header()` — no más banners con separadores
+- `UserMsg()` — reemplazado por `MSG`
+- `BotStart()` / `BotResult()` / `BotText()` — reemplazado por `CLD` y `RSP`
+- `Status()` — reemplazado por `INF`
+- ANSI escape codes — todo plano
+- Dependencia `go-isatty` — ya no se necesita
+
+### Qué se mantiene
+
+- **Ring buffer + SSE** para el web dashboard (misma mecánica, nuevo formato)
+- **Subscribers** (`Subscribe()` / `Unsubscribe()`)
+
+### Implementación
+
+Un solo método interno `log(tag, format, args...)` que:
+1. Formatea: `{datetime} {TAG}  {message}`
+2. Escribe a stderr
+3. Almacena en ring buffer
+4. Notifica subscribers
+
+Métodos públicos: `Inf()`, `Wrn()`, `Err()`, `Dbg()`, `Msg()`, `Cld()`, `Rsp()`, `Mem()`
