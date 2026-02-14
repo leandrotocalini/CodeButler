@@ -569,7 +569,8 @@ This is the **central architectural decision** of CodeButler2.
 - [x] **Smart routing**: Kimi classifies messages — questions answered directly, code tasks go to Claude
 - [x] **Pre-flight enrichment**: Kimi scans repo + memory before Claude runs, builds focused prompt
 - [x] **Workflow planning**: Kimi generates execution plans for complex tasks, user approves before Claude runs
-- [x] **Thread = Branch = PR**: each thread creates its own branch, conflicts detected proactively
+- [x] **Thread = Branch = PR**: each thread creates exactly one branch, one PR. Non-negotiable 1:1:1 mapping
+- [x] **PR merged = thread closed**: merge is the only way a thread ends. No stale timeouts, no manual close
 - [x] **Merge coordination**: Kimi suggests merge order + notifies threads to rebase after PR merge
 
 ---
@@ -1488,17 +1489,18 @@ this at PR review time — too late.
 
 #### Lifecycle Tracking
 
-The daemon tracks each thread's lifecycle from message to merged PR:
+The daemon tracks each thread's strict lifecycle: **1 thread = 1 branch = 1 PR**.
+A thread lives until its PR is merged. That's the only exit.
 
 ```
-Thread created
+Thread created (Slack thread)
     → Kimi classifies as code_task
+    → Worktree + branch created
     → Claude starts working
-    → Claude creates branch (detected from response)
     → Claude modifies files (tracked per response)
-    → Claude opens PR (detected from response)
+    → Claude opens PR
     → PR merged (detected via GitHub webhook or polling)
-    → Thread scope cleared
+    → Thread CLOSED: worktree removed, branch deleted, resources freed
 ```
 
 ```go
@@ -1506,9 +1508,10 @@ Thread created
 
 type ThreadState string
 const (
+    StateCreated  ThreadState = "created"   // Just started, classifying
     StateWorking  ThreadState = "working"   // Claude is active
     StatePR       ThreadState = "pr"        // PR opened, awaiting merge
-    StateMerged   ThreadState = "merged"    // PR merged, scope cleared
+    StateMerged   ThreadState = "merged"    // PR merged → thread CLOSED
 )
 
 type ThreadScope struct {
@@ -1980,68 +1983,126 @@ func (l *Limiter) RecordCall(userID string, estimatedCost float64)
 
 ## 27. Thread Lifecycle & Resource Cleanup
 
-### Thread States (Extended)
+### The Rule: 1 Thread = 1 Branch = 1 PR
+
+This is non-negotiable. Every thread follows the same lifecycle:
 
 ```
-created → processing → idle → stale → archived
-            ↕                    ↓
-         processing          cleaned up
-            ↓
-         pr_opened → merged → cleaned up
+created → working → pr_opened → merged → closed
 ```
 
-### When Is a Thread "Done"?
+There is exactly **one way** a thread ends: **its PR gets merged**.
+No timeouts, no manual close, no "stale" state. A thread lives until
+its work is merged into main.
 
-| Signal | Action |
-|---|---|
-| PR merged | Mark merged, run post-flight (history, memory), clean up branch scope |
-| 24h of silence | Mark stale, release Claude session resources |
-| 7 days of silence | Archive — remove from active tracking, session remains in DB |
-| User says "done" / "close" | Same as 24h silence, but immediate |
+```
+Thread "fix login bug"
+    → branch: codebutler/fix-login
+    → worktree: .codebutler/branches/fix-login/
+    → PR #42
+    → PR #42 merged
+    → thread CLOSED ✓
+    → worktree removed, branch deleted, resources freed
+```
 
-### Resource Cleanup
+### Thread States
 
-Active threads consume:
-1. **Memory**: thread scope in `conflicts.Tracker`, session entry in DB
-2. **Goroutine**: one per active thread (blocked waiting for messages)
-3. **Claude session**: `session_id` held for `--resume`
-4. **Branch tracking**: file overlap detection
+```
+created → working → pr_opened → merged (closed)
+                        ↑
+                     working (user asks for more changes after PR review)
+```
 
-Cleanup releases #1 and #4. Claude sessions (#3) remain in DB
-indefinitely — they're cheap to store and allow resuming old threads.
-Goroutines (#2) naturally exit when the thread goes idle.
+Only 4 states. No "idle", no "stale", no "archived":
 
-### Stale Thread Detection
+| State | Meaning | Thread accepts messages? |
+|---|---|---|
+| `created` | Thread just started, Kimi classifying | Yes |
+| `working` | Claude is coding (or waiting for user input) | Yes |
+| `pr_opened` | PR exists, awaiting review/merge | Yes (triggers new Claude run for changes) |
+| `merged` | PR merged, thread is done | No — bot replies: "This thread is closed. Start a new thread." |
+
+### What Happens When PR Is Merged
 
 ```go
-// Run every hour
-func (d *Daemon) cleanupStaleThreads() {
-    for ts, scope := range d.tracker.GetAll() {
-        if time.Since(scope.LastActivity) > 24*time.Hour && scope.State == StateWorking {
-            d.tracker.MarkStale(ts)
-            // Optionally notify in thread
-            d.slack.SendMessage(scope.ChannelID, "Thread idle for 24h. "+
-                "Reply to resume, or the session will be archived.", ts)
-        }
-        if time.Since(scope.LastActivity) > 7*24*time.Hour {
-            d.tracker.Archive(ts)
-        }
-    }
+func (d *Daemon) onPRMerged(threadTS string, prNumber int) {
+    scope := d.tracker.Get(threadTS)
+
+    // 1. Post-flight (parallel, non-blocking)
+    go d.generateHistory(threadTS, prNumber)    // history/<threadTS>.md
+    go d.extractMemory(threadTS)                // update memory.md
+
+    // 2. Notify in thread
+    d.slack.SendMessage(scope.ChannelID,
+        fmt.Sprintf("PR #%d merged. Thread closed.", prNumber),
+        threadTS)
+
+    // 3. Cleanup worktree + branch
+    worktree.Remove(d.repoDir, scope.Branch)
+
+    // 4. Remove from active tracking
+    d.tracker.Close(threadTS)
+
+    // 5. Notify overlapping threads to rebase
+    d.notifyOverlappingThreads(scope)
 }
 ```
 
-### Branch Cleanup
+### Why No Timeouts?
 
-When a PR is merged, the branch is deleted by GitHub (if configured).
-When a thread is archived without a PR, the branch persists — the user
-might come back to it. A monthly cleanup job can list orphaned branches:
+A thread without a PR is a thread that hasn't finished its job.
+The user might come back tomorrow, next week, or in a month. The
+worktree and branch cost almost nothing to keep around (disk only).
+There's no reason to force-close it.
+
+If the user wants to abandon a thread, they close the PR on GitHub
+(or never open one). The daemon can detect closed-without-merge PRs
+and clean up:
+
+```go
+// PR closed without merge = abandoned
+func (d *Daemon) onPRClosed(threadTS string, prNumber int) {
+    d.slack.SendMessage(scope.ChannelID,
+        fmt.Sprintf("PR #%d closed without merge. Thread closed. "+
+            "Worktree and branch preserved — reopen the PR to continue.", prNumber),
+        threadTS)
+    d.tracker.Close(threadTS)
+    // Note: worktree NOT removed — user might reopen
+}
+```
+
+### Messages After Close
+
+If someone replies in a closed thread, the bot responds:
 
 ```
-codebutler --cleanup-branches
+"This thread is closed (PR #42 merged). Start a new thread for new work."
 ```
 
-Lists branches created by CodeButler that have no open PR and no
-thread activity in 30 days. User confirms before deletion.
+No Claude call, no cost. Just a static message.
+
+### Resource Cleanup
+
+| Resource | Cleaned up when | How |
+|---|---|---|
+| Worktree (`.codebutler/branches/X/`) | PR merged | `git worktree remove` |
+| Local branch | PR merged | `git branch -d` (GitHub deletes remote) |
+| Conflict tracking | PR merged | `tracker.Close()` |
+| Claude session in DB | Never (cheap, allows audit) | Stays in SQLite |
+| Thread in Slack | Never (it's Slack history) | Stays visible |
+
+### Orphan Cleanup
+
+For threads where a PR was never opened (user started a task but
+abandoned it), a CLI command can clean up:
+
+```
+codebutler --cleanup-orphans
+```
+
+Lists worktrees with no PR and no activity in 30+ days.
+User confirms before deletion. The branch is NOT deleted — only the
+worktree. The user can always re-create the worktree from the branch.
 
 ---
 
@@ -2226,8 +2287,9 @@ Worktrees are the clear winner: instant creation, minimal disk, full isolation.
        ↓
 2. Kimi classifies → code_task
        ↓
-3. Daemon creates worktree:
-       git worktree add .codebutler/branches/fix-login -b fix/login
+3. Daemon creates worktree + branch:
+       git worktree add .codebutler/branches/fix-login -b codebutler/fix-login
+       (this is THE branch for this thread — one and only one, forever)
        ↓
 4. Kimi pre-flight runs (can read files from worktree or main repo)
        ↓
@@ -2235,16 +2297,20 @@ Worktrees are the clear winner: instant creation, minimal disk, full isolation.
        cd .codebutler/branches/fix-login && claude -p "..."
        ↓
 6. Claude works: edits files, runs tests, commits, pushes, opens PR
+       (this is THE PR for this thread — one and only one)
        ↓
 7. User replies in thread → Claude resumes IN SAME worktree:
        cd .codebutler/branches/fix-login && claude -p --resume <id> "..."
        ↓
 8. PR merged (detected by daemon)
        ↓
-9. Cleanup:
-       git worktree remove .codebutler/branches/fix-login
-       git branch -d fix/login
-       Thread archived
+9. THREAD CLOSED:
+       - Post-flight: generate history/<threadTS>.md, extract memory
+       - Notify in thread: "PR #42 merged. Thread closed."
+       - git worktree remove .codebutler/branches/fix-login
+       - git branch -d codebutler/fix-login
+       - Remove from conflict tracker
+       - Thread no longer accepts messages
 ```
 
 ### Concurrency Model (Revised)
