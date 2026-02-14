@@ -236,7 +236,10 @@ CREATE TABLE sessions (
 | `internal/slack/channels.go` | List/create channels, get info |
 | `internal/slack/snippets.go` | Code block extraction, smart formatting, file upload |
 | `internal/github/github.go` | PR detection, merge polling, PR description updates via `gh` |
-| `internal/llm/client.go` | OpenAI-compatible client for cheap models (Kimi, GPT-4o-mini, DeepSeek) |
+| `internal/models/interfaces.go` | Orchestrator, Artist, Coder interfaces |
+| `internal/models/orchestrator_openai.go` | OpenAI-compatible Orchestrator (Kimi, GPT-4o-mini, DeepSeek) |
+| `internal/models/artist_openai.go` | OpenAI Artist (gpt-image-1, DALL-E 3) |
+| `internal/models/coder_claude.go` | Claude CLI Coder wrapper |
 | `internal/preflight/preflight.go` | Pre-Claude enrichment: grep repo, read files, build focused prompt |
 | `internal/router/router.go` | Message classifier: question vs code_task vs clarify |
 | `internal/conflicts/tracker.go` | Thread lifecycle tracking, file overlap detection, merge order |
@@ -671,6 +674,7 @@ This is the **central architectural decision** of CodeButler2.
 - [x] **memory.md coexistence**: local memory.md (Kimi) + shared CLAUDE.md (git) both exist
 - [x] **PR as journal**: thread summary goes in PR description (via `gh pr edit`), no files committed
 - [x] **Multi-model**: Claude executes code, cheap models (Kimi/GPT-4o-mini) orchestrate around it
+- [x] **Swappable providers**: three interfaces (Orchestrator, Artist, Coder), all configurable via config.json
 - [x] **Kimi first, always**: Kimi starts every thread. Scans repo, asks questions, proposes plan. Claude never starts without approval
 - [x] **Approval gate**: user must explicitly approve before Claude runs. "yes"/"dale"/"go" triggers Phase 2
 - [x] **Questions never reach Claude**: Kimi answers questions directly (reads files, checks docs). Thread ends without Claude
@@ -892,10 +896,9 @@ produce better plans over time.
   - `Save(path, content string)` — write memory.md
   - `FormatProposal(ops []Op) string` — format ops as Slack message for user review
   - `ParseUserResponse(text string, ops []Op) []Op` — process user edits/approvals
-- **Kimi client**: `internal/llm/client.go`
-  - OpenAI-compatible API (chat completions)
-  - Used for memory extraction and all Kimi tasks
-  - Requires orchestrator API key in global config
+- **Orchestrator**: uses `models.Orchestrator` interface
+  - Any provider that implements `Chat()` and `ChatJSON()`
+  - Requires orchestrator config in global config
 - **Daemon integration**: on PR merge event, launch goroutine:
   1. Call Kimi for memory analysis
   2. Post proposal in thread
@@ -1580,7 +1583,7 @@ No more `history/` folder. Two layers instead of three:
   - `IsMerged(prNumber int) (bool, error)`
   - `GetPRDiff(prNumber int) (string, error)`
   - `WatchPRs(tracker, onMerge)`
-- **Summary generation**: via Kimi in `internal/llm/client.go`
+- **Summary generation**: via `models.Orchestrator` interface (Kimi, GPT-4o-mini, etc.)
 - **Thread fetching**: via Slack `conversations.replies` in `internal/slack/handler.go`
 - **Integration**: called in daemon after PR is detected in Claude's response
 
@@ -1593,23 +1596,27 @@ But the "extras" — everything that happens before, around, and after Claude �
 can be powered by cheaper, faster models. The principle:
 
 ```
-Cheap models (Kimi, GPT-4o-mini) = orchestrators    (~$0.001/call)
-Claude                            = executor          (~$0.10-1.00/call)
-OpenAI                            = media specialist   (Whisper, gpt-image-1)
+Orchestrator (Kimi, GPT-4o-mini, ...) = brain          (~$0.001/call)
+Coder (Claude CLI)                     = hands          (~$0.10-1.00/call)
+Artist (gpt-image-1, DALL-E, ...)      = eyes           (~$0.01-0.04/image)
+Whisper                                = ears           (~$0.006/min)
 ```
 
 **The goal is NOT to replace Claude. It's to make every Claude call maximally
 effective by doing the cheap work before and after.**
 
+All three roles are defined as Go **interfaces** (section 24.8). Providers
+are swappable via config without touching daemon code.
+
 ### Model Roles
 
-| Model | Role | Cost | Used For |
-|---|---|---|---|
-| **Claude** (claude -p) | Code executor | $$$ | Write code, fix bugs, refactor, create PRs |
-| **Kimi** (OpenAI-compat API) | Orchestrator | ¢ | Triage, enrich prompts, extract memory, summarize |
-| **GPT-4o-mini** | Orchestrator alt | ¢ | Same as Kimi, interchangeable |
-| **Whisper** | Transcription | ¢ | Voice → text |
-| **gpt-image-1** | Image generation | ¢¢ | Kimi generates/edits images during Phase 1 |
+| Interface | Default Provider | Role | Cost | Used For |
+|---|---|---|---|---|
+| **Coder** | Claude CLI (`claude -p`) | Code executor | $$$ | Write code, fix bugs, refactor, create PRs |
+| **Orchestrator** | Kimi (OpenAI-compat API) | Brain | ¢ | Triage, plan, memory, summarize, coordinate |
+| **Orchestrator** | GPT-4o-mini (alt) | Brain | ¢ | Same as Kimi, interchangeable |
+| **Artist** | gpt-image-1 | Image creator | ¢¢ | Generate/edit images during Phase 1 |
+| *(direct)* | Whisper | Transcription | ¢ | Voice → text |
 
 ### 24.1 Pre-flight: Enrich Before Claude Runs
 
@@ -1902,17 +1909,19 @@ Memory: {memory.md contents}
 #### Implementation
 
 ```go
-// internal/kimi/responder.go
+// internal/orchestration/responder.go
 
-// Respond handles a message in Kimi phase
-// Returns the response text and optionally a plan
-func Respond(ctx context.Context, client *llm.Client, repoDir string,
-    history []Message, newMessage string, memory string) (response string, plan *Plan, err error)
+// Respond handles a message in the orchestrator (Kimi) phase.
+// Uses the Orchestrator interface — works with any provider.
+// Returns the response text and optionally a plan.
+func Respond(ctx context.Context, orch models.Orchestrator, repoDir string,
+    history []models.Message, newMessage string, memory string) (response string, plan *Plan, err error)
 
 type Plan struct {
     Summary   string   // one-line description
-    Steps     []string // what Claude will do
+    Steps     []string // what Claude (Coder) will do
     Files     []string // files that will be touched
+    Images    []string // images generated during planning (local paths)
     Estimated string   // "~3 Claude turns"
 }
 ```
@@ -2109,30 +2118,27 @@ branch = PR) is maintained.
 #### Implementation
 
 ```go
-// internal/imagegen/generate.go (already exists from v1, reused)
+// Uses the Artist interface (section 24.8).
+// The daemon doesn't know if it's gpt-image-1, DALL-E 3, or anything else.
 
-type ImageRequest struct {
-    Prompt      string // enriched by Kimi with project context
-    InputImage  []byte // optional: user-provided reference image
-    Size        string // "1024x1024", "512x512", etc.
-    EditMode    bool   // true = edit existing image, false = generate new
-}
+// internal/daemon/phase1_images.go
 
-type ImageResult struct {
-    Data      []byte // PNG image data
-    LocalPath string // saved to .codebutler/images/<hash>.png
-}
-
-// internal/daemon/kimi_images.go (new)
-
-// GenerateImage generates an image during Kimi's phase.
-// Kimi provides the enriched prompt (with project context).
+// GenerateImage generates an image during the orchestrator phase.
+// The orchestrator (Kimi) provides the enriched prompt.
 func (d *Daemon) GenerateImage(thread *Thread, prompt string,
-    reference []byte) (*ImageResult, error)
+    reference []byte) (*models.ImageResult, error) {
+
+    if reference != nil {
+        return d.artist.Edit(ctx, models.ImageEditRequest{
+            Prompt: prompt, InputImage: reference,
+        })
+    }
+    return d.artist.Generate(ctx, models.ImageGenRequest{Prompt: prompt})
+}
 
 // PushAsset creates a branch, commits the image, and opens a PR.
-// Used when Kimi resolves the thread without Claude.
-func (d *Daemon) PushAsset(thread *Thread, image *ImageResult,
+// Used when the orchestrator resolves the thread without the coder.
+func (d *Daemon) PushAsset(thread *Thread, image *models.ImageResult,
     repoPath string) (prURL string, err error)
 ```
 
@@ -2538,30 +2544,220 @@ and even push assets to the repo without Claude.
 - **Image + push** → Kimi generates, pushes to repo via PR. Memory on merge. ~$0.01.
 - **Image + Claude** → Kimi generates, then transitions to Phase 2 with images ready.
 
-### 24.8 Model Client Abstraction
+### 24.8 Model Interfaces
 
-All cheap models use OpenAI-compatible APIs. One client handles them all:
+Three interfaces, three roles, all swappable. The daemon depends on
+interfaces, not concrete providers. You can swap any of them without
+touching the daemon code.
 
 ```go
-// internal/llm/client.go
+// internal/models/interfaces.go
 
-type Client struct {
+// Orchestrator handles conversation, planning, memory, and triage.
+// Today: Kimi. Tomorrow: GPT-4o-mini, DeepSeek, Gemini, local LLM.
+type Orchestrator interface {
+    // Chat sends a message and returns the response text.
+    Chat(ctx context.Context, system string, messages []Message) (string, error)
+
+    // ChatJSON sends a message and parses the response as JSON.
+    ChatJSON(ctx context.Context, system string, messages []Message, out interface{}) error
+
+    // Name returns the provider name for logging.
+    Name() string
+}
+
+// Artist handles image generation and editing.
+// Today: OpenAI gpt-image-1. Tomorrow: DALL-E 3, Midjourney API,
+// Stability AI, Flux, local Stable Diffusion, etc.
+type Artist interface {
+    // Generate creates a new image from a text prompt.
+    Generate(ctx context.Context, req ImageGenRequest) (*ImageResult, error)
+
+    // Edit modifies an existing image based on a prompt.
+    Edit(ctx context.Context, req ImageEditRequest) (*ImageResult, error)
+
+    // Name returns the provider name for logging.
+    Name() string
+}
+
+// Coder writes code, runs tests, creates PRs.
+// Today: Claude CLI (claude -p). Tomorrow: any coding agent CLI.
+type Coder interface {
+    // Run executes a coding task in the given working directory.
+    Run(ctx context.Context, req CoderRequest) (*CoderResult, error)
+
+    // Resume continues a previous session.
+    Resume(ctx context.Context, sessionID string, message string) (*CoderResult, error)
+
+    // Name returns the provider name for logging.
+    Name() string
+}
+```
+
+#### Request/Result Types
+
+```go
+// Orchestrator messages
+type Message struct {
+    Role    string // "user", "assistant", "system"
+    Content string
+    Image   []byte // optional: attached image
+}
+
+// Artist types
+type ImageGenRequest struct {
+    Prompt string
+    Size   string // "1024x1024", "512x512", etc.
+}
+
+type ImageEditRequest struct {
+    Prompt     string
+    InputImage []byte // the image to edit
+    Size       string
+}
+
+type ImageResult struct {
+    Data      []byte // PNG image data
+    LocalPath string // saved to .codebutler/images/<hash>.png
+}
+
+// Coder types
+type CoderRequest struct {
+    Prompt     string // the enriched task prompt
+    WorkDir    string // worktree path
+    MaxTurns   int
+    Timeout    time.Duration
+    Permission string // "bypassPermissions", etc.
+}
+
+type CoderResult struct {
+    Response  string
+    SessionID string
+    Turns     int
+    Duration  time.Duration
+    Cost      float64 // estimated cost
+}
+```
+
+#### Concrete Implementations
+
+```go
+// internal/models/orchestrator_openai.go
+// Handles any OpenAI-compatible API: Kimi, GPT-4o-mini, DeepSeek, etc.
+type OpenAIOrchestrator struct {
     baseURL string
     apiKey  string
     model   string
 }
 
-// Kimi, GPT-4o-mini, DeepSeek — all OpenAI-compatible
-func NewKimi(apiKey string) *Client {
-    return &Client{baseURL: "https://api.moonshot.cn/v1", apiKey: apiKey, model: "moonshot-v1-8k"}
+func NewKimi(apiKey string) Orchestrator {
+    return &OpenAIOrchestrator{
+        baseURL: "https://api.moonshot.cn/v1",
+        apiKey: apiKey, model: "moonshot-v1-8k",
+    }
 }
 
-func NewGPT4oMini(apiKey string) *Client {
-    return &Client{baseURL: "https://api.openai.com/v1", apiKey: apiKey, model: "gpt-4o-mini"}
+func NewGPT4oMini(apiKey string) Orchestrator {
+    return &OpenAIOrchestrator{
+        baseURL: "https://api.openai.com/v1",
+        apiKey: apiKey, model: "gpt-4o-mini",
+    }
 }
 
-func (c *Client) Chat(ctx context.Context, systemPrompt, userMessage string) (string, error)
-func (c *Client) ChatJSON(ctx context.Context, systemPrompt, userMessage string, out interface{}) error
+func NewDeepSeek(apiKey string) Orchestrator {
+    return &OpenAIOrchestrator{
+        baseURL: "https://api.deepseek.com/v1",
+        apiKey: apiKey, model: "deepseek-chat",
+    }
+}
+
+// internal/models/artist_openai.go
+type OpenAIArtist struct {
+    apiKey string
+    model  string // "gpt-image-1", "dall-e-3"
+}
+
+func NewOpenAIArtist(apiKey, model string) Artist {
+    return &OpenAIArtist{apiKey: apiKey, model: model}
+}
+
+// internal/models/coder_claude.go
+type ClaudeCoder struct {
+    permissionMode string
+    maxTurns       int
+    timeout        time.Duration
+}
+
+func NewClaudeCoder(cfg CoderConfig) Coder {
+    return &ClaudeCoder{...}
+}
+```
+
+#### How the Daemon Uses Them
+
+```go
+// internal/daemon/daemon.go
+
+type Daemon struct {
+    orchestrator models.Orchestrator  // Kimi, GPT-4o-mini, etc.
+    artist       models.Artist        // OpenAI images, etc.
+    coder        models.Coder         // Claude CLI
+    slack        *slack.Client
+    store        *store.Store
+    // ...
+}
+
+// Everything goes through the interface:
+func (d *Daemon) runKimi(thread *Thread, msg Message) {
+    resp, _ := d.orchestrator.Chat(ctx, systemPrompt, thread.KimiHistory)
+    // ...
+}
+
+func (d *Daemon) generateImage(thread *Thread, prompt string) {
+    result, _ := d.artist.Generate(ctx, models.ImageGenRequest{Prompt: prompt})
+    // ...
+}
+
+func (d *Daemon) startClaude(thread *Thread) {
+    result, _ := d.coder.Run(ctx, models.CoderRequest{Prompt: plan, WorkDir: worktree})
+    // ...
+}
+```
+
+#### Swapping Providers
+
+To try a new orchestrator, you just implement the interface and change config:
+
+```json
+// Before: Kimi
+{"orchestrator": {"provider": "kimi", "apiKey": "..."}}
+
+// After: GPT-4o-mini
+{"orchestrator": {"provider": "openai-mini", "apiKey": "..."}}
+
+// After: DeepSeek
+{"orchestrator": {"provider": "deepseek", "apiKey": "..."}}
+
+// After: local Ollama
+{"orchestrator": {"provider": "ollama", "baseURL": "http://localhost:11434"}}
+```
+
+Same for artist:
+```json
+// Before: gpt-image-1
+{"artist": {"provider": "openai", "model": "gpt-image-1", "apiKey": "..."}}
+
+// After: DALL-E 3
+{"artist": {"provider": "openai", "model": "dall-e-3", "apiKey": "..."}}
+
+// After: Stability AI
+{"artist": {"provider": "stability", "apiKey": "..."}}
+```
+
+And coder (though Claude CLI is the expected default):
+```json
+// Default: Claude CLI
+{"coder": {"provider": "claude-cli", "maxTurns": 10, "timeout": 30}}
 ```
 
 ### 24.9 Config
@@ -2570,9 +2766,20 @@ func (c *Client) ChatJSON(ctx context.Context, systemPrompt, userMessage string,
 // ~/.codebutler/config.json (global)
 {
   "orchestrator": {
-    "provider": "kimi",           // or "openai-mini", "deepseek"
+    "provider": "kimi",
     "apiKey": "...",
-    "conflictDetection": true     // check file overlaps between threads
+    "conflictDetection": true
+  },
+  "artist": {
+    "provider": "openai",
+    "model": "gpt-image-1",
+    "apiKey": "..."
+  },
+  "coder": {
+    "provider": "claude-cli",
+    "maxTurns": 10,
+    "timeout": 30,
+    "permissionMode": "bypassPermissions"
   }
 }
 ```
@@ -2580,6 +2787,12 @@ func (c *Client) ChatJSON(ctx context.Context, systemPrompt, userMessage string,
 The orchestrator is **required** in v2. Kimi-first is the core interaction
 model, not an optional optimization. Without it, messages would go directly
 to Claude — which defeats the architecture.
+
+The artist is **optional**. If not configured, image generation is disabled
+and Kimi tells the user: "Image generation is not configured."
+
+The coder defaults to Claude CLI. It's the only battle-tested option today,
+but the interface exists so it can be swapped if needed.
 
 If the orchestrator API is down, the circuit breaker (section 25) kicks in
 and routes directly to Claude as a temporary fallback.
@@ -2596,9 +2809,9 @@ The orchestration layer is invisible to the user. They still talk to
 "the bot" in Slack. They don't know (or care) that Kimi triaged their
 message, enriched the prompt, and extracted memory afterward.
 
-Claude is still the only model that touches code. The cheap models
-never write code, never run tools, never modify files. They only
-read, classify, summarize, and plan.
+The coder is the only model that touches code. The orchestrator and
+artist never write code, never run tools, never modify files. They
+only read, classify, summarize, generate images, and plan.
 
 ---
 
@@ -2982,7 +3195,7 @@ the 1:1:1 rule (that PR is already merged). Instead, they start a
 | `internal/conflicts/tracker.go` | File overlap detection, merge ordering | In-memory tracker with test data |
 | `internal/github/github.go` | PR detection, merge polling | Regex tests + mock `gh` output |
 | `internal/ratelimit/limiter.go` | Rate limiting logic | Time-based tests with controlled clock |
-| `internal/llm/client.go` | Request/response parsing | HTTP test server with canned responses |
+| `internal/models/*.go` | All provider implementations | Mock interfaces (MockOrchestrator, MockArtist, MockCoder) |
 
 ### Integration Tests (require tokens)
 
@@ -3016,23 +3229,48 @@ Tests:
    → Expect: both processed concurrently
 ```
 
-### Mock LLM Client for Tests
+### Mock Providers for Tests
 
 ```go
-// internal/llm/mock.go (build tag: testing)
+// internal/models/mock.go (build tag: testing)
 
-type MockClient struct {
+// MockOrchestrator implements models.Orchestrator for tests
+type MockOrchestrator struct {
     Responses map[string]string  // prompt substring → response
 }
 
-func (m *MockClient) Chat(ctx context.Context, system, user string) (string, error) {
+func (m *MockOrchestrator) Chat(ctx context.Context, system string, msgs []Message) (string, error) {
     for key, resp := range m.Responses {
-        if strings.Contains(user, key) {
+        if strings.Contains(msgs[len(msgs)-1].Content, key) {
             return resp, nil
         }
     }
-    return `{"route": "code_task"}`, nil  // default
+    return `{"route": "code_task"}`, nil
 }
+
+func (m *MockOrchestrator) Name() string { return "mock-orchestrator" }
+
+// MockArtist implements models.Artist for tests
+type MockArtist struct {
+    ImageData []byte  // returned for all generate/edit calls
+}
+
+func (m *MockArtist) Generate(ctx context.Context, req ImageGenRequest) (*ImageResult, error) {
+    return &ImageResult{Data: m.ImageData, LocalPath: "/tmp/mock.png"}, nil
+}
+
+func (m *MockArtist) Name() string { return "mock-artist" }
+
+// MockCoder implements models.Coder for tests
+type MockCoder struct {
+    Response string
+}
+
+func (m *MockCoder) Run(ctx context.Context, req CoderRequest) (*CoderResult, error) {
+    return &CoderResult{Response: m.Response, SessionID: "mock-session"}, nil
+}
+
+func (m *MockCoder) Name() string { return "mock-coder" }
 ```
 
 ---
