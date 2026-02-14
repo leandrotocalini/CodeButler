@@ -2446,3 +2446,263 @@ myrepo/                              ← daemon: Slack + SQLite + orchestration
 Each thread is fully isolated: its own Slack thread, its own Claude session,
 its own git branch, its own filesystem. The only shared state is SQLite
 (thread-safe) and the Slack connection (multiplexed). True parallel execution.
+
+---
+
+## 31. Worktree Initialization — Build Environments Per Branch
+
+### The Problem
+
+A git worktree gives you isolated source files. But most projects need
+more than source files to build and test: dependency caches, build
+artifacts, environment configs. If two worktrees share these, they collide.
+
+**iOS/Xcode is the worst case:**
+
+```
+Worktree A: xcodebuild test → writes to ~/Library/Developer/Xcode/DerivedData/MyApp-abc123/
+Worktree B: xcodebuild test → writes to ~/Library/Developer/Xcode/DerivedData/MyApp-abc123/
+                                                                              ↑ COLLISION
+```
+
+Both worktrees build the same scheme. Xcode hashes the project path
+to generate the DerivedData folder name. If both worktrees have similar
+project paths, they overwrite each other's build artifacts mid-compilation.
+
+### The Solution: Per-Worktree Build Isolation
+
+Each worktree gets its own build artifacts directory. The daemon configures
+this **before** spawning Claude via environment variables and build flags.
+
+#### iOS/Xcode
+
+```bash
+# Each worktree uses its own DerivedData
+xcodebuild test \
+    -derivedDataPath .derivedData \
+    -scheme MyApp \
+    -destination 'platform=iOS Simulator,name=iPhone 16'
+```
+
+With `-derivedDataPath .derivedData`, Xcode writes build artifacts
+inside the worktree itself (`.codebutler/branches/fix-login/.derivedData/`).
+No collisions. Each worktree is fully self-contained.
+
+**CocoaPods**: `Pods/` is part of the working tree. If `Pods/` is committed
+(common in iOS), it's already in the worktree via checkout. If `Pods/`
+is gitignored, the daemon runs `pod install` after creating the worktree.
+
+**SPM (Swift Package Manager)**: Package cache is global
+(`~/Library/Developer/Xcode/`), but SPM handles concurrent resolution
+safely — it's read-only once resolved. The `Package.resolved` file is
+per-worktree (committed to git), so each branch can have different
+dependency versions.
+
+#### Per-Platform Init Scripts
+
+Different project types need different initialization. The daemon
+detects the project type and runs the appropriate setup:
+
+```go
+// internal/worktree/init.go
+
+type ProjectType string
+
+const (
+    ProjectXcode   ProjectType = "xcode"     // .xcodeproj or .xcworkspace
+    ProjectNode    ProjectType = "node"      // package.json
+    ProjectGo      ProjectType = "go"        // go.mod
+    ProjectPython  ProjectType = "python"    // requirements.txt or pyproject.toml
+    ProjectRust    ProjectType = "rust"      // Cargo.toml
+    ProjectGeneric ProjectType = "generic"   // no special setup
+)
+
+func DetectProject(worktreeDir string) ProjectType
+
+func InitWorktree(worktreeDir string, projectType ProjectType) error
+```
+
+#### Init Steps Per Platform
+
+| Platform | Detection | Init Steps | Build Isolation |
+|---|---|---|---|
+| **iOS/Xcode** | `.xcodeproj` or `.xcworkspace` | `pod install` (if Podfile + no Pods/) | `-derivedDataPath .derivedData` |
+| **Node.js** | `package.json` | `npm ci` or `yarn install --frozen-lockfile` | `node_modules/` is per-worktree |
+| **Go** | `go.mod` | Nothing — module cache is global + safe | `GOBIN` per worktree (optional) |
+| **Python** | `requirements.txt` / `pyproject.toml` | `python -m venv .venv && pip install -r requirements.txt` | `.venv/` per worktree |
+| **Rust** | `Cargo.toml` | Nothing — global cache safe | `CARGO_TARGET_DIR=.target` |
+| **Generic** | None of the above | Nothing | Nothing |
+
+#### Sandboxing: Injected Build Flags
+
+The daemon injects build isolation into Claude's environment. Claude
+doesn't need to know about this — the flags are set in the process
+environment before `claude -p` spawns:
+
+```go
+func (d *Daemon) spawnClaude(worktreeDir string, prompt string, sessionID string) {
+    cmd := exec.Command("claude", "-p", prompt, "--output-format", "json")
+    cmd.Dir = worktreeDir
+
+    // Inject per-worktree build isolation
+    env := os.Environ()
+    switch detectProject(worktreeDir) {
+    case ProjectXcode:
+        // Tell Claude's sandbox prefix to use local DerivedData
+        env = append(env, "XCODEBUILD_DERIVED_DATA=.derivedData")
+    case ProjectRust:
+        env = append(env, "CARGO_TARGET_DIR=.target")
+    }
+    cmd.Env = env
+
+    // ...
+}
+```
+
+For Xcode specifically, the sandbox prompt (section 19) gets an extra rule:
+
+```
+- When running xcodebuild, ALWAYS use: -derivedDataPath .derivedData
+  This keeps build artifacts inside this directory.
+```
+
+This is prompt-level enforcement. Claude reads it and obeys.
+
+### Xcode Simulators: Shared but Safe
+
+iOS simulators are system-level (`~/Library/Developer/CoreSimulator/`).
+Multiple `xcodebuild test` runs can use the same simulator concurrently
+in Xcode 15+ (parallel testing). But to be safe:
+
+**Option A: Same simulator, sequential tests**
+```json
+{
+  "build": {
+    "maxConcurrentBuilds": 1
+  }
+}
+```
+
+Only one worktree runs `xcodebuild test` at a time. Others queue.
+Simple, safe, but slower.
+
+**Option B: Different simulators per worktree**
+```bash
+# Worktree A
+xcodebuild test -destination 'platform=iOS Simulator,id=AAAA-BBBB'
+
+# Worktree B
+xcodebuild test -destination 'platform=iOS Simulator,id=CCCC-DDDD'
+```
+
+The daemon pre-creates cloned simulators for each worktree:
+
+```bash
+xcrun simctl clone <base-device-id> "CodeButler-fix-login"
+```
+
+Cloned simulators are cheap (~50MB) and fully isolated.
+
+**Option C: Let Xcode handle it**
+
+Xcode 15+ supports concurrent test runs on the same simulator via
+`-parallel-testing-enabled YES`. The test runner handles scheduling.
+This works for unit tests but can be unreliable for UI tests.
+
+**Recommendation**: Start with Option A (sequential builds, `maxConcurrentBuilds: 1`).
+It's the simplest and avoids all simulator/DerivedData issues. Optimize later
+if build concurrency becomes a bottleneck.
+
+### Resource Awareness
+
+iOS builds are heavy: ~2GB RAM, high CPU for minutes. The daemon should
+know that "this project is Xcode" and limit concurrency accordingly:
+
+```go
+type ResourceProfile struct {
+    MaxConcurrentClaude int  // how many Claude processes can run
+    MaxConcurrentBuilds int  // how many builds can run (subset of Claude)
+    EstimatedRAMPerBuild int // MB, for queue decisions
+}
+
+var profiles = map[ProjectType]ResourceProfile{
+    ProjectXcode:   {MaxConcurrentClaude: 3, MaxConcurrentBuilds: 1, EstimatedRAMPerBuild: 2048},
+    ProjectNode:    {MaxConcurrentClaude: 5, MaxConcurrentBuilds: 3, EstimatedRAMPerBuild: 512},
+    ProjectGo:      {MaxConcurrentClaude: 5, MaxConcurrentBuilds: 5, EstimatedRAMPerBuild: 256},
+    ProjectPython:  {MaxConcurrentClaude: 5, MaxConcurrentBuilds: 5, EstimatedRAMPerBuild: 128},
+    ProjectRust:    {MaxConcurrentClaude: 3, MaxConcurrentBuilds: 2, EstimatedRAMPerBuild: 1024},
+    ProjectGeneric: {MaxConcurrentClaude: 5, MaxConcurrentBuilds: 5, EstimatedRAMPerBuild: 128},
+}
+```
+
+**Key distinction**: `MaxConcurrentClaude` limits how many threads run
+Claude at all (editing code, reading files — lightweight). `MaxConcurrentBuilds`
+limits how many are actually compiling/testing (heavyweight). Claude can
+edit code in 3 worktrees simultaneously, but only 1 can run `xcodebuild test`
+at a time.
+
+### Init Time Budget
+
+Worktree init can be slow (`pod install` = 30s, `npm ci` = 20s, Xcode build =
+minutes). The daemon should:
+
+1. **Init in background** while Kimi does pre-flight enrichment
+2. **Report progress** in the Slack thread: "Setting up environment..."
+3. **Cache aggressively**: if Podfile.lock hasn't changed since the last
+   worktree, symlink or copy the existing `Pods/` directory
+
+```go
+func (d *Daemon) prepareWorktree(threadTS, branchName string) (string, error) {
+    // 1. Create worktree
+    dir, err := worktree.Create(d.repoDir, branchName, "origin/main")
+    if err != nil { return "", err }
+
+    // 2. Detect project type
+    pt := worktree.DetectProject(dir)
+
+    // 3. Init (can be slow)
+    d.slack.SendMessage(d.channelID, "Setting up build environment...", threadTS)
+    if err := worktree.InitWorktree(dir, pt); err != nil {
+        return "", fmt.Errorf("worktree init failed: %w", err)
+    }
+
+    return dir, nil
+}
+```
+
+### Config
+
+```json
+// <repo>/.codebutler/config.json
+{
+  "build": {
+    "projectType": "auto",          // auto-detect, or force: "xcode", "node", etc.
+    "maxConcurrentBuilds": 1,       // for Xcode projects
+    "derivedDataInWorktree": true,  // -derivedDataPath .derivedData
+    "initCommand": "",              // custom: "make setup" (overrides auto-detect)
+    "preBuildCommand": ""           // runs before each Claude spawn: "bundle exec pod install"
+  }
+}
+```
+
+`initCommand` lets advanced users define custom setup for exotic projects.
+`preBuildCommand` runs before each Claude invocation (useful for projects
+where deps change frequently between branches).
+
+### What This Means for Section 30
+
+Section 30 described worktrees as "instant creation". With init scripts,
+creation is instant but **readiness** depends on the project:
+
+| Project | Worktree ready in |
+|---|---|
+| Go | ~1s (nothing to init) |
+| Python | ~5s (venv + pip) |
+| Node.js | ~15s (npm ci) |
+| iOS (Pods committed) | ~1s (already in checkout) |
+| iOS (Pods gitignored) | ~30s (pod install) |
+| iOS (first build) | ~2-5min (Xcode indexing + compile) |
+
+The daemon overlaps init with Kimi's pre-flight enrichment to hide latency.
+By the time the enriched prompt is ready, the worktree is usually
+initialized too.
