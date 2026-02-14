@@ -2153,3 +2153,296 @@ with a migration script or left in place (harmless).
 
 Delete `.codebutler/config.json`, restore from `.codebutler/config.whatsapp.bak`.
 Run `codebutler` — it will use WhatsApp again.
+
+---
+
+## 30. Worktree Isolation — True Parallel Execution
+
+### The Problem We Hadn't Solved
+
+Sections 11 and 12 describe N concurrent threads running Claude
+simultaneously. But if all N Claude processes run in the **same directory**,
+they'll see each other's uncommitted changes, conflict on `git checkout`,
+and corrupt each other's work. Concurrency at the thread level means
+nothing if the filesystem is shared.
+
+### The Solution: One Worktree Per Thread
+
+The daemon runs in the root repo directory. Each thread gets its own
+**git worktree** inside `.codebutler/branches/<branchName>/`. Claude
+runs inside that worktree — it sees only its own branch, its own changes.
+
+```
+myrepo/                              ← daemon runs here (Slack, SQLite, orchestration)
+  .codebutler/
+    config.json
+    store.db
+    branches/
+      fix-login/                     ← Thread A: Claude works here
+        auth/login.go  (modified)
+        ...
+      add-2fa/                       ← Thread B: Claude works here
+        auth/totp.go   (new)
+        ...
+      refactor-api/                  ← Thread C: Kimi is planning, no Claude yet
+        ...
+  src/
+  go.mod
+  CLAUDE.md
+```
+
+### Why Git Worktrees?
+
+`git worktree` creates a lightweight checkout that shares the same `.git`
+directory as the main repo. No full clone, no duplicate objects.
+
+```bash
+# Create a worktree for a new thread
+git worktree add .codebutler/branches/fix-login -b fix/login
+
+# Result: .codebutler/branches/fix-login/ is a full working tree
+# on branch fix/login, branched from current HEAD
+# Shares .git with the root repo — fast, lightweight
+
+# When done (PR merged)
+git worktree remove .codebutler/branches/fix-login
+git branch -d fix/login
+```
+
+**Comparison:**
+
+| Approach | Create time | Disk usage | Shared .git | Isolated |
+|---|---|---|---|---|
+| Same directory | 0 | 0 | — | No |
+| `git clone` (full) | Slow | 2x repo size | No | Yes |
+| `git worktree` | ~instant | Only changed files | Yes | Yes |
+
+Worktrees are the clear winner: instant creation, minimal disk, full isolation.
+
+### Thread Lifecycle (Updated)
+
+```
+1. User sends "fix the login bug" in Slack
+       ↓
+2. Kimi classifies → code_task
+       ↓
+3. Daemon creates worktree:
+       git worktree add .codebutler/branches/fix-login -b fix/login
+       ↓
+4. Kimi pre-flight runs (can read files from worktree or main repo)
+       ↓
+5. Claude spawns IN the worktree directory:
+       cd .codebutler/branches/fix-login && claude -p "..."
+       ↓
+6. Claude works: edits files, runs tests, commits, pushes, opens PR
+       ↓
+7. User replies in thread → Claude resumes IN SAME worktree:
+       cd .codebutler/branches/fix-login && claude -p --resume <id> "..."
+       ↓
+8. PR merged (detected by daemon)
+       ↓
+9. Cleanup:
+       git worktree remove .codebutler/branches/fix-login
+       git branch -d fix/login
+       Thread archived
+```
+
+### Concurrency Model (Revised)
+
+This changes the concurrency model from section 11. Now it actually works:
+
+```
+Thread A: "fix login bug"
+    → worktree: .codebutler/branches/fix-login/
+    → Claude running in fix-login/ (modifying auth/login.go)
+
+Thread B: "add 2FA" (arrives 10 seconds later)
+    → worktree: .codebutler/branches/add-2fa/
+    → Claude running in add-2fa/ (creating auth/totp.go)
+
+Thread C: "refactor API" (arrives 1 minute later)
+    → worktree: .codebutler/branches/refactor-api/
+    → Kimi planning (no Claude yet — user hasn't approved plan)
+
+All three run simultaneously. No filesystem conflicts.
+Each Claude sees only its own branch.
+```
+
+### What the Daemon Sees vs What Claude Sees
+
+```
+Daemon (root repo):
+    - Manages Slack connection
+    - Manages SQLite (store.db, sessions)
+    - Runs orchestration (Kimi classify, enrich, plan)
+    - Creates/removes worktrees
+    - Tracks thread lifecycle + conflicts
+    - Does NOT modify source code
+
+Claude (inside worktree):
+    - Sees a normal repo checkout on its own branch
+    - Reads CLAUDE.md (from its branch — may include changes from main)
+    - Edits files, runs tests, commits, pushes
+    - Opens PRs via gh
+    - Has no idea it's inside .codebutler/branches/
+    - Has no idea other threads exist
+```
+
+### Branch Naming
+
+The daemon generates branch names from the thread context:
+
+```go
+func branchName(threadTS, firstMessage string) string {
+    // Kimi generates a short slug from the message
+    // e.g., "fix the login bug" → "fix-login"
+    // e.g., "add 2FA to the auth module" → "add-2fa-auth"
+    slug := kimiClient.GenerateSlug(firstMessage)
+    return fmt.Sprintf("codebutler/%s", slug)
+}
+```
+
+Convention: `codebutler/<slug>` — makes it clear which branches
+are bot-managed. Example branches:
+- `codebutler/fix-login`
+- `codebutler/add-2fa-auth`
+- `codebutler/refactor-api-endpoints`
+
+### Kimi Planning Phase (No Worktree Yet)
+
+For complex tasks, Kimi plans before Claude executes (section 24.3).
+During planning, Kimi reads files from the **main repo** (no worktree
+needed — Kimi is read-only). The worktree is created only when Claude
+is about to execute:
+
+```
+User: "add user registration"
+    ↓
+Kimi reads main repo → generates plan → posts in thread
+    (no worktree created yet)
+    ↓
+User: "yes, go ahead"
+    ↓
+Daemon: git worktree add .codebutler/branches/add-registration -b codebutler/add-registration
+    ↓
+Claude executes plan inside worktree
+```
+
+This avoids creating worktrees for tasks that never get approved.
+
+### Worktree Base Branch
+
+Worktrees are created from the current `main` (or default branch):
+
+```go
+func (d *Daemon) createWorktree(branchName string) (string, error) {
+    dir := filepath.Join(d.repoDir, ".codebutler", "branches", branchName)
+
+    // Fetch latest main first
+    exec.Command("git", "fetch", "origin", "main").Run()
+
+    // Create worktree from origin/main
+    cmd := exec.Command("git", "worktree", "add", dir, "-b", branchName, "origin/main")
+    cmd.Dir = d.repoDir
+    return dir, cmd.Run()
+}
+```
+
+Always branching from latest `origin/main` minimizes future merge conflicts.
+
+### Disk Usage & Limits
+
+Git worktrees are cheap — they only store the working tree files, not
+the `.git` objects. A repo with 100MB of code creates ~100MB worktrees.
+With 5 concurrent threads: ~500MB.
+
+Config limit to prevent disk abuse:
+
+```json
+{
+  "access": {
+    "maxConcurrentThreads": 5,
+    "maxWorktreeDiskMB": 2000
+  }
+}
+```
+
+The daemon checks before creating a worktree:
+
+```go
+func (d *Daemon) canCreateWorktree() bool {
+    size := dirSize(filepath.Join(d.repoDir, ".codebutler", "branches"))
+    return size < d.config.Access.MaxWorktreeDiskMB * 1024 * 1024
+}
+```
+
+### What Updates in Previous Sections
+
+This section changes assumptions in several earlier sections:
+
+| Section | Change |
+|---|---|
+| **11. Message Flow** | `agent.Run()` now receives worktree path as working directory |
+| **12. Threads = Sessions** | Each thread now also = one worktree |
+| **19. Claude Sandboxing** | `You are working in: {worktree_path}` (not root repo) |
+| **24.1 Pre-flight** | Kimi reads from main repo or worktree (depending on phase) |
+| **24.5 Conflicts** | File overlap detection still applies — conflicts happen at merge, not at filesystem level |
+| **27. Cleanup** | `git worktree remove` added to cleanup cycle |
+
+### Gitignore
+
+Add to `.gitignore`:
+
+```
+.codebutler/
+```
+
+The entire `.codebutler/` directory (config, store, branches, images)
+is gitignored. Worktrees inside it are never committed to the main repo.
+
+### Implementation
+
+```go
+// internal/worktree/worktree.go
+
+// Create creates a new git worktree for a thread
+func Create(repoDir, branchName, baseBranch string) (worktreeDir string, err error)
+
+// Remove deletes a worktree and its local branch
+func Remove(repoDir, branchName string) error
+
+// List returns all active worktrees
+func List(repoDir string) ([]WorktreeInfo, error)
+
+// Exists checks if a worktree already exists for a branch
+func Exists(repoDir, branchName string) bool
+
+type WorktreeInfo struct {
+    Branch    string
+    Directory string
+    HEAD      string    // current commit
+    CreatedAt time.Time
+}
+```
+
+### The Full Picture
+
+```
+myrepo/                              ← daemon: Slack + SQLite + orchestration
+  .codebutler/
+    config.json                      ← per-repo config
+    store.db                         ← messages + sessions
+    branches/
+      fix-login/                     ← Thread A worktree (Claude active)
+      add-2fa/                       ← Thread B worktree (Claude active)
+      refactor-api/                  ← Thread C worktree (Kimi planning)
+    images/                          ← generated images
+  src/                               ← main repo source (daemon reads, never modifies)
+  CLAUDE.md                          ← shared knowledge
+  history/                           ← thread journals (committed via PRs)
+  go.mod
+```
+
+Each thread is fully isolated: its own Slack thread, its own Claude session,
+its own git branch, its own filesystem. The only shared state is SQLite
+(thread-safe) and the Slack connection (multiplexed). True parallel execution.
