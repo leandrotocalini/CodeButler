@@ -671,9 +671,9 @@ This is the **central architectural decision** of CodeButler2.
 - [x] **Markdown**: convert Claude output (standard Markdown) to Slack mrkdwn before sending
 - [x] **Code snippets**: short (<20 lines) inline, long (>=20 lines) as file upload
 - [x] **Knowledge sharing**: CLAUDE.md committed to branches, shared via PR merge
-- [x] **memory.md with approval**: after PR merge, Kimi proposes memory updates in thread, user approves/edits before saving
+- [x] **memory.md with approval**: after PR creation, Kimi proposes memory updates in thread, user approves/edits, committed to PR branch
 - [x] **Kimi self-improvement**: Kimi analyzes what Claude asked → adds "Planning Notes" so it handles it next time
-- [x] **memory.md coexistence**: local memory.md (Kimi) + shared CLAUDE.md (git) both exist
+- [x] **memory.md via git flow**: memory.md committed to repo, follows PR flow, merges to main with the PR
 - [x] **PR as journal**: thread summary goes in PR description (via `gh pr edit`), no files committed
 - [x] **Multi-model**: Claude executes code, cheap models (Kimi/GPT-4o-mini) orchestrate around it
 - [x] **Swappable providers**: three interfaces (ProductManager, Artist, Coder), all configurable via config.json
@@ -681,7 +681,7 @@ This is the **central architectural decision** of CodeButler2.
 - [x] **Approval gate**: user must explicitly approve before Claude runs. "yes"/"dale"/"go" triggers Phase 2
 - [x] **Questions never reach Claude**: Kimi answers questions directly (reads files, checks docs). Thread ends without Claude
 - [x] **Thread = Branch = PR**: each thread creates exactly one branch, one PR. Non-negotiable 1:1:1 mapping
-- [x] **PR merged = thread closed**: merge is the only way a thread ends. No stale timeouts, no manual close
+- [x] **User closes thread**: user says "merge"/"done" → CodeButler writes summary, commits memory, merges PR, deletes branch
 - [x] **Cross-thread references**: link old threads/PRs in new thread for read-only context. Rule stays: 1 thread = 1 branch = 1 PR
 - [x] **PR ↔ Thread link**: PR description includes Slack thread URL, thread shows PR URL. Bidirectional
 - [x] **`gh` CLI required**: all GitHub operations (PRs, merge detection, diffs) via `gh`. No API tokens needed
@@ -718,34 +718,51 @@ This is the **central architectural decision** of CodeButler2.
 
 ## 16. Memory with User Approval (Kimi)
 
-The daemon extracts learnings after a PR merges and **shows them to the
-user for approval** before saving to `memory.md`. The user controls what
+The daemon extracts learnings after creating a PR and **shows them to the
+user for approval** before committing to `memory.md`. The user controls what
 gets remembered. Uses Kimi (cheap and fast) instead of Claude.
 
 ### File
 
 ```
-<repo>/.codebutler/memory.md
+<repo>/memory.md
 ```
 
-Injected as context into the Claude and Kimi prompts on each thread.
+Committed to the repo — not gitignored. Injected as context into the Claude
+and Kimi prompts on each thread. Lives at the repo root alongside `CLAUDE.md`.
+
+### The Git Flow
+
+memory.md follows the same PR flow as code:
+
+1. **After PR creation**: Kimi extracts learnings → proposes in thread → user approves
+2. **Kimi commits** the approved changes to `memory.md` on the PR branch and pushes
+3. **memory.md update is part of the PR** — visible in the diff, reviewable
+4. **On merge**: memory.md lands on main → available to all future threads
+
+This means memory is:
+- **Versioned** — full git history of every learning
+- **Reviewable** — part of the PR diff, reviewer can see what the bot learned
+- **Branch-isolated** — thread B doesn't see thread A's learnings until merge
+- **Conflict-resolved** — git merge handles concurrent memory updates
 
 ### Trigger
 
-Memory extraction triggers when a thread ends, which can happen two ways:
+Memory extraction triggers after a PR is created:
 
-1. **PR merged** — the main path for code tasks and pushed assets
-2. **User says "done"** — for threads that don't produce a PR (questions,
-   images shown in Slack only)
+1. **PR created by Coder** — main path for code tasks
+2. **PR created by Kimi** — for image/asset tasks pushed via `gh pr create`
+3. **User says "done"** — for threads that don't produce a PR (questions,
+   images shown in Slack only) → committed directly to main
 
 When triggered, the daemon:
 
-1. Reads current `memory.md`
+1. Reads current `memory.md` from the PR branch
 2. Reads the full thread conversation (whatever phases occurred)
 3. Calls Kimi to analyze and propose memory updates
 4. **Posts the proposed changes in the Slack thread** for user review
 5. User approves, edits, or adds more learnings
-6. Daemon applies the approved changes to `memory.md`
+6. Daemon commits approved changes to `memory.md` on the PR branch and pushes
 
 ### The Feedback Loop
 
@@ -901,24 +918,26 @@ produce better plans over time.
 - **ProductManager**: uses `models.ProductManager` interface
   - Any provider that implements `Chat()` and `ChatJSON()`
   - Requires productManager config in global config
-- **Daemon integration**: on PR merge event, launch goroutine:
+- **Daemon integration**: after PR creation, launch goroutine:
   1. Call Kimi for memory analysis
   2. Post proposal in thread
   3. Wait for user response (with timeout — if no response in 24h, discard)
-  4. Apply approved changes
+  4. Commit approved changes to memory.md on the PR branch
+  5. `git push` to update the PR
 
 ### The Virtuous Cycle
 
 ```
 Thread N (code task):
   Kimi plans → Claude implements → Claude asks "JWT or cookies?"
-  → User: "JWT" → PR merged
+  → User: "JWT" → PR created
   → Kimi proposes: "always JWT" + "pre-check auth pattern"
   → User: "yes"
-  → memory.md updated
+  → memory.md committed to PR branch + pushed
+  → PR merged → memory.md lands on main ✓
 
-Thread N+1 (touches auth):
-  Kimi reads memory → knows JWT pattern → includes it in plan
+Thread N+1 (touches auth, branched from main after merge):
+  Kimi reads memory.md from main → knows JWT pattern → includes it in plan
   → Claude never asks → faster, cheaper, better
 
 Thread N+2 (image task):
@@ -926,7 +945,8 @@ Thread N+2 (image task):
   → Kimi shows prompt with blue #2563EB (from memory)
   → User: "perfect, go"
   → Kimi generates, user says "push it"
-  → PR merged → Kimi learns: "settings icon is a gear"
+  → PR created → Kimi learns: "settings icon is a gear" → committed to PR
+  → PR merged → learning on main ✓
 
 Thread N+3 (code + image):
   User: "add a loading spinner to the dashboard"
@@ -937,14 +957,15 @@ Thread N+3 (code + image):
 
 Thread N+4:
   Kimi catches something else Claude or itself would have asked
-  → Another planning note added
+  → Another planning note added → committed to PR → merged to main
   → System keeps improving
 ```
 
 Over time, Kimi's plans get more complete and its image prompts get
 more accurate because memory accumulates the patterns and decisions
 that matter. The user drives this process — nothing gets remembered
-without their approval.
+without their approval. And because memory follows git flow, it's
+versioned, reviewable, and merge-safe.
 
 ---
 
@@ -968,12 +989,17 @@ of plain, structured logs with good information.
 2026-02-14 15:04:41 CLD  thread 1707.123 → claude running (new session)
 2026-02-14 15:05:15 CLD  thread 1707.123 → done · 34s · 3 turns · $0.12
 2026-02-14 15:05:15 RSP  claude: "Fixed session expiry. PR #42 opened."
-2026-02-14 16:20:00 INF  PR #42 merged
-2026-02-14 16:20:01 MEM  thread 1707.123 → proposing 2 memory updates
-2026-02-14 16:20:02 RSP  kimi: "📝 Here's what I'd remember: ..."
-2026-02-14 16:25:00 MSG  leandro: "yes"
-2026-02-14 16:25:01 MEM  thread 1707.123 → saved 2 updates to memory.md
-2026-02-14 16:25:01 INF  thread 1707.123 → closed
+2026-02-14 15:05:16 MEM  thread 1707.123 → proposing 2 memory updates
+2026-02-14 15:05:17 RSP  kimi: "📝 Here's what I'd remember: ..."
+2026-02-14 15:10:00 MSG  leandro: "yes"
+2026-02-14 15:10:01 MEM  thread 1707.123 → committed memory.md to PR branch
+2026-02-14 15:10:02 INF  thread 1707.123 → pushed to origin/fix/session-expiry
+...
+2026-02-14 16:20:00 MSG  leandro: "dale merge"
+2026-02-14 16:20:01 INF  thread 1707.123 → generating PR summary
+2026-02-14 16:20:03 INF  thread 1707.123 → PR #42 merged (squash)
+2026-02-14 16:20:04 INF  thread 1707.123 → branch deleted, worktree removed
+2026-02-14 16:20:04 INF  thread 1707.123 → closed
 ```
 
 ### Tags
@@ -1271,51 +1297,51 @@ Generate meaningful filenames from context:
 Each thread works in isolation. Knowledge is shared across threads only
 when a PR is merged — through git, not through any custom sync mechanism.
 
+`memory.md` is committed to the repo and follows the same PR flow as code.
+This is the single knowledge sharing mechanism — no separate local/shared
+split needed.
+
 ### The Flow
 
 ```
 Thread A: "fix the login bug"
     → Claude works on branch fix/login
-    → Claude learns: "auth uses bcrypt, sessions expire after 24h"
-    → These learnings go into CLAUDE.md on the branch
-    → PR created → reviewed → merged to main
-    → CLAUDE.md changes now in main ✓
+    → PR created
+    → Kimi extracts learnings → user approves → committed to memory.md on branch
+    → PR merged to main
+    → memory.md now on main ✓
 
 Thread B: "add password reset" (started after merge)
-    → Claude reads CLAUDE.md from main (or its branch base)
-    → Already knows: "auth uses bcrypt, sessions expire after 24h"
+    → Branches from main → memory.md already has Thread A's learnings
+    → Kimi reads memory → knows "auth uses bcrypt, sessions expire after 24h"
     → Builds on existing knowledge ✓
 
-Thread C: "refactor the API" (started BEFORE merge)
+Thread C: "refactor the API" (started BEFORE Thread A merged)
     → Still working on its branch, doesn't see Thread A's learnings
-    → Gets the knowledge on next rebase/merge from main
+    → Gets the knowledge on next rebase from main
 ```
 
 ### Why This Is Elegant
 
 1. **No custom sync** — git is the knowledge transport
 2. **Isolation by default** — threads can't pollute each other's context
-3. **Review gate** — learnings go through PR review before becoming shared
-4. **Conflict resolution** — git merge handles conflicting CLAUDE.md edits
-5. **Audit trail** — every knowledge addition is a commit with context
+3. **Review gate** — memory updates are visible in the PR diff
+4. **Conflict resolution** — git merge handles concurrent memory.md edits
+5. **Audit trail** — every learning is a commit with full thread context
+6. **Single source of truth** — one file, one mechanism, no local/shared split
 
-### How It Differs from memory.md (Section 16)
+### How memory.md Relates to CLAUDE.md
 
-Section 16 describes auto-memory via Kimi that updates `.codebutler/memory.md`
-(gitignored, local). This section describes knowledge in `CLAUDE.md` (committed,
-shared).
-
-| | `.codebutler/memory.md` (Sec 16) | `CLAUDE.md` (Sec 21) |
+| | `memory.md` | `CLAUDE.md` |
 |---|---|---|
-| **Scope** | Local to this daemon instance | Shared across all developers |
-| **Written by** | Kimi (automatic) | Claude (during work) |
-| **Gitignored** | Yes | No — committed |
-| **Sharing** | Never shared | Shared via PR merge |
-| **Content** | Operational learnings | Codebase knowledge, conventions |
-| **Review** | No review | PR review gate |
+| **Written by** | Kimi (automatic, with user approval) | Humans (manual) |
+| **Content** | Learnings from conversations: patterns, decisions, planning notes | Codebase conventions, dev setup, architecture |
+| **Updates** | Every PR (Kimi proposes, user approves) | Occasionally (by developers) |
+| **Read by** | Kimi + Claude (injected into prompts) | Claude (auto-loaded) |
+| **Committed** | Yes — via PR flow | Yes — manual commits |
 
-Both can coexist: memory.md for local operational memory, CLAUDE.md for
-shared codebase knowledge.
+Both live at the repo root. `CLAUDE.md` is the human-curated project guide.
+`memory.md` is the bot's evolving knowledge, growing with every thread.
 
 ---
 
@@ -1377,11 +1403,12 @@ permanent, indexed, and searchable by the entire team.
 
 ```
 v1: Knowledge is local, trapped in one WhatsApp session
-    Claude learns things → session ends → knowledge lost (unless memory.md)
+    Claude learns things → session ends → knowledge lost
 
 v2: Knowledge flows through git
-    Claude learns things → writes to CLAUDE.md → PR merge → shared with all threads
-    Natural review gate: bad learnings get caught in PR review
+    Thread ends → Kimi extracts learnings → commits to memory.md on PR branch
+    → PR merged → memory.md on main → all future threads inherit it
+    Natural review gate: memory updates visible in PR diff
     Natural conflict resolution: git merge
 ```
 
@@ -1402,7 +1429,7 @@ v2 naturally supports teams:
 | State machine | ~300 lines, 4 states, 3 timers | None |
 | Concurrency | 1 conversation at a time | N concurrent threads |
 | UX | Flat chat, `[BOT]` prefix | Structured threads, native bot identity |
-| Knowledge sharing | Local memory.md | CLAUDE.md via PR merge |
+| Knowledge sharing | Local memory.md | memory.md via PR merge (git flow) |
 | Searchability | Local SQLite | Slack search (team-wide) |
 | Team support | Single user | Multi-user native |
 | Code complexity | ~630 lines daemon.go | ~200 lines estimated |
@@ -1452,9 +1479,17 @@ Fixed timezone comparison in session validation and remember-me cookie.
 - 30 days for remember-me duration (standard practice)
 - Kept session cookies (MaxAge=0) for non-remember-me logins
 
+## Participants
+- @leandro — requested the fix, approved the plan
+- @maria — suggested checking the remember-me checkbox
+
 ## Slack Thread
 https://myworkspace.slack.com/archives/C0123ABCDEF/p1732456789123456
 ```
+
+The **Participants** section logs everyone who interacted in the thread.
+Authorization is simple: **anyone in the Slack channel can interact**.
+The channel membership IS the access control — Slack handles it.
 
 ### Why PR Description Instead of Files
 
@@ -1572,8 +1607,8 @@ No more `history/` folder. Two layers instead of three:
 
 | Layer | Loaded by Claude | Audience | Purpose |
 |---|---|---|---|
-| `CLAUDE.md` | Yes (auto) | Claude + humans | Codebase conventions, shared knowledge |
-| `.codebutler/memory.md` | Yes (auto) | Claude only | Operational memory, local learnings |
+| `CLAUDE.md` | Yes (auto) | Claude + humans | Codebase conventions, project guide |
+| `memory.md` | Yes (injected) | Kimi + Claude | Learnings from conversations, planning notes |
 | PR description | No | Humans (reviewers) | What happened and why (lives on GitHub) |
 
 ### Implementation
@@ -1769,7 +1804,7 @@ Kimi: generates via gpt-image-1
 Kimi: [uploads image] "Here it is. What do you want to do?
    ✅ Done  ·  🔄 Adjust  ·  📁 Push to repo  ·  🔧 Use with Claude"
 User: "looks good"
-→ Phase 3 (memory). Kimi learns: "logo style: minimalist, blue #2563EB"
+→ User: "done" → memory extraction. Kimi learns: "logo style: minimalist, blue #2563EB"
 ```
 
 **Image generation — iterate then push to repo:**
@@ -1788,7 +1823,8 @@ Kimi: "Updated prompt: '...rounded corners, circular shape...' Generating."
 Kimi: [uploads new image] "Better?"
 User: "yes, push it"
 Kimi: creates branch, adds favicon to static/, commits, opens PR
-→ Phase 3 (memory) on PR merge. Kimi learns: "favicon is round, blue"
+→ PR created → memory extraction → Kimi learns: "favicon is round, blue"
+→ User: "dale merge" → summary + merge + cleanup
 ```
 
 **Image generation — then hand off to Claude for implementation:**
@@ -1877,7 +1913,7 @@ Workflow:
    b. Generate/edit the image with a context-aware prompt
    c. Show the result in Slack
    d. Ask the user what to do next:
-      - Done → thread ends (Phase 3: memory)
+      - Done → user says "done" → memory extraction → thread closed
       - Iterate → adjust and re-generate
       - Push to repo → create branch, commit image, open PR
       - Continue with Claude → build a plan that uses the image
@@ -2063,7 +2099,7 @@ gpt-image-1: generate/edit with approved prompt
 Kimi: upload to Slack thread + ask user what to do next
     ↓
 User chooses:
-  ├─ "looks good"        → thread done → Phase 3 (memory)
+  ├─ "looks good"/"done" → memory extraction → thread closed
   ├─ "make it rounder"   → Kimi adjusts prompt, shows it, re-generates
   ├─ "push it"           → Kimi creates branch + PR with asset
   ├─ "use it in the app" → Kimi builds plan → user approves → Phase 2
@@ -2110,7 +2146,8 @@ When the user says "push it", Kimi handles it directly:
 3. git add + commit
 4. git push + gh pr create
 5. Post PR link in thread
-→ On merge → Phase 3 (memory)
+→ Memory extraction → committed to PR branch
+→ User: "dale merge" → summary + merge + cleanup
 ```
 
 This is lightweight — no worktree needed, no Claude, just a simple
@@ -2170,33 +2207,44 @@ means Kimi's plan wasn't detailed enough. Over time, Kimi's system
 prompt gets refined to produce more complete plans (auto-memory helps
 with this — see section 16).
 
-### 24.4 Post-flight: After PR Merges
+### 24.4 Post-flight: After PR Creation + Thread Close
 
-Post-flight triggers on **PR merge**, not on Claude's response. This is
-when the thread's work is truly done and we can extract learnings.
+Post-flight has two stages:
 
+**Stage 1: After PR creation** — memory extraction begins immediately:
 ```
-PR merged (GitHub webhook / poll)
+PR created (detected in Claude's response)
     ↓
-    ├─ Kimi: analyze full thread → propose memory updates (section 16)
-    │   → post in thread → wait for user approval → save to memory.md
-    │
-    ├─ Kimi: detect if Claude asked questions Kimi should have resolved
-    │   → add to "Planning Notes" in memory (with user approval)
-    │
+    ├─ Kimi: add thread URL to PR body
     ├─ Kimi: detect if Claude left TODO/FIXME in code
     │   → warn in thread: "Claude left 2 TODOs — want a new thread to resolve them?"
     │
-    └─ Kimi: clean up worktree for merged branch
+    └─ Kimi: analyze full thread → propose memory updates (section 16)
+        → post in thread → wait for user approval
+        → commit approved memory.md changes to PR branch → push
 ```
 
-**While Claude is still working** (before PR merge), the only post-processing
-is practical:
+**Stage 2: User closes thread** — when the PR is approved and user says
+"done"/"merge"/"dale", CodeButler finishes the thread:
+```
+User: "merge" / "done" / "dale"
+    ↓
+    ├─ Kimi: generate PR summary → update PR description via `gh pr edit`
+    ├─ Merge PR: `gh pr merge --squash`
+    ├─ Delete remote branch: `git push origin --delete <branch>`
+    └─ Clean up worktree: `git worktree remove`
+```
+
+The user controls when the thread ends. The PR can stay open for review,
+additional commits, or follow-up conversation. Only when the user
+explicitly says to close does CodeButler merge and clean up.
+
+**While Claude is still working** (before PR creation), the only
+post-processing is practical:
 ```
 Claude response arrives
     ↓
-    ├─ Kimi: summarize for Slack (if response > 4000 chars)
-    └─ Kimi: detect PR creation → add thread URL to PR body
+    └─ Kimi: summarize for Slack (if response > 4000 chars)
 ```
 
 ### 24.5 Thread = Branch = PR: Conflict Coordination
@@ -2230,8 +2278,9 @@ Thread created (Slack thread)
     → Claude starts working
     → Claude modifies files (tracked per response)
     → Claude opens PR
-    → PR merged (detected via GitHub webhook or polling)
-    → Thread CLOSED: worktree removed, branch deleted, resources freed
+    → Memory extracted → committed to PR branch
+    → User: "dale merge"
+    → Thread CLOSED: PR merged, branch deleted, worktree removed
 ```
 
 ```go
@@ -2487,8 +2536,7 @@ and even push assets to the repo without Claude.
          │              └──┬──────────────────────────┘
          │                 ↓
          │        ┌────────────────┐
-         │        │  PR merged or  │
-         │        │  user: "done"  │───→ Phase 3 (memory)
+         │        │  user: "done"  │───→ Phase 3 (memory + merge + cleanup)
          │        └────────────────┘
          ↓
 ┌────────────────┐
@@ -2513,14 +2561,15 @@ and even push assets to the repo without Claude.
     ╚══════════════════╤═══════════════════╝
                        ↓
               ┌────────────────┐
-              │  PR merged     │
+              │  PR created    │
               └────────┬───────┘
                        ↓
     ╔══════════════════════════════════════╗
-    ║   PHASE 3: MEMORY REVIEW (Kimi)      ║
+    ║   PHASE 3: MEMORY + CLOSE (Kimi)     ║
     ║          ~$0.003                      ║
     ╠══════════════════════════════════════╣
     ║                                      ║
+    ║  3a. Memory extraction:              ║
     ║  Kimi: analyze full thread           ║
     ║    - what Claude asked (learnings)   ║
     ║    - project decisions made          ║
@@ -2531,19 +2580,30 @@ and even push assets to the repo without Claude.
     ║      ↓                               ║
     ║  User: approves / edits / adds       ║
     ║      ↓                               ║
-    ║  Save to memory.md                   ║
+    ║  Commit memory.md to PR branch       ║
+    ║  git push                            ║
+    ║                                      ║
+    ║  ── PR open for review ──            ║
+    ║                                      ║
+    ║  3b. User closes thread:             ║
+    ║  User: "merge" / "done" / "dale"     ║
+    ║      ↓                               ║
+    ║  Kimi: generate summary → PR desc    ║
+    ║  gh pr merge --squash                ║
+    ║  Delete branch + worktree            ║
     ║                                      ║
     ╚══════════════════╤═══════════════════╝
                        ↓
               ┌────────────────┐
               │ Thread CLOSED  │
+              │ memory on main │
               └────────────────┘
 ```
 
 **Threads that skip Phase 2:**
-- **Question** → Kimi answers directly. Thread done. ~$0.002.
+- **Question** → Kimi answers directly. User says "done". Memory extraction → committed directly to main. ~$0.002.
 - **Image only** → Kimi generates, user says "looks good". Thread done. ~$0.01.
-- **Image + push** → Kimi generates, pushes to repo via PR. Memory on merge. ~$0.01.
+- **Image + push** → Kimi generates, pushes to repo via PR. Memory committed to PR branch. ~$0.01.
 - **Image + Claude** → Kimi generates, then transitions to Phase 2 with images ready.
 
 ### 24.8 Model Interfaces
@@ -2989,7 +3049,7 @@ path that doesn't lose user messages.
 | Slack disconnect | Socket Mode auto-reconnect + state callback | Auto-reconnect (built into slack-go SDK) | Brief pause, messages queued by Slack |
 | Claude process hangs | `context.WithTimeout` (from config `timeout` min) | Kill process, reply in thread: "timed out, try again" | One thread affected |
 | Claude process crashes | Non-zero exit code from `exec.Command` | Reply in thread with error, session preserved for retry | User can say "try again" |
-| Kimi/product manager unreachable | HTTP timeout (10s) | Skip product manager, send directly to Claude (fallback to v1 behavior) | Slightly more expensive, but works |
+| Kimi/product manager unreachable | HTTP timeout (10s) | Try fallback model → if also fails, send directly to Claude (v1 behavior) | Slightly more expensive, but works |
 | SQLite locked | Busy timeout on connection (`_busy_timeout=5000`) | Retry with backoff, max 3 attempts | Brief delay |
 | Out of disk | Write failure on store.db | Log error, continue processing in-memory | New messages not persisted until resolved |
 | Machine reboot | systemd/launchd restarts daemon | Daemon starts, reconnects Slack, pending messages reprocessed | Brief downtime |
@@ -3035,11 +3095,35 @@ func (d *Daemon) Run() error {
 }
 ```
 
-### Circuit Breaker for ProductManager
+### Model Fallback for ProductManager and Artist
 
-If Kimi fails 3 times in a row, disable orchestration for 5 minutes
-and route everything directly to Claude. This prevents cascading
-slowdowns when the product manager is down:
+Each role can have a **fallback model** configured. If the primary fails,
+try the fallback before giving up. This is especially useful because PM
+and Artist use cheap models — having two options costs almost nothing.
+
+```json
+{
+  "productManager": {
+    "provider": "openai", "model": "gpt-4o-mini", "apiKey": "sk-...",
+    "fallback": { "provider": "openai", "model": "gpt-4o", "apiKey": "sk-..." }
+  },
+  "artist": {
+    "provider": "openai", "model": "gpt-image-1", "apiKey": "sk-...",
+    "fallback": { "provider": "stability", "model": "sd3", "apiKey": "sk-..." }
+  }
+}
+```
+
+The fallback chain:
+1. **Try primary** — e.g., Kimi (cheapest)
+2. **Try fallback** — e.g., GPT-4o-mini (still cheap)
+3. **Skip to Claude** — if both fail, route directly to Claude (v1 behavior)
+
+### Circuit Breaker
+
+If the primary fails 3 times in a row, switch to fallback for 5 minutes.
+If the fallback also fails, skip the product manager entirely and route
+directly to Claude. This prevents cascading slowdowns:
 
 ```go
 type CircuitBreaker struct {
@@ -3055,7 +3139,7 @@ func (cb *CircuitBreaker) Allow() bool {
         cb.failures = 0 // reset
         return true
     }
-    return false // skip product manager
+    return false // try fallback or skip product manager
 }
 ```
 
@@ -3065,8 +3149,10 @@ func (cb *CircuitBreaker) Allow() bool {
 
 ### Who Can Use the Bot?
 
-By default, **any member of the Slack channel** can trigger Claude.
-This is intentional — the channel IS the access control boundary.
+By default, **any member of the Slack channel** can interact with
+CodeButler. The channel IS the access control boundary — no separate
+auth layer needed. Every participant is logged in the PR description
+(see section 23) so there's always an audit trail of who said what.
 
 Optional restrictions in config:
 
@@ -3091,7 +3177,9 @@ Layer 1 — Slack rate limits (platform-enforced)
     → Queue with backoff, built into slack-go SDK
 
 Layer 2 — Claude concurrency (resource protection)
-    Max N concurrent Claude processes (default 5)
+    Max N concurrent Claude processes (configurable, depends on machine)
+    Each Claude CLI is a full process — CPU, memory, potentially builds
+    A laptop might handle 2-3, a beefy server 5-10
     → New threads wait in queue if limit reached
     → Reply: "⏳ Queue position: 3. Processing will start shortly."
 
@@ -3145,18 +3233,21 @@ This is non-negotiable. Every thread follows the same lifecycle:
 created → working → pr_opened → merged → closed
 ```
 
-There is exactly **one way** a thread ends: **its PR gets merged**.
-No timeouts, no manual close, no "stale" state. A thread lives until
-its work is merged into main.
+There is exactly **one way** a thread ends: **the user says to close it**
+("merge", "done", "dale"). CodeButler then writes the summary, commits
+memory, merges the PR, and cleans up. No timeouts, no automatic close,
+no "stale" state.
 
 ```
 Thread "fix login bug"
     → branch: codebutler/fix-login
     → worktree: .codebutler/branches/fix-login/
-    → PR #42
-    → PR #42 merged
+    → PR #42 created → memory committed to branch
+    → User: "dale merge"
+    → Kimi: summary → PR description updated
+    → PR #42 merged (squash)
     → thread CLOSED ✓
-    → worktree removed, branch deleted, resources freed
+    → branch deleted, worktree removed, resources freed
 ```
 
 ### Thread States
@@ -3176,28 +3267,47 @@ Only 4 states. No "idle", no "stale", no "archived":
 | `pr_opened` | PR exists, awaiting review/merge | Yes (triggers new Claude run for changes) |
 | `merged` | PR merged, thread is done | No — bot replies: "This thread is closed. Start a new thread." |
 
-### What Happens When PR Is Merged
+### What Happens After PR Creation (Memory)
 
 ```go
-func (d *Daemon) onPRMerged(threadTS string, prNumber int) {
+func (d *Daemon) onPRCreated(threadTS string, prNumber int) {
     scope := d.tracker.Get(threadTS)
 
-    // 1. Post-flight (parallel, non-blocking)
-    go d.updatePRDescription(threadTS, prNumber) // summary → gh pr edit
-    go d.extractMemory(threadTS)                // update memory.md
+    // 1. Add thread URL to PR body
+    go d.addThreadLinkToPR(threadTS, prNumber)
 
-    // 2. Notify in thread
+    // 2. Extract memory (proposes in thread, waits for approval, commits to PR branch)
+    go d.extractMemory(threadTS, scope.Branch) // commit memory.md + push
+}
+```
+
+### What Happens When User Closes Thread
+
+The user explicitly triggers the close ("merge", "done", "dale"):
+
+```go
+func (d *Daemon) onUserClose(threadTS string) {
+    scope := d.tracker.Get(threadTS)
+
+    // 1. Generate PR summary → update PR description
+    d.updatePRDescription(threadTS, scope.PRNumber)
+
+    // 2. Merge the PR
+    d.github.MergePR(scope.PRNumber) // gh pr merge --squash
+
+    // 3. Notify in thread
     d.slack.SendMessage(scope.ChannelID,
-        fmt.Sprintf("PR #%d merged. Thread closed.", prNumber),
+        fmt.Sprintf("PR #%d merged. Thread closed.", scope.PRNumber),
         threadTS)
 
-    // 3. Cleanup worktree + branch
+    // 4. Cleanup: delete remote branch + remove worktree
+    d.github.DeleteBranch(scope.Branch)
     worktree.Remove(d.repoDir, scope.Branch)
 
-    // 4. Remove from active tracking
+    // 5. Remove from active tracking
     d.tracker.Close(threadTS)
 
-    // 5. Notify overlapping threads to rebase
+    // 6. Notify overlapping threads to rebase
     d.notifyOverlappingThreads(scope)
 }
 ```
@@ -3239,9 +3349,10 @@ No Claude call, no cost. Just a static message.
 
 | Resource | Cleaned up when | How |
 |---|---|---|
-| Worktree (`.codebutler/branches/X/`) | PR merged | `git worktree remove` |
-| Local branch | PR merged | `git branch -d` (GitHub deletes remote) |
-| Conflict tracking | PR merged | `tracker.Close()` |
+| Worktree (`.codebutler/branches/X/`) | User closes thread | `git worktree remove` |
+| Local branch | User closes thread | `git branch -d` |
+| Remote branch | User closes thread | `git push origin --delete` |
+| Conflict tracking | User closes thread | `tracker.Close()` |
 | Claude session in DB | Never (cheap, allows audit) | Stays in SQLite |
 | Thread in Slack | Never (it's Slack history) | Stays visible |
 
@@ -3558,9 +3669,10 @@ git worktree add .codebutler/branches/fix-login -b fix/login
 # on branch fix/login, branched from current HEAD
 # Shares .git with the root repo — fast, lightweight
 
-# When done (PR merged)
+# When user closes thread (after merge)
 git worktree remove .codebutler/branches/fix-login
 git branch -d fix/login
+git push origin --delete fix/login
 ```
 
 **Comparison:**
@@ -3595,13 +3707,15 @@ Worktrees are the clear winner: instant creation, minimal disk, full isolation.
 7. User replies in thread → Claude resumes IN SAME worktree:
        cd .codebutler/branches/fix-login && claude -p --resume <id> "..."
        ↓
-8. PR merged (detected by daemon)
+8. PR created → memory extraction:
+       - Kimi analyzes thread → proposes learnings → user approves
+       - memory.md committed to PR branch + pushed
        ↓
-9. THREAD CLOSED:
-       - Post-flight: update PR description (summary via Kimi), extract memory
-       - Notify in thread: "PR #42 merged. Thread closed."
+9. User: "dale merge" → THREAD CLOSED:
+       - Kimi generates summary → updates PR description via gh pr edit
+       - gh pr merge --squash
+       - git push origin --delete codebutler/fix-login
        - git worktree remove .codebutler/branches/fix-login
-       - git branch -d codebutler/fix-login
        - Remove from conflict tracker
        - Thread no longer accepts messages
 ```
