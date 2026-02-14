@@ -229,6 +229,9 @@ CREATE TABLE sessions (
 | `internal/slack/channels.go` | List/create channels, get info |
 | `internal/slack/snippets.go` | Code block extraction, smart formatting, file upload |
 | `internal/history/history.go` | PR detection, thread fetch, summary generation, commit |
+| `internal/llm/client.go` | OpenAI-compatible client for cheap models (Kimi, GPT-4o-mini, DeepSeek) |
+| `internal/preflight/preflight.go` | Pre-Claude enrichment: grep repo, read files, build focused prompt |
+| `internal/router/router.go` | Message classifier: question vs code_task vs clarify |
 
 ### Modify
 | File | Changes |
@@ -560,6 +563,10 @@ This is the **central architectural decision** of CodeButler2.
 - [x] **Knowledge sharing**: CLAUDE.md committed to branches, shared via PR merge
 - [x] **memory.md coexistence**: local memory.md (Kimi) + shared CLAUDE.md (git) both exist
 - [x] **Thread history**: auto-generate `history/<threadId>.md` when PR is opened, committed to the PR branch
+- [x] **Multi-model**: Claude executes code, cheap models (Kimi/GPT-4o-mini) orchestrate around it
+- [x] **Smart routing**: Kimi classifies messages — questions answered directly, code tasks go to Claude
+- [x] **Pre-flight enrichment**: Kimi scans repo + memory before Claude runs, builds focused prompt
+- [x] **Workflow planning**: Kimi generates execution plans for complex tasks, user approves before Claude runs
 
 ---
 
@@ -1296,3 +1303,312 @@ Three complementary layers with different audiences:
   - `GenerateSummary(messages []Message, prNumber int) string`
   - `WriteAndCommit(repoDir, threadTS, summary string) error`
 - **Integration**: called in daemon after `processBatch` when PR is detected
+
+---
+
+## 24. Multi-Model Orchestration — Claude Executes, Cheap Models Organize
+
+CodeButler is Claude Code with extras. Claude stays as the sole code executor.
+But the "extras" — everything that happens before, around, and after Claude —
+can be powered by cheaper, faster models. The principle:
+
+```
+Cheap models (Kimi, GPT-4o-mini) = orchestrators    (~$0.001/call)
+Claude                            = executor          (~$0.10-1.00/call)
+OpenAI                            = media specialist   (Whisper, gpt-image-1)
+```
+
+**The goal is NOT to replace Claude. It's to make every Claude call maximally
+effective by doing the cheap work before and after.**
+
+### Model Roles
+
+| Model | Role | Cost | Used For |
+|---|---|---|---|
+| **Claude** (claude -p) | Code executor | $$$ | Write code, fix bugs, refactor, create PRs |
+| **Kimi** (OpenAI-compat API) | Orchestrator | ¢ | Triage, enrich prompts, extract memory, summarize |
+| **GPT-4o-mini** | Orchestrator alt | ¢ | Same as Kimi, interchangeable |
+| **Whisper** | Transcription | ¢ | Voice → text |
+| **gpt-image-1** | Image generation | ¢¢ | /create-image |
+
+### 24.1 Pre-flight: Enrich Before Claude Runs
+
+When a user sends "fix the login bug", Claude wastes expensive turns
+exploring the codebase to find what "login" means. Kimi can do this
+cheaper and faster.
+
+```
+User: "fix the login bug"
+    ↓
+Kimi pre-flight (cheap, fast):
+    1. grep repo for "login" → finds auth/login.go, auth/session.go
+    2. Read those files (or summaries)
+    3. Check recent git log for login-related changes
+    4. Check memory.md for known login conventions
+    5. Build enriched prompt:
+       "Fix the login bug. Relevant files:
+        - auth/login.go (handles POST /login, bcrypt check)
+        - auth/session.go (session creation, 24h expiry)
+        - Recent: commit abc123 changed session timeout
+        - Memory: auth uses bcrypt, sessions expire after 24h"
+    ↓
+Claude receives focused, enriched prompt
+    → Fewer exploration turns → faster, cheaper
+```
+
+**Implementation**:
+```go
+// internal/preflight/preflight.go
+
+type Context struct {
+    RelevantFiles []FileInfo   // paths + summaries
+    RecentCommits []string     // related git log entries
+    MemoryHits    []string     // relevant memory.md lines
+    EnrichedPrompt string     // final prompt for Claude
+}
+
+func Enrich(kimiClient, repoDir, userMessage, memory string) (*Context, error)
+```
+
+### 24.2 Smart Routing: Not Everything Needs Claude
+
+Some messages don't need a $1 Claude call. Kimi can handle simple
+questions directly, and only escalate to Claude when code changes
+are needed.
+
+```
+User message
+    ↓
+Kimi classifier (1 API call, ~$0.001):
+    ├─ "question"  → Kimi answers directly (grep + read + respond)
+    ├─ "code_task" → Claude (full agent with tools)
+    ├─ "clarify"   → Kimi asks follow-up question
+    └─ "off_topic" → Kimi politely redirects
+```
+
+**Examples**:
+
+| Message | Classification | Handler |
+|---|---|---|
+| "fix the login bug" | code_task | Claude |
+| "what does the auth middleware do?" | question | Kimi (read file + summarize) |
+| "how do we deploy?" | question | Kimi (check README/docs) |
+| "refactor the API to use REST" | code_task | Claude |
+| "is the CI passing?" | question | Kimi (check gh status) |
+| "login" | clarify | Kimi: "Can you describe the issue?" |
+
+**Cost impact**: If 40% of messages are questions, that's 40% fewer Claude
+calls. At ~$0.50/Claude call, this adds up fast.
+
+**Implementation**:
+```go
+// internal/router/router.go
+
+type Route string
+const (
+    RouteCode    Route = "code_task"
+    RouteQuestion Route = "question"
+    RouteClarify  Route = "clarify"
+)
+
+func Classify(kimiClient, message string) (Route, error)
+func AnswerQuestion(kimiClient, repoDir, question string) (string, error)
+```
+
+### 24.3 Thread Workflow: Plan → Approve → Execute
+
+For complex tasks, Kimi creates a structured work plan before Claude
+executes anything. The user reviews and approves the plan first.
+
+```
+User: "add user registration with email verification"
+    ↓
+Kimi workflow planner:
+    1. Analyze request complexity → "complex, multi-file"
+    2. Scan codebase for existing patterns (auth, models, routes)
+    3. Generate execution plan:
+
+        📋 *Work Plan*
+        1. Create `models/user.go` — User struct + DB schema
+        2. Create `auth/register.go` — POST /register endpoint
+        3. Create `auth/verify.go` — GET /verify?token=... endpoint
+        4. Create `email/send.go` — verification email sender
+        5. Update `routes.go` — add new endpoints
+        6. Add tests for registration flow
+
+        Estimated: ~5 Claude turns
+        Reply *yes* to execute, or describe changes.
+    ↓
+User: "yes" (or "skip email verification for now")
+    ↓
+Claude executes the approved plan (or adjusted version)
+```
+
+**Why this is better than Claude planning**:
+- Kimi plan costs ~$0.002. Claude plan costs ~$0.50.
+- User gets to review before expensive execution starts
+- If user says "no, different approach" → saved a full Claude call
+- Claude gets a structured plan as input → more focused execution
+
+### 24.4 Post-flight: After Claude Responds
+
+After Claude finishes, cheap models handle the aftermath:
+
+```
+Claude response arrives
+    ↓ (parallel, non-blocking)
+    ├─ Kimi: extract memory/learnings → update memory.md
+    ├─ Kimi: detect PR creation → generate history/<thread>.md
+    ├─ Kimi: summarize for Slack (if response is very long)
+    └─ Kimi: detect if Claude left TODO/FIXME → warn in thread
+```
+
+### 24.5 Multi-Thread Conflict Detection
+
+When multiple threads are active, Kimi monitors for conflicts:
+
+```
+Thread A: "refactor auth module" → Claude working on auth/
+Thread B: "fix login timeout"    → Claude working on auth/
+
+Kimi detects overlap:
+    → Posts in Thread B: "⚠️ Thread A is also modifying auth/.
+       Consider waiting for Thread A to finish, or coordinate."
+```
+
+**Implementation**:
+```go
+// Track which files each thread is touching
+type ThreadScope struct {
+    ThreadTS string
+    Files    []string  // files modified by Claude in this thread
+}
+
+// On each Claude response, Kimi extracts modified files
+// and checks against active threads
+func DetectConflicts(activeThreads []ThreadScope, newThread ThreadScope) []Conflict
+```
+
+### 24.6 Cost Dashboard
+
+Track and display cost per model, per thread, per day:
+
+```
+Thread 1732456789.123456: "fix login bug"
+    Kimi:   3 calls  ·  $0.003
+    Claude: 2 calls  ·  $0.84
+    Total:            ·  $0.843
+
+Daily: Claude $12.40 · Kimi $0.15 · Whisper $0.02 · Total $12.57
+```
+
+Exposed in the web dashboard (`/api/costs`) and optionally posted
+to Slack weekly.
+
+### 24.7 The Full Pipeline
+
+Putting it all together — a single message flows through this pipeline:
+
+```
+┌─────────────────────────────────────────────────────┐
+│                   USER MESSAGE                       │
+└──────────────────────┬──────────────────────────────┘
+                       ↓
+              ┌────────────────┐
+              │  Kimi: CLASSIFY │  ~$0.001, <1s
+              └───────┬────────┘
+                      │
+         ┌────────────┼────────────┐
+         ↓            ↓            ↓
+    [question]   [code_task]   [clarify]
+         │            │            │
+         ↓            ↓            ↓
+   Kimi answers  ┌─────────┐  Kimi asks
+   directly      │  Kimi:   │  follow-up
+   (~$0.002)     │ ENRICH   │
+                 │ + PLAN   │  ~$0.003
+                 └────┬─────┘
+                      ↓
+              ┌───────────────┐
+              │ User approves │  (for complex tasks)
+              │   the plan    │
+              └───────┬───────┘
+                      ↓
+              ┌───────────────┐
+              │    Claude:    │
+              │   EXECUTE     │  ~$0.50-2.00
+              │  (code agent) │
+              └───────┬───────┘
+                      ↓
+         ┌────────────┼────────────┐
+         ↓            ↓            ↓
+   Kimi: extract  Kimi: detect  Kimi: format
+   memory         PR → history  response
+   (~$0.001)      (~$0.002)     (~$0.001)
+         ↓            ↓            ↓
+└─────────────────────────────────────────────────────┐
+│                SLACK THREAD RESPONSE                  │
+└──────────────────────────────────────────────────────┘
+```
+
+### 24.8 Model Client Abstraction
+
+All cheap models use OpenAI-compatible APIs. One client handles them all:
+
+```go
+// internal/llm/client.go
+
+type Client struct {
+    baseURL string
+    apiKey  string
+    model   string
+}
+
+// Kimi, GPT-4o-mini, DeepSeek — all OpenAI-compatible
+func NewKimi(apiKey string) *Client {
+    return &Client{baseURL: "https://api.moonshot.cn/v1", apiKey: apiKey, model: "moonshot-v1-8k"}
+}
+
+func NewGPT4oMini(apiKey string) *Client {
+    return &Client{baseURL: "https://api.openai.com/v1", apiKey: apiKey, model: "gpt-4o-mini"}
+}
+
+func (c *Client) Chat(ctx context.Context, systemPrompt, userMessage string) (string, error)
+func (c *Client) ChatJSON(ctx context.Context, systemPrompt, userMessage string, out interface{}) error
+```
+
+### 24.9 Config
+
+```json
+// ~/.codebutler/config.json (global)
+{
+  "orchestrator": {
+    "provider": "kimi",           // or "openai-mini", "deepseek"
+    "apiKey": "...",
+    "enablePreflight": true,      // enrich prompts before Claude
+    "enableRouting": true,        // classify messages, skip Claude for questions
+    "enablePlanning": true,       // generate plans for complex tasks
+    "enableConflictDetection": true
+  }
+}
+```
+
+If no orchestrator is configured, all features are bypassed and messages
+go directly to Claude (current v1 behavior). This keeps the system
+functional without the cheap model — it just costs more per call.
+
+### 24.10 What This Means for CodeButler's Identity
+
+CodeButler remains **Claude Code with extras**. The core loop is unchanged:
+
+```
+message → claude -p → response
+```
+
+The orchestration layer is invisible to the user. They still talk to
+"the bot" in Slack. They don't know (or care) that Kimi triaged their
+message, enriched the prompt, and extracted memory afterward.
+
+Claude is still the only model that touches code. The cheap models
+never write code, never run tools, never modify files. They only
+read, classify, summarize, and plan.
