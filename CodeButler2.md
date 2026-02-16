@@ -1,19 +1,247 @@
 # CodeButler 2
 
-CodeButler evolution plan: WhatsApp → Slack migration + new features.
-
 **Status**: Planning (implementation not started)
 
 ---
 
-## 1. Motivation
+## 1. What is CodeButler
 
-Migrate the messaging backend from WhatsApp (whatsmeow) to Slack, keeping
-the same core logic: a daemon that monitors a channel and spawns `claude -p`.
+CodeButler is **Claude Code accessible from Slack**. Multi-model, multi-role,
+with persistent memory that improves over time.
+
+The core idea: you describe what you want in a Slack thread. A cheap model
+(the PM) plans the work, explores the codebase, and proposes a plan. You
+approve. Claude Code executes — with its full agent loop, tool use, file
+editing, test running, and PR creation. No terminal needed. You can be
+on your phone.
+
+```
+You (Slack)  →  PM plans  →  you approve  →  Claude Code executes  →  PR ready
+                 $0.003         "dale"              $0.30-2.00
+```
+
+### 1.1 The Two Loops
+
+CodeButler has two agent loops, one inside the other:
+
+**Outer loop — CodeButler orchestration:**
+Decides WHAT to build and WHEN. The PM talks to the user, explores
+the repo with read-only tools, proposes a plan, gets approval, spawns
+Claude Code, routes Coder questions back to the PM, extracts memory,
+and closes the thread.
+
+**Inner loop — Claude Code's native agent:**
+Decides HOW to build it. When `claude -p` runs, Claude Code executes
+its own internal agent loop: reading files, writing code, running tests,
+iterating on errors, committing, and pushing — all autonomously inside
+a git worktree. CodeButler never interferes with this loop except via
+`--resume` (to inject PM answers or user messages).
+
+```
+┌─── OUTER LOOP (CodeButler) ─────────────────────────────┐
+│                                                          │
+│  User message → PM explores → PM proposes plan → User   │
+│  approves → create worktree + branch                     │
+│       │                                                  │
+│       ▼                                                  │
+│  ┌─── INNER LOOP (Claude Code) ──────────────────────┐  │
+│  │                                                    │  │
+│  │  claude -p "<plan>" --output-format json            │  │
+│  │       │                                            │  │
+│  │       ▼                                            │  │
+│  │  Read files → write code → run tests → fix errors  │  │
+│  │  → commit → push → open PR                         │  │
+│  │  (all autonomous, Claude Code's own agent loop)    │  │
+│  │                                                    │  │
+│  └────────────────────────────────────────────────────┘  │
+│       │                                                  │
+│       ▼                                                  │
+│  PR created → memory extraction → user closes → merge    │
+│                                                          │
+└──────────────────────────────────────────────────────────┘
+```
+
+**maxTurns** and **timeout** (from config) control the inner loop.
+CodeButler controls the outer loop.
+
+### 1.2 The Three Roles
+
+| Role | What it does | Model | Writes code? | Cost |
+|------|-------------|-------|-------------|------|
+| **PM** (Product Manager) | Plans, explores, routes, extracts memory | Kimi / GPT-4o-mini / Claude (swappable) | Never | ~$0.001/msg |
+| **Artist** | Generates and edits images | OpenAI gpt-image-1 | Never | ~$0.02/img |
+| **Coder** | Writes code, runs tests, creates PRs | Claude Code (`claude -p`) | Always | ~$0.30-2.00/task |
+
+The separation of powers is absolute:
+- **Only the Coder writes code.** The PM has read-only tools. The Artist generates images.
+- **Only the PM orchestrates.** The Coder doesn't know about other threads, memory, or Slack.
+- **Only the user approves.** No code runs without explicit "yes"/"dale"/"go".
+
+### 1.3 What Makes It an Agent
+
+CodeButler is an agent, not a chatbot. The difference:
+
+**A chatbot** receives a message, calls an LLM, returns text. Stateless.
+
+**CodeButler** receives a message and then:
+1. Classifies the intent (question? code task? image request?)
+2. Selects a workflow from memory (bugfix? feature? refactor?)
+3. Explores the codebase autonomously with tools (ReadFile, Grep, GitLog...)
+4. Detects conflicts with other active threads
+5. Proposes a plan with file:line references
+6. Waits for user approval
+7. Creates an isolated git worktree
+8. Spawns Claude Code with the plan + context + MCP servers
+9. Routes Coder questions to the PM (resolved internally or escalated)
+10. Detects PR creation
+11. Extracts learnings → proposes memory updates → user approves
+12. Merges PR, cleans up worktree, closes thread
+
+Each step involves decisions, tool calls, and state management. The PM
+makes 5-15 tool calls per thread just during planning. Claude Code makes
+dozens more during execution. The memory system means every thread makes
+the next one better.
+
+### 1.4 MCP — Model Context Protocol
+
+Claude Code supports MCP servers natively. This means the Coder can connect
+to external tools — databases, APIs, documentation servers, Figma, Linear,
+Jira, Sentry, custom internal tools — via MCP.
+
+**This is what makes CodeButler fundamentally different from "a Slack bot
+that calls an LLM API."** With MCP, the Coder doesn't just edit files on
+disk — it interacts with the full development ecosystem.
+
+#### MCP for the Coder (Claude Code)
+
+Claude Code discovers MCP servers from:
+1. **Repo-level**: `.claude/mcp.json` (committed, shared with team)
+2. **User-level**: `~/.claude/mcp.json` (personal, not committed)
+
+When CodeButler spawns `claude -p` inside a worktree, Claude Code
+automatically loads MCP config from the worktree's `.claude/mcp.json`.
+CodeButler doesn't need to do anything — Claude Code handles it natively.
+
+Examples of what MCP enables for the Coder:
+- Query a PostgreSQL database to understand the schema before writing migrations
+- Read Linear/Jira tickets for requirements context
+- Check Sentry for error traces when fixing bugs
+- Read Figma designs when implementing UI
+- Query internal documentation servers for API specs
+
+#### MCP for the PM (future)
+
+The PM currently has a fixed set of read-only tools (ReadFile, Grep, etc.).
+In the future, the PM could also connect to MCP servers to access external
+knowledge during the planning phase:
+
+- Read a Linear ticket as the starting point for a task
+- Check monitoring dashboards to understand an error
+- Access documentation servers for API specs
+
+This is not in v1 of CodeButler2 but the tool-calling loop is already
+provider-agnostic and can accommodate MCP tool definitions.
+
+#### MCP Server Lifecycle
+
+If MCP servers need to be running (e.g., a local Postgres MCP server), the
+daemon should verify they're accessible before spawning Claude. For remote
+MCP servers (SaaS tools), no lifecycle management is needed — Claude Code
+connects via the configured URL.
+
+```json
+// .claude/mcp.json (committed to repo)
+{
+  "mcpServers": {
+    "postgres": {
+      "command": "npx",
+      "args": ["@modelcontextprotocol/server-postgres", "postgresql://..."]
+    },
+    "linear": {
+      "command": "npx",
+      "args": ["@linear/mcp-server"],
+      "env": { "LINEAR_API_KEY": "${LINEAR_API_KEY}" }
+    }
+  }
+}
+```
+
+The daemon passes environment variables to the Claude Code process so MCP
+servers that need API keys can access them:
+
+```go
+cmd := exec.Command("claude", "-p", prompt, "--output-format", "json")
+cmd.Dir = worktreeDir
+cmd.Env = append(os.Environ(), d.mcpEnvVars()...)
+```
+
+### 1.5 Why CodeButler Exists — Differentiators
+
+#### vs. Claude Code in the terminal
+
+You already have Claude Code. Why wrap it in Slack?
+
+| | Claude Code (terminal) | CodeButler |
+|---|---|---|
+| **Interface** | Terminal, one user | Slack — team, persistent, mobile |
+| **Planning** | You decide what to do | PM plans, explores, proposes. You approve. |
+| **Cost** | Every interaction is Claude | PM planning is 100x cheaper (~$0.001 vs ~$0.10) |
+| **Memory** | CLAUDE.md (you write it) | Automated: PM extracts learnings after every thread |
+| **Concurrency** | One session | N parallel threads with isolated worktrees |
+| **Audit** | Terminal history (ephemeral) | Slack threads + PRs + memory (permanent) |
+| **Conflict detection** | None | Cross-thread file overlap detection |
+| **MCP** | Supported | Supported (same — it IS Claude Code) |
+
+**The core insight**: CodeButler doesn't replace Claude Code. It makes every
+Claude Code invocation more efficient. A vague task in terminal costs $1.00
+and may go wrong. Through CodeButler: $0.003 for planning + $0.30 for a
+well-defined, pre-researched task.
+
+#### vs. Cursor / Windsurf / AI IDE tools
+
+| | Cursor/Windsurf | CodeButler |
+|---|---|---|
+| **Interface** | IDE extension (you sit at your desk) | Slack (you can be anywhere) |
+| **Interaction** | Interactive — you guide every step | Autonomous — PM plans, you approve, Coder executes |
+| **Agent** | Custom model-agnostic agent | Claude Code's native agent (maintained by Anthropic) |
+| **Team** | Single user | Multi-user, shared channel |
+| **Memory** | Session-only | Persistent, evolving, role-specific |
+| **PR workflow** | Manual | Automated: branch → PR → memory → merge → cleanup |
+
+**The core insight**: CodeButler is fire-and-forget. Describe what you want,
+approve the plan, get a PR. No IDE needed.
+
+#### vs. Devin / OpenHands / autonomous agents
+
+| | Devin/OpenHands | CodeButler |
+|---|---|---|
+| **Agent** | Custom agent, custom sandbox | Claude Code (Anthropic maintains it) |
+| **Sandbox** | Cloud VM / Docker | Git worktrees (lightweight, local, no cloud) |
+| **Planning** | Internal (opaque) | Visible PM phase, user approves before code runs |
+| **Control** | Fire-and-forget (hope it works) | PM-mediated, inter-role dialogue, user corrections |
+| **Cost transparency** | Opaque or per-task | Per-role breakdown, per-thread, cost caps |
+| **Learning** | None | Memory system improves with every thread |
+| **Local execution** | Cloud-based | Runs on your machine, your repos, your tools |
+
+**The core insight**: CodeButler gives you control without requiring attention.
+You see the plan before it runs. You see what the PM decided behind the scenes.
+You can correct it. And the system learns from every correction.
+
+#### vs. Simple Slack bots (LLM API wrappers)
+
+Simple Slack bots generate text. CodeButler ships code.
+
+A Slack bot says: "Here's how you'd fix that bug: [code block]."
+CodeButler says: "I fixed it. PR #42 ready for review."
+
+The difference is the Coder. It's not an API call that generates text —
+it's Claude Code running inside a git worktree with full filesystem access,
+shell execution, test running, and PR creation capabilities. Plus MCP
+servers for database queries, issue trackers, monitoring, and more.
 
 ---
 
-## 2. Concept Mapping
+## 2. Concept Mapping (WhatsApp → Slack)
 
 | WhatsApp | Slack | Notes |
 |----------|-------|-------|
@@ -33,22 +261,13 @@ the same core logic: a daemon that monitors a channel and spawns `claude -p`.
 
 ---
 
-## 3. Current vs Proposed Architecture
+## 3. Architecture
 
-### Current
 ```
-WhatsApp <-> whatsmeow <-> Go daemon <-> spawns claude -p <-> repo context
-                               |
-                           SQLite DB
-                      (messages + sessions)
-```
-
-### Proposed
-```
-Slack <-> slack-go SDK <-> Go daemon <-> spawns claude -p <-> repo context
-                               |
-                           SQLite DB
-                      (messages + sessions)
+Slack <-> slack-go SDK <-> Go daemon <-> spawns claude -p <-> repo context + MCP
+                               |                                    ↕
+                           SQLite DB                          git worktrees
+                      (messages + sessions)                  (1 per thread)
 ```
 
 ---
