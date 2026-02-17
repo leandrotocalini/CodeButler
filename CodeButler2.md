@@ -21,7 +21,7 @@ CodeButler controls the outer loop. The inner loop is self-contained within the 
 | Role | What it does | Model | Writes code? | Cost |
 |------|-------------|-------|-------------|------|
 | **PM** | Plans, explores codebase, routes, orchestrates | Kimi / GPT-4o-mini / Claude (swappable via OpenRouter) | Never | ~$0.001/msg |
-| **Researcher** | Web research on demand from PM | Cheap model via OpenRouter (same tier as PM) | Never | ~$0.001/search |
+| **Researcher** | Subagent: web research on PM demand (spawned, returns, dies) | Cheap model via OpenRouter (same tier as PM) | Never | ~$0.001/search |
 | **Artist** | Generates and edits images | OpenAI gpt-image-1 | Never | ~$0.02/img |
 | **Coder** | Writes code, runs tests, creates PRs | Claude Opus 4.6 via OpenRouter | Always | ~$0.30-2.00/task |
 | **Lead** | Thread retrospective: summary, memory extraction, improvement proposals per role | Claude Sonnet via OpenRouter | Never | ~$0.01-0.05/thread |
@@ -37,7 +37,7 @@ CodeButler receives a message and then: classifies intent, selects a workflow fr
 **All LLM calls go through OpenRouter.** CodeButler is a standalone Go binary that owns its entire agent loop. It does NOT shell out to `claude` CLI or any external tool. Instead:
 
 - **PM**: Any model via OpenRouter (Kimi, GPT-4o-mini, Claude Sonnet, etc.). Tool-calling loop with read-only codebase tools.
-- **Researcher**: Any cheap model via OpenRouter. PM delegates web research tasks — the Researcher uses WebSearch + WebFetch tools and returns structured findings.
+- **Researcher**: Any cheap model via OpenRouter. Subagent spawned by PM on demand — uses WebSearch + WebFetch, synthesizes findings, returns result, dies. Multiple can run in parallel.
 - **Coder**: Claude Opus 4.6 via OpenRouter API. CodeButler implements the full agent loop: system prompt → LLM call → tool use → execute tool → append result → next LLM call → repeat until done. All tools (Read, Write, Edit, Bash, Grep, Glob, etc.) are implemented natively in Go, identical to what Claude Code provides.
 - **Lead**: Claude Sonnet via OpenRouter. Runs at thread close with full visibility: user messages, PM planning, Coder tool calls, Artist outputs. Produces summary, memory updates, and per-role improvement proposals.
 - **Artist**: OpenAI gpt-image-1 API directly (not via OpenRouter).
@@ -237,23 +237,28 @@ The per-repo `coder.md` replaces CLAUDE.md. Contains: personality and behavior r
 
 ## 10. PM Architecture: Read-Only Agent Loop
 
-The PM uses the same OpenRouter API, tool-calling loop, and tool set as the Coder. The difference is behavioral — the PM's system prompt (`pm.md`) instructs it to only use read-only codebase tools: Read, Grep, Glob, GitLog, GitDiff, ReadMemory, ListThreads, GHStatus. When it needs external information, it calls the Research tool which delegates to the Researcher. Output-capped, max 15 tool-calling iterations.
+The PM uses the same OpenRouter API, tool-calling loop, and tool set as the Coder. The difference is behavioral — the PM's system prompt (`pm.md`) instructs it to only use read-only codebase tools: Read, Grep, Glob, GitLog, GitDiff, ReadMemory, ListThreads, GHStatus. When it needs external information, it calls Research tools which spawn Researcher subagents — multiple in parallel if needed. Output-capped, max 15 tool-calling iterations.
 
 The PM system prompt comes from per-repo `pm.md` + `shared.md` + memory.
 
 ---
 
-## 11. Researcher Architecture: Web Research on Demand
+## 11. Researcher Architecture: Subagent for Web Research
 
-The Researcher is the PM's web research arm. The PM explores the codebase (Read, Grep, Glob, GitLog); when it needs external information (API docs, library comparisons, error messages, best practices), it delegates to the Researcher instead of searching itself.
+The Researcher is a **subagent** — spawned by the PM on demand, runs a short focused loop, returns results, dies. Same pattern as Claude Code's `Task` tool with specialized subagents.
 
-**How it works:** The PM calls a `Research` tool with a structured query (topic, context, what it needs to know). CodeButler spawns the Researcher with that query. The Researcher runs its own short agent loop: WebSearch → WebFetch → synthesize → return structured findings. The PM receives the result and continues planning.
+**How it works:** The PM calls a `Research` tool with a structured query (topic, context, what it needs to know). CodeButler spawns the Researcher as a subagent with that query. The Researcher runs its own agent loop: WebSearch → WebFetch → synthesize → return structured findings. The PM receives the synthesized result and continues planning.
+
+**Subagent advantages:**
+
+- **Context protection** — web search results are verbose and noisy. The Researcher synthesizes externally and returns only what's relevant, keeping the PM's context window clean.
+- **Parallel research** — the PM can spawn multiple Researchers concurrently (e.g., search API docs + compare two libraries at the same time). Each runs independently.
+- **Non-blocking** — the PM can continue exploring the codebase while Researchers search. Results arrive when ready.
+- **Independently swappable** — use a model that's good at search synthesis without affecting PM planning quality.
 
 **What the Researcher uses:** WebSearch, WebFetch. No codebase tools — the Researcher doesn't read project files. Its job is purely external knowledge.
 
-**Why a separate role:** The PM is cheap but has no web tools. Adding web search to the PM would complicate its prompt and increase cost (web results are verbose). The Researcher is purpose-built: small prompt, focused tools, structured output. It's also independently swappable — you can use a model that's good at search synthesis without affecting PM planning quality.
-
-The Researcher is stateless (no memory file). Each search is self-contained. Its system prompt comes from `researcher.md` + `shared.md`.
+**Lifecycle:** Spawned → runs loop → returns result → dies. Stateless (no memory file, no session persistence). Each search is self-contained. Its system prompt comes from `researcher.md` + `shared.md`.
 
 ---
 
