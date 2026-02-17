@@ -24,7 +24,7 @@ CodeButler is **a multi-role AI dev team accessible from Slack**. Multi-model, m
 | **Artist** | Generates and edits images | OpenAI gpt-image-1 | Never | ~$0.02/img |
 | **Coder** | Writes code, runs tests, creates PRs | Claude Opus 4.6 via OpenRouter | Always | ~$0.30-2.00/task |
 
-Separation of powers is absolute: only the Coder writes code (PM has read-only tools), only the PM orchestrates (Coder doesn't know about other threads, memory, or Slack), only the user approves (no code runs without explicit "yes"/"dale"/"go").
+All roles share the same tool set (Read, Write, Edit, Bash, Grep, Glob, etc.) — the restriction is behavioral via system prompts, not structural. The PM's prompt says "only read," the Coder's says "do whatever it takes." Separation of powers: only the Coder writes code, only the PM orchestrates, only the user approves.
 
 ### 1.3 What Makes It an Agent
 
@@ -44,18 +44,7 @@ This means CodeButler has **zero dependency on Claude Code CLI**. It IS its own 
 
 Each role has its own MD file per repo that defines its system prompt, personality, and available tools. Plus one shared MD for cross-role knowledge and interaction patterns.
 
-```
-<repo>/
-  .codebutler/
-    prompts/
-      pm.md           # PM system prompt: personality, workflows, read-only tools
-      coder.md        # Coder system prompt: personality, coding tools, restrictions
-      artist.md       # Artist system prompt: personality, image gen conventions
-      shared.md       # Shared knowledge: project facts, inter-role interaction rules
-    memory/
-      pm.md           # PM memory: workflows, project knowledge, planning notes
-      artist.md       # Artist memory: style prefs, colors, icon conventions
-```
+Under `<repo>/.codebutler/`: `prompts/` has pm.md, coder.md, artist.md, shared.md (system prompts per role + shared knowledge). `memory/` has pm.md and artist.md (evolving knowledge per role).
 
 **Why per-role MDs instead of CLAUDE.md:**
 - Each role has a different personality, different tools, different restrictions
@@ -102,14 +91,7 @@ The PM can also use MCP servers (future) for external knowledge during planning.
 
 ## 3. Architecture
 
-```
-Slack <-> slack-go SDK <-> Go daemon <-> OpenRouter API <-> Claude/Kimi/etc.
-                               |              ↕
-                           SQLite DB     git worktrees
-                      (messages + sessions) (1 per thread)
-```
-
-The daemon is a single Go binary. All LLM calls go through OpenRouter (or direct API for images). The Coder's agent loop runs inside the daemon — no external CLI processes. Tools (Read, Write, Edit, Bash, Grep, Glob, etc.) are executed natively by the daemon in the worktree directory.
+Slack connects via slack-go SDK to the Go daemon, which calls OpenRouter API for all LLM operations (Claude, Kimi, etc.). The daemon stores messages and sessions in SQLite, and manages one git worktree per active thread. The Coder's agent loop runs inside the daemon — no external CLI processes. Tools are executed natively by the daemon in the worktree directory.
 
 ---
 
@@ -141,80 +123,23 @@ Required tokens: Bot Token (`xoxb-...`) for API ops, App Token (`xapp-...`) for 
 
 Two levels. Global holds shared keys, per-repo holds channel-specific settings.
 
-**Global** (`~/.codebutler/config.json`):
-```json
-{
-  "slack": { "botToken": "xoxb-...", "appToken": "xapp-..." },
-  "openrouter": { "apiKey": "sk-or-..." },
-  "openai": { "apiKey": "sk-..." }
-}
-```
+**Global** (`~/.codebutler/config.json`): Slack tokens (botToken, appToken), OpenRouter API key, OpenAI API key (for images).
 
-**Per-repo** (`<repo>/.codebutler/config.json`):
-```json
-{
-  "slack": { "channelID": "C0123ABCDEF", "channelName": "codebutler-myrepo" },
-  "coder": { "model": "anthropic/claude-opus-4-6", "maxTurns": 25, "timeout": 30 },
-  "productManager": {
-    "default": "kimi",
-    "memoryExtraction": "claude",
-    "models": {
-      "kimi": { "model": "moonshot/moonshot-v1-8k", "label": "Kimi" },
-      "claude": { "model": "anthropic/claude-sonnet-4-5-20250929", "label": "Claude (Pro)" },
-      "gpt4o-mini": { "model": "openai/gpt-4o-mini", "label": "GPT-4o Mini" }
-    }
-  },
-  "artist": { "provider": "openai", "model": "gpt-image-1" },
-  "access": { "maxConcurrentThreads": 5, "maxClaudeCallsPerHour": 20 }
-}
-```
+**Per-repo** (`<repo>/.codebutler/config.json`): Slack channel ID/name, Coder model + maxTurns + timeout, PM model pool (default, memoryExtraction model, map of available models with OpenRouter model IDs), Artist config, access limits (maxConcurrentThreads, maxCallsPerHour).
 
-All LLM calls (PM, Coder, memory extraction) route through OpenRouter using the single `openrouter.apiKey`. The model field uses OpenRouter model IDs (e.g., `anthropic/claude-opus-4-6`). Artist uses OpenAI directly (image gen not available via OpenRouter).
+All LLM calls (PM, Coder, memory extraction) route through OpenRouter using a single API key. Model fields use OpenRouter model IDs (e.g., `anthropic/claude-opus-4-6`). Artist uses OpenAI directly (image gen not available via OpenRouter).
 
 ---
 
 ## 7. Storage
 
-```
-~/.codebutler/
-  config.json                    # Global config
+Global: `~/.codebutler/config.json`.
 
-<repo>/.codebutler/              # (gitignored)
-  config.json                    # Per-repo config
-  store.db                       # Messages + sessions (SQLite)
-  prompts/                       # Per-role system prompts
-    pm.md, coder.md, artist.md, shared.md
-  memory/                        # Per-role memory (committed to repo, NOT gitignored)
-    pm.md, artist.md
-  branches/                      # Git worktrees (1 per active thread)
-    fix-login/
-    add-2fa/
-  images/                        # Generated images
-  journals/                      # Thread journals (committed to repo)
-```
+Per-repo: `<repo>/.codebutler/` contains config.json, store.db (SQLite), `prompts/` (per-role system prompts), `memory/` (per-role memory), `branches/` (git worktrees, 1 per active thread), `images/` (generated), `journals/` (thread narratives).
 
 **Note:** `prompts/` and `memory/` are committed to the repo (not gitignored). Everything else in `.codebutler/` is gitignored.
 
-SQLite tables:
-
-```sql
-CREATE TABLE sessions (
-    thread_ts   TEXT PRIMARY KEY,
-    channel_id  TEXT NOT NULL,
-    session_id  TEXT NOT NULL,
-    updated_at  TEXT NOT NULL
-);
-
-CREATE TABLE messages (
-    id         TEXT PRIMARY KEY,
-    thread_ts  TEXT NOT NULL,
-    channel_id TEXT NOT NULL,
-    from_user  TEXT NOT NULL,
-    content    TEXT NOT NULL,
-    timestamp  TEXT NOT NULL,
-    acked      INTEGER DEFAULT 0
-);
-```
+SQLite tables: `sessions` (PK: thread_ts, with channel_id, session_id, updated_at) and `messages` (PK: id, with thread_ts, channel_id, from_user, content, timestamp, acked flag).
 
 ---
 
@@ -250,39 +175,19 @@ All of `internal/whatsapp/` (replaced by Slack client).
 
 ## 9. Coder Architecture: Native Agent Loop via OpenRouter
 
-The Coder is NOT `claude -p`. CodeButler implements the full agent loop natively:
+The Coder is NOT `claude -p`. CodeButler implements the full agent loop natively: build system prompt → call OpenRouter with tools → execute returned tool_calls locally → append results → repeat until done or maxTurns. All in Go, no subprocess.
 
-```
-1. Build system prompt from coder.md + shared.md + task plan + memory
-2. Call OpenRouter API: POST /chat/completions with tools
-3. LLM returns tool_calls (e.g., Read, Write, Edit, Bash, Grep)
-4. Execute each tool call locally (sandboxed to worktree)
-5. Append tool results to conversation
-6. Call OpenRouter again
-7. Repeat until LLM returns text (no more tool calls) or maxTurns reached
-8. Parse final response, extract PR info, return result
-```
+### Tools — Shared Across All Roles
 
-### Coder Tools (same as Claude Code)
+CodeButler implements ALL the tools Claude Code has, natively in Go. **All roles can use all tools** — the difference is what the system prompt allows, not what's technically available:
 
-The Coder has ALL the tools Claude Code has, implemented natively in Go:
+**Core tools** (same as Claude Code): Read, Write, Edit, Bash, Grep, Glob, WebFetch.
 
-| Tool | Description | Implementation |
-|------|------------|----------------|
-| **Read** | Read file contents with line numbers | `os.ReadFile` with line numbering, offset/limit support |
-| **Write** | Write/create files | `os.WriteFile` with path validation |
-| **Edit** | String replacement in files | Find old_string, replace with new_string, uniqueness check |
-| **Bash** | Execute shell commands | `exec.Command` with timeout, output capture, working dir |
-| **Grep** | Regex search across files | `exec.Command("rg", ...)` with output limits |
-| **Glob** | Find files by pattern | `filepath.Glob` or `doublestar` library |
-| **WebFetch** | Fetch URL content | `http.Get` with HTML-to-text conversion |
-| **GitCommit** | Commit staged changes | `git add` + `git commit` |
-| **GitPush** | Push branch | `git push -u origin <branch>` |
-| **GHCreatePR** | Create pull request | `gh pr create` |
+**Git/GitHub tools:** GitCommit, GitPush, GHCreatePR, GHStatus.
 
-**Additional tools beyond Claude Code:**
-- **SlackNotify** — Post status updates to the Slack thread during execution
-- **ReadMemory** — Access role-specific memory files
+**CodeButler-specific tools:** SlackNotify (post to thread), ReadMemory (access role memory), ListThreads (see active threads), GenerateImage / EditImage (Artist-specific).
+
+Each role's system prompt defines which tools to use and how. The PM's prompt says "use Read, Grep, Glob, GitLog for exploration — do NOT write files." The Coder's prompt says "use all tools freely to implement the task." The Artist's prompt adds image generation tools. But technically any role could use any tool — the restriction is behavioral, not structural. This keeps the architecture simple (one tool executor, shared by all roles) and allows future flexibility.
 
 ### Tool Execution Safety
 
@@ -290,33 +195,13 @@ All tools execute in the worktree directory. Path validation ensures no escape. 
 
 ### Coder System Prompt (`coder.md`)
 
-The per-repo `coder.md` replaces what CLAUDE.md was for Claude Code. It contains:
-- Personality and behavior rules
-- Full tool documentation (auto-generated from tool definitions)
-- Sandbox restrictions (no installs, no escape, no force push)
-- Project-specific conventions (test framework, coding style, etc.)
-- Build/test commands
-
-The daemon assembles the final prompt: `coder.md` + `shared.md` + task plan + relevant context.
+The per-repo `coder.md` replaces CLAUDE.md. Contains: personality and behavior rules, tool documentation (auto-generated from tool definitions), sandbox restrictions, project-specific conventions, build/test commands. The daemon assembles the final prompt: `coder.md` + `shared.md` + task plan + relevant context.
 
 ---
 
 ## 10. PM Architecture: Read-Only Agent Loop
 
-The PM uses the same OpenRouter API and tool-calling loop, but with read-only tools only:
-
-| Tool | Description |
-|------|------------|
-| **ReadFile** | Read file contents (capped at 500 lines) |
-| **Grep** | Search patterns (max 100 results) |
-| **ListFiles** | Glob pattern file search (max 200 results) |
-| **GitLog** | Recent commit history (max 50 commits) |
-| **GitDiff** | Uncommitted or ref-based changes |
-| **ReadMemory** | Access pm.md or artist.md memory |
-| **ListThreads** | See active threads and their files |
-| **GHStatus** | Check PR/issue status via `gh` |
-
-All tools are sandboxed to the repo, read-only, output-capped. The tool loop runs max 15 iterations.
+The PM uses the same OpenRouter API, tool-calling loop, and tool set as the Coder. The difference is behavioral — the PM's system prompt (`pm.md`) instructs it to only use read-only tools: Read, Grep, Glob, GitLog, GitDiff, ReadMemory, ListThreads, GHStatus. Output-capped, max 15 tool-calling iterations.
 
 The PM system prompt comes from per-repo `pm.md` + `shared.md` + memory.
 
@@ -348,15 +233,7 @@ The daemon maintains a thread registry: `map[string]*ThreadWorker` mapping threa
 
 ### Thread Phases
 
-Every thread goes through: PM first (classify, explore, plan, get approval), then Coder (implement). Some threads never leave PM phase (questions, images).
-
-```go
-type ThreadPhase string
-const (
-    PhasePM    ThreadPhase = "pm"      // PM talking to user
-    PhaseCoder ThreadPhase = "coder"   // User approved, Coder working
-)
-```
+Every thread goes through: PM first (classify, explore, plan, get approval), then Coder (implement). Some threads never leave PM phase (questions, images). Two phases: `pm` (PM talking to user) and `coder` (user approved, Coder working).
 
 ### Graceful Shutdown
 
@@ -389,13 +266,7 @@ Short code (<20 lines) inline as Slack code blocks. Long code (≥20 lines) uplo
 
 ### Files — One Memory Per Role
 
-```
-<repo>/.codebutler/memory/
-  pm.md           # Workflows, project knowledge, planning notes, inter-role tips
-  artist.md       # Style preferences, colors, icon conventions, inter-role tips
-```
-
-The Coder doesn't have a separate memory file — its knowledge goes into `coder.md` (the system prompt) which users maintain. The PM can suggest additions to `coder.md` via the thread summary.
+Two memory files: `pm.md` (workflows, project knowledge, planning notes, inter-role tips) and `artist.md` (style preferences, colors, icon conventions). The Coder doesn't have a separate memory file — its knowledge goes into `coder.md` (the system prompt) which users maintain. The PM can suggest additions to `coder.md` via the thread summary.
 
 ### Git Flow
 
@@ -490,12 +361,8 @@ Init overlaps with PM planning to hide latency. Resource profiles limit concurre
 All LLM calls go through OpenRouter. Single API key, multiple models.
 
 ### Cost Structure
-```
-PM (Kimi, GPT-4o-mini, ...)  = brain   (~$0.001/call via OpenRouter)
-Coder (Claude Opus 4.6)       = hands   (~$0.10-1.00/call via OpenRouter)
-Artist (gpt-image-1)          = eyes    (~$0.01-0.04/image, direct OpenAI)
-Whisper                        = ears    (~$0.006/min, direct OpenAI)
-```
+
+PM = brain (~$0.001/call), Coder = hands (~$0.10-1.00/call), Artist = eyes (~$0.02/image), Whisper = ears (~$0.006/min).
 
 ### PM Model Pool + Hot Swap
 
@@ -513,65 +380,15 @@ Per-thread cap, per-day cap, per-user hourly limit. When exceeded, PM warns and 
 
 Three Go interfaces, all swappable:
 
-```go
-type ProductManager interface {
-    Chat(ctx, system, messages) (string, error)
-    ChatJSON(ctx, system, messages, out) error
-    ChatWithTools(ctx, system, messages, tools) (string, error)
-    Name() string
-}
+**ProductManager**: Chat (simple text), ChatJSON (parsed JSON), ChatWithTools (tool-calling loop with read-only tools), Name.
 
-type Artist interface {
-    Generate(ctx, req) (*ImageResult, error)
-    Edit(ctx, req) (*ImageResult, error)
-    Name() string
-}
+**Artist**: Generate (new image from prompt), Edit (modify existing image), Name.
 
-type Coder interface {
-    Run(ctx, req) (*CoderResult, error)
-    Resume(ctx, sessionID, message) (*CoderResult, error)
-    Name() string
-}
-```
+**Coder**: Run (execute coding task in worktree), Resume (continue previous session), Name.
 
 ### Provider Implementation
 
-All providers use the shared OpenRouter client:
-
-```go
-// internal/provider/openrouter/client.go
-type Client struct {
-    httpClient  *http.Client
-    apiKey      string
-    rateLimiter *rate.Limiter
-}
-
-func (c *Client) ChatCompletion(ctx, model, messages, tools) (*Response, error)
-```
-
-Role adapters are thin wrappers (~30 lines each) that implement the interface and delegate to the OpenRouter client with the configured model ID.
-
-For the **Coder adapter** specifically, the adapter implements the full agent loop:
-
-```go
-// internal/provider/openrouter/coder.go
-type CoderAdapter struct {
-    client   *Client
-    model    string    // "anthropic/claude-opus-4-6"
-    executor *tools.Executor
-}
-
-func (c *CoderAdapter) Run(ctx, req) (*CoderResult, error) {
-    // 1. Load system prompt from coder.md + shared.md
-    // 2. Build initial messages with task plan
-    // 3. Run tool-calling loop:
-    //    a. POST /chat/completions with tools
-    //    b. Execute returned tool_calls via executor
-    //    c. Append results, repeat
-    // 4. Track turns, tokens, cost
-    // 5. Return CoderResult with session info
-}
-```
+All providers use a shared OpenRouter client (HTTP, auth, rate limiting). Role adapters are thin wrappers (~30 lines each) that implement the interface and delegate to the client with the configured model ID. The Coder adapter implements the full agent loop internally: load system prompt → build messages → run tool-calling loop → track turns/tokens/cost → return result.
 
 ---
 
@@ -593,20 +410,7 @@ Since CodeButler executes tools itself (not the LLM), it can enforce these restr
 
 ## 20. Logging
 
-Single structured log format:
-
-```
-2026-02-14 15:04:05 INF  slack connected
-2026-02-14 15:04:08 MSG  leandro: "fix the login bug"
-2026-02-14 15:04:09 PM   thread 1707.123 → pm responding
-2026-02-14 15:04:32 PM   thread 1707.123 → plan proposed
-2026-02-14 15:04:40 INF  thread 1707.123 → approved, starting coder
-2026-02-14 15:04:41 CLD  thread 1707.123 → coder running (new session)
-2026-02-14 15:05:15 CLD  thread 1707.123 → done · 34s · 3 turns · $0.12
-2026-02-14 15:05:16 MEM  thread 1707.123 → proposing 2 memory updates
-```
-
-Tags: INF, WRN, ERR, DBG, MSG (user message), PM (PM activity), IMG (image gen), CLD (Coder activity), RSP (response sent), MEM (memory ops).
+Single structured log format with tags: INF, WRN, ERR, DBG, MSG (user message), PM (PM activity), IMG (image gen), CLD (Coder activity), RSP (response sent), MEM (memory ops). Each line: timestamp + tag + thread ID + description.
 
 Ring buffer + SSE for web dashboard. No ANSI/TUI — everything plain.
 
@@ -614,16 +418,7 @@ Ring buffer + SSE for web dashboard. No ANSI/TUI — everything plain.
 
 ## 21. Service Install
 
-Run as system service. macOS: LaunchAgent plist. Linux: systemd user service. Both run in user session (access to tools, keychain, PATH).
-
-```bash
-codebutler --install     # generate + load service
-codebutler --uninstall   # unload + delete
-codebutler --status      # check if running
-codebutler --logs        # tail log file
-```
-
-Each repo is an independent service with its own WorkingDirectory and log file.
+Run as system service. macOS: LaunchAgent plist. Linux: systemd user service. Both run in user session (access to tools, keychain, PATH). CLI flags: `--install`, `--uninstall`, `--status`, `--logs`. Each repo is an independent service with its own WorkingDirectory and log file.
 
 ---
 
