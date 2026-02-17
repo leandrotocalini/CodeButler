@@ -10,32 +10,34 @@ CodeButler is **a multi-role AI dev team accessible from Slack**. Multi-model, m
 
 ### 1.1 The Two Loops
 
-**Outer loop — CodeButler orchestration:** Decides WHAT to build and WHEN. The PM talks to the user, explores the repo with read-only tools, proposes a plan, gets approval, spawns the Coder, routes Coder questions back to the PM, extracts memory, and closes the thread.
+**Outer loop — CodeButler orchestration:** Decides WHAT to build and WHEN. The PM talks to the user, explores the repo with read-only tools, proposes a plan, gets approval, spawns the Coder, routes Coder questions back to the PM. At close, the Lead runs retrospective (summary, memory extraction, per-role improvements).
 
 **Inner loop — Coder's agent loop:** Decides HOW to build it. When the Coder runs, it executes its own agent loop: reading files, writing code, running tests, iterating on errors, committing, and pushing — all autonomously inside a git worktree. CodeButler provides all tools natively (Read, Write, Edit, Bash, Grep, Glob, etc.) and drives the LLM via OpenRouter API. No external CLI dependency.
 
-`maxTurns` and `timeout` (from config) control the inner loop. CodeButler controls the outer loop.
+CodeButler controls the outer loop. The inner loop is self-contained within the Coder's agent implementation.
 
-### 1.2 The Three Roles
+### 1.2 The Four Roles
 
 | Role | What it does | Model | Writes code? | Cost |
 |------|-------------|-------|-------------|------|
-| **PM** | Plans, explores, routes, extracts memory | Kimi / GPT-4o-mini / Claude (swappable via OpenRouter) | Never | ~$0.001/msg |
+| **PM** | Plans, explores, routes | Kimi / GPT-4o-mini / Claude (swappable via OpenRouter) | Never | ~$0.001/msg |
 | **Artist** | Generates and edits images | OpenAI gpt-image-1 | Never | ~$0.02/img |
 | **Coder** | Writes code, runs tests, creates PRs | Claude Opus 4.6 via OpenRouter | Always | ~$0.30-2.00/task |
+| **Lead** | Thread retrospective: summary, memory extraction, improvement proposals per role | Claude Sonnet via OpenRouter | Never | ~$0.01-0.05/thread |
 
 All roles share the same tool set (Read, Write, Edit, Bash, Grep, Glob, etc.) — the restriction is behavioral via system prompts, not structural. The PM's prompt says "only read," the Coder's says "do whatever it takes." Separation of powers: only the Coder writes code, only the PM orchestrates, only the user approves.
 
 ### 1.3 What Makes It an Agent
 
-CodeButler receives a message and then: classifies intent, selects a workflow from memory, explores the codebase autonomously with tools, detects conflicts with other active threads, proposes a plan with file:line references, waits for user approval, creates an isolated git worktree, runs the Coder with plan + context, routes Coder questions to the PM, detects PR creation, extracts learnings and proposes memory updates (user approves), merges PR, cleans up worktree, closes thread. Each step involves decisions, tool calls, and state management.
+CodeButler receives a message and then: classifies intent, selects a workflow from memory, explores the codebase autonomously with tools, detects conflicts with other active threads, proposes a plan with file:line references, waits for user approval, creates an isolated git worktree, runs the Coder with plan + context, routes Coder questions to the PM, detects PR creation, runs the Lead for retrospective (summary, memory extraction, improvement proposals per role — user approves), merges PR, cleans up worktree, closes thread. Each step involves decisions, tool calls, and state management.
 
 ### 1.4 Architecture: OpenRouter + Native Tools (No CLI Dependencies)
 
 **All LLM calls go through OpenRouter.** CodeButler is a standalone Go binary that owns its entire agent loop. It does NOT shell out to `claude` CLI or any external tool. Instead:
 
+- **PM**: Any model via OpenRouter (Kimi, GPT-4o-mini, Claude Sonnet, etc.). Tool-calling loop with read-only tools.
 - **Coder**: Claude Opus 4.6 via OpenRouter API. CodeButler implements the full agent loop: system prompt → LLM call → tool use → execute tool → append result → next LLM call → repeat until done. All tools (Read, Write, Edit, Bash, Grep, Glob, WebFetch, etc.) are implemented natively in Go, identical to what Claude Code provides.
-- **PM**: Any model via OpenRouter (Kimi, GPT-4o-mini, Claude Sonnet, etc.). Same tool-calling loop but with read-only tools only.
+- **Lead**: Claude Sonnet via OpenRouter. Runs at thread close with full visibility: user messages, PM planning, Coder tool calls, Artist outputs. Produces summary, memory updates, and per-role improvement proposals.
 - **Artist**: OpenAI gpt-image-1 API directly (not via OpenRouter).
 
 This means CodeButler has **zero dependency on Claude Code CLI**. It IS its own Claude Code — with the same tools, same capabilities, plus Slack integration, memory, multi-role orchestration, and more.
@@ -44,12 +46,13 @@ This means CodeButler has **zero dependency on Claude Code CLI**. It IS its own 
 
 Each role has its own MD file per repo that defines its system prompt, personality, and available tools. Plus one shared MD for cross-role knowledge and interaction patterns.
 
-Under `<repo>/.codebutler/`: `prompts/` has pm.md, coder.md, artist.md, shared.md (system prompts per role + shared knowledge). `memory/` has pm.md and artist.md (evolving knowledge per role).
+Under `<repo>/.codebutler/`: `prompts/` has pm.md, coder.md, lead.md, artist.md, shared.md (system prompts per role + shared knowledge). `memory/` has pm.md, lead.md, and artist.md (evolving knowledge per role).
 
 **Why per-role MDs instead of CLAUDE.md:**
 - Each role has a different personality, different tools, different restrictions
 - The Coder's system prompt includes ALL tool definitions (Read, Write, Edit, Bash, Grep, Glob, etc.) — it's essentially a custom Claude Code system prompt
 - The PM's system prompt includes only read-only tools + exploration guidelines
+- The Lead's system prompt defines retrospective structure, memory extraction patterns, and cross-role analysis
 - The shared.md contains project-wide knowledge that all roles need
 - Users can customize each role independently per project
 - No dependency on CLAUDE.md — CodeButler manages its own prompts entirely
@@ -125,9 +128,9 @@ Two levels. Global holds shared keys, per-repo holds channel-specific settings.
 
 **Global** (`~/.codebutler/config.json`): Slack tokens (botToken, appToken), OpenRouter API key, OpenAI API key (for images).
 
-**Per-repo** (`<repo>/.codebutler/config.json`): Slack channel ID/name, Coder model + maxTurns + timeout, PM model pool (default, memoryExtraction model, map of available models with OpenRouter model IDs), Artist config, access limits (maxConcurrentThreads, maxCallsPerHour).
+**Per-repo** (`<repo>/.codebutler/config.json`): Slack channel ID/name, Coder model, PM model pool (default + map of available models with OpenRouter model IDs), Lead model, Artist config, access limits (maxConcurrentThreads, maxCallsPerHour).
 
-All LLM calls (PM, Coder, memory extraction) route through OpenRouter using a single API key. Model fields use OpenRouter model IDs (e.g., `anthropic/claude-opus-4-6`). Artist uses OpenAI directly (image gen not available via OpenRouter).
+All LLM calls (PM, Coder, Lead) route through OpenRouter using a single API key. Model fields use OpenRouter model IDs (e.g., `anthropic/claude-opus-4-6`). Artist uses OpenAI directly (image gen not available via OpenRouter).
 
 ---
 
@@ -135,7 +138,7 @@ All LLM calls (PM, Coder, memory extraction) route through OpenRouter using a si
 
 Global: `~/.codebutler/config.json`.
 
-Per-repo: `<repo>/.codebutler/` contains config.json, store.db (SQLite), `prompts/` (per-role system prompts), `memory/` (per-role memory), `branches/` (git worktrees, 1 per active thread), `images/` (generated), `journals/` (thread narratives).
+Per-repo: `<repo>/.codebutler/` contains config.json, store.db (SQLite), `prompts/` (pm.md, coder.md, lead.md, artist.md, shared.md), `memory/` (pm.md, lead.md, artist.md), `branches/` (git worktrees, 1 per active thread), `images/` (generated), `journals/` (thread narratives).
 
 **Note:** `prompts/` and `memory/` are committed to the repo (not gitignored). Everything else in `.codebutler/` is gitignored.
 
@@ -175,7 +178,7 @@ All of `internal/whatsapp/` (replaced by Slack client).
 
 ## 9. Coder Architecture: Native Agent Loop via OpenRouter
 
-The Coder is NOT `claude -p`. CodeButler implements the full agent loop natively: build system prompt → call OpenRouter with tools → execute returned tool_calls locally → append results → repeat until done or maxTurns. All in Go, no subprocess.
+The Coder is NOT `claude -p`. CodeButler implements the full agent loop natively: build system prompt → call OpenRouter with tools → execute returned tool_calls locally → append results → repeat until LLM returns text with no more tool calls. All in Go, no subprocess.
 
 ### Tools — Shared Across All Roles
 
@@ -207,7 +210,23 @@ The PM system prompt comes from per-repo `pm.md` + `shared.md` + memory.
 
 ---
 
-## 11. Message Flow — Event-Driven Threads
+## 11. Lead Architecture: Thread Retrospective
+
+The Lead runs once per thread, at close time (after PR creation, before merge). It receives the **full thread transcript**: user messages, PM planning + tool calls, Coder tool calls + outputs, Artist requests + results, and the git diff. No other role has this complete picture.
+
+**What the Lead produces:**
+
+- **Thread summary** → PR description via `gh pr edit` (replaces PM doing this)
+- **Memory extraction** → proposes updates to pm.md, lead.md, artist.md, and suggests coder.md additions. User approves/edits before commit.
+- **Per-role improvement proposals** → "PM should have mentioned X in the plan", "Coder wasted 3 turns on Y because the system prompt doesn't mention Z", "Artist generated wrong size because the prompt doesn't specify dimensions"
+- **Thread usage report** → token/cost breakdown, tool call stats, behind-the-scenes (PM↔Coder exchanges), tips for better prompting
+- **Journal finalization** → close entry + cost table, committed to PR branch
+
+The Lead uses Claude Sonnet (smart enough to analyze cross-role patterns, cheaper than Opus). Its system prompt comes from `lead.md` + `shared.md` + its own memory (`memory/lead.md`). Over time, the Lead learns what makes threads efficient and what patterns to flag.
+
+---
+
+## 12. Message Flow — Event-Driven Threads
 
 The v1 state machine (AccumulationWindow, ReplyWindow, convActive, pollLoop) is eliminated. Slack threads provide natural conversation boundaries.
 
@@ -233,7 +252,7 @@ The daemon maintains a thread registry: `map[string]*ThreadWorker` mapping threa
 
 ### Thread Phases
 
-Every thread goes through: PM first (classify, explore, plan, get approval), then Coder (implement). Some threads never leave PM phase (questions, images). Two phases: `pm` (PM talking to user) and `coder` (user approved, Coder working).
+Every thread goes through: PM first (classify, explore, plan, get approval), then Coder (implement), then Lead (retrospective at close). Some threads never leave PM phase (questions, images). Three phases: `pm` (PM talking to user), `coder` (user approved, Coder working), `lead` (thread closing, retrospective running).
 
 ### Graceful Shutdown
 
@@ -245,10 +264,10 @@ Messages are persisted to SQLite before processing (acked=0). On restart, unacke
 
 ---
 
-## 12. Features that Change
+## 13. Features that Change
 
 ### Bot Prefix → Role Prefix
-Slack identifies bots natively. Outgoing messages get role prefix (`*PM:*`, `*Coder:*`, `*Artist:*`) so users know which role is talking.
+Slack identifies bots natively. Outgoing messages get role prefix (`*PM:*`, `*Coder:*`, `*Artist:*`, `*Lead:*`) so users know which role is talking.
 
 ### Reactions as Feedback
 - 👀 when processing starts
@@ -262,21 +281,22 @@ Short code (<20 lines) inline as Slack code blocks. Long code (≥20 lines) uplo
 
 ---
 
-## 13. Memory System
+## 14. Memory System
 
 ### Files — One Memory Per Role
 
-Two memory files: `pm.md` (workflows, project knowledge, planning notes, inter-role tips) and `artist.md` (style preferences, colors, icon conventions). The Coder doesn't have a separate memory file — its knowledge goes into `coder.md` (the system prompt) which users maintain. The PM can suggest additions to `coder.md` via the thread summary.
+Three memory files: `pm.md` (workflows, project knowledge, planning notes), `lead.md` (retrospective patterns, what makes threads efficient, cross-role coordination insights), and `artist.md` (style preferences, colors, icon conventions). The Coder doesn't have a separate memory file — its knowledge goes into `coder.md` (the system prompt) which users maintain. The Lead suggests additions to `coder.md` during retrospective.
 
 ### Git Flow
 
-Memory files follow PR flow: after PR creation, PM extracts learnings → proposes in thread → user approves → committed to PR branch → lands on main with merge. Versioned, reviewable, branch-isolated, conflict-resolved by git.
+Memory files follow PR flow: after PR creation, the Lead extracts learnings → proposes in thread → user approves → committed to PR branch → lands on main with merge. Versioned, reviewable, branch-isolated, conflict-resolved by git.
 
-### Memory Extraction (Always via Claude)
+### Memory Extraction (Lead Role)
 
-After PR creation, the PM (always Claude for this step, regardless of active PM model) analyzes the full thread conversation + git diff to extract learnings. It proposes updates routed to the right memory file:
+After PR creation, the Lead analyzes the full thread transcript (user messages, PM planning, Coder tool calls, Artist outputs, git diff). It proposes updates routed to the right memory file:
 
-- Project facts, planning notes, workflow refinements → `pm.md`
+- Planning workflows, project knowledge → `pm.md`
+- Retrospective patterns, cross-role coordination → `lead.md`
 - Visual style, colors, icon conventions → `artist.md`
 - Coding conventions → suggested as tip for user to add to `coder.md`
 
@@ -292,7 +312,7 @@ Workflows live in `pm.md` and evolve per project. Defaults seeded on first run (
 
 ---
 
-## 14. Thread Lifecycle & Resource Cleanup
+## 15. Thread Lifecycle & Resource Cleanup
 
 ### The Rule: 1 Thread = 1 Branch = 1 PR
 
@@ -302,23 +322,22 @@ Non-negotiable. States: `created → working → pr_opened → merged (closed)`.
 - Add thread URL to PR body
 - Detect TODOs/FIXMEs in code, warn in thread
 - Journal: append "PR opened" entry
-- Memory extraction (Claude): analyze thread + diff → propose learnings → user approves → commit to PR branch
+- Lead retrospective: analyze full thread → propose memory updates + per-role improvements → user approves → commit to PR branch
 
 ### On User Close
-- Generate PR summary → update PR description via `gh pr edit`
-- Finalize journal (close entry + cost table) → commit
+- Lead runs: generates PR summary → `gh pr edit`, finalizes journal, posts usage report with per-role improvement proposals
+- User approves memory updates → committed to PR branch
 - Merge PR (`gh pr merge --squash`)
 - Delete remote branch, remove worktree
-- Post thread usage report (stats, behind-the-scenes, tips)
 - Notify overlapping threads to rebase
 
-### Thread Usage Report
+### Thread Usage Report (Lead)
 
-Posted at close. Shows: token/cost breakdown per role, tool call stats, "behind the scenes" (every PM↔Coder exchange — what Coder asked, how PM answered), and tips for more efficient prompting. User can correct wrong PM answers → PM updates memory immediately.
+Posted by the Lead at close. Shows: token/cost breakdown per role, tool call stats, "behind the scenes" (every PM↔Coder exchange), per-role improvement proposals, and tips for better prompting. User can correct wrong PM answers → Lead updates memory immediately.
 
 ---
 
-## 15. Conflict Coordination
+## 16. Conflict Coordination
 
 ### Detection
 
@@ -334,7 +353,7 @@ When a PR merges, PM notifies other active threads that touch overlapping files 
 
 ---
 
-## 16. Worktree Isolation
+## 17. Worktree Isolation
 
 Each thread gets its own git worktree in `.codebutler/branches/<branchName>/`. Worktrees share `.git` with root repo — instant creation, minimal disk, full isolation. The Coder runs inside its worktree and has no idea other threads exist.
 
@@ -356,19 +375,19 @@ Init overlaps with PM planning to hide latency. Resource profiles limit concurre
 
 ---
 
-## 17. Multi-Model Orchestration via OpenRouter
+## 18. Multi-Model Orchestration via OpenRouter
 
 All LLM calls go through OpenRouter. Single API key, multiple models.
 
 ### Cost Structure
 
-PM = brain (~$0.001/call), Coder = hands (~$0.10-1.00/call), Artist = eyes (~$0.02/image), Whisper = ears (~$0.006/min).
+PM = brain (~$0.001/call), Coder = hands (~$0.10-1.00/call), Lead = retrospective (~$0.01-0.05/thread), Artist = eyes (~$0.02/image), Whisper = ears (~$0.006/min).
 
 ### PM Model Pool + Hot Swap
 
 The PM role has a pool of models. Default is cheap (Kimi). Users switch mid-thread with `/pm claude` or `/pm kimi`. The new model gets full conversation history — nothing lost.
 
-Memory extraction always uses Claude (configurable). It's the most valuable output — learnings compound.
+Memory extraction is the Lead's job (Claude Sonnet). It's the most valuable output — learnings compound.
 
 ### Cost Controls
 
@@ -376,15 +395,17 @@ Per-thread cap, per-day cap, per-user hourly limit. When exceeded, PM warns and 
 
 ---
 
-## 18. Model Interfaces
+## 19. Model Interfaces
 
-Three Go interfaces, all swappable:
+Four Go interfaces, all swappable:
 
 **ProductManager**: Chat (simple text), ChatJSON (parsed JSON), ChatWithTools (tool-calling loop with read-only tools), Name.
 
-**Artist**: Generate (new image from prompt), Edit (modify existing image), Name.
-
 **Coder**: Run (execute coding task in worktree), Resume (continue previous session), Name.
+
+**Lead**: Retrospective (full thread transcript + diff → summary, memory proposals, per-role improvements), Name.
+
+**Artist**: Generate (new image from prompt), Edit (modify existing image), Name.
 
 ### Provider Implementation
 
@@ -392,7 +413,7 @@ All providers use a shared OpenRouter client (HTTP, auth, rate limiting). Role a
 
 ---
 
-## 19. Coder Sandboxing
+## 20. Coder Sandboxing
 
 The Coder's system prompt (from `coder.md`) starts with restrictions:
 
@@ -408,23 +429,23 @@ Since CodeButler executes tools itself (not the LLM), it can enforce these restr
 
 ---
 
-## 20. Logging
+## 21. Logging
 
-Single structured log format with tags: INF, WRN, ERR, DBG, MSG (user message), PM (PM activity), IMG (image gen), CLD (Coder activity), RSP (response sent), MEM (memory ops). Each line: timestamp + tag + thread ID + description.
+Single structured log format with tags: INF, WRN, ERR, DBG, MSG (user message), PM (PM activity), CLD (Coder activity), LED (Lead activity), IMG (image gen), RSP (response sent), MEM (memory ops). Each line: timestamp + tag + thread ID + description.
 
 Ring buffer + SSE for web dashboard. No ANSI/TUI — everything plain.
 
 ---
 
-## 21. Service Install
+## 22. Service Install
 
 Run as system service. macOS: LaunchAgent plist. Linux: systemd user service. Both run in user session (access to tools, keychain, PATH). CLI flags: `--install`, `--uninstall`, `--status`, `--logs`. Each repo is an independent service with its own WorkingDirectory and log file.
 
 ---
 
-## 22. PR Description as Development Journal
+## 23. PR Description as Development Journal
 
-PR description IS the history. When PR is created, PM generates summary of the Slack thread and puts it in PR body via `gh pr edit`.
+PR description IS the history. When the thread closes, the Lead generates a summary of the full thread and puts it in the PR body via `gh pr edit`.
 
 Format: Summary, Changes (bullet list), Decisions, Participants, Slack Thread link. Bidirectional: Slack → PR link, PR → Slack link.
 
@@ -434,7 +455,7 @@ Detailed narrative MD committed to PR branch (`.codebutler/journals/thread-<ts>.
 
 ---
 
-## 23. Knowledge Sharing via Memory + PR Merge
+## 24. Knowledge Sharing via Memory + PR Merge
 
 Memory files follow git flow. Thread A's learnings land on main when its PR merges. Thread B (branched after merge) inherits them. Thread C (branched before merge) gets them on next rebase.
 
@@ -442,7 +463,7 @@ No custom sync mechanism — git IS the knowledge transport. Isolation by defaul
 
 ---
 
-## 24. Error Recovery & Resilience
+## 25. Error Recovery & Resilience
 
 | Failure | Recovery |
 |---------|----------|
@@ -461,7 +482,7 @@ SIGINT/SIGTERM → stop accepting messages → close channels → wait for activ
 
 ---
 
-## 25. Access Control & Rate Limiting
+## 26. Access Control & Rate Limiting
 
 Channel membership IS access control. Optional restrictions: allowed users list, max concurrent threads, max calls per hour, max per user, daily cost ceiling.
 
@@ -469,7 +490,7 @@ Four rate limiting layers: Slack API (platform-enforced, 1msg/s), concurrent Cod
 
 ---
 
-## 26. Testing Strategy
+## 27. Testing Strategy
 
 | Package | What to Test |
 |---------|-------------|
@@ -485,7 +506,7 @@ Integration tests with mock OpenRouter responses. End-to-end with real Slack wor
 
 ---
 
-## 27. Migration Path: v1 → v2
+## 28. Migration Path: v1 → v2
 
 Phase 1: Slack client + basic messaging (replace WhatsApp)
 Phase 2: Thread dispatch + worktrees (replace state machine)
@@ -496,7 +517,7 @@ Phase 6: Conflict detection + merge coordination
 
 ---
 
-## 28. Decisions Made
+## 29. Decisions Made
 
 - [x] Threads = Sessions (1:1 mapping)
 - [x] No state machine — event-driven thread dispatch
@@ -507,7 +528,8 @@ Phase 6: Conflict detection + merge coordination
 - [x] **No CLAUDE.md dependency** — CodeButler manages its own prompts
 - [x] Per-role memory files (pm.md, artist.md) with git flow
 - [x] PM model pool with hot swap (`/pm claude`, `/pm kimi`)
-- [x] Memory extraction always uses Claude (best brain for compounding learnings)
+- [x] **Lead role** for thread retrospective (summary, memory, per-role improvements)
+- [x] Memory extraction by Lead (full thread visibility, not PM)
 - [x] Thread = Branch = PR (1:1:1, non-negotiable)
 - [x] User closes thread explicitly (no timeouts)
 - [x] Worktree isolation (one per thread)
@@ -521,7 +543,7 @@ Phase 6: Conflict detection + merge coordination
 
 ---
 
-## 29. v1 vs v2 Comparison
+## 30. v1 vs v2 Comparison
 
 | Aspect | v1 (WhatsApp) | v2 (Slack + OpenRouter) |
 |--------|---------------|------------------------|
@@ -534,7 +556,8 @@ Phase 6: Conflict detection + merge coordination
 | Goroutines | 1 (poll loop, permanent) | N (ephemeral, one per active thread) |
 | Isolation | Shared directory | Git worktrees (1 per thread) |
 | Session key | Chat JID | thread_ts |
-| Memory | None | Role-specific, git flow, user-approved |
+| Roles | 1 (Claude) | 4 (PM, Coder, Lead, Artist) |
+| Memory | None | Role-specific, git flow, Lead-extracted, user-approved |
 | Knowledge sharing | Local CLAUDE.md | Memory files via PR merge |
 | UX | Flat chat, `[BOT]` prefix | Structured threads, native bot identity |
 | Team support | Single user | Multi-user native |
