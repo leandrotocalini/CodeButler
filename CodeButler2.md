@@ -30,7 +30,7 @@ All roles share the same tool set (Read, Write, Edit, Bash, Grep, Glob, WebSearc
 
 ### 1.3 What Makes It an Agent
 
-CodeButler receives a message and then: classifies intent, selects a workflow from memory, explores the codebase autonomously with tools (delegating web research to the Researcher when needed), detects conflicts with other active threads, proposes a plan with file:line references, waits for user approval, creates an isolated git worktree, runs the Coder with plan + context, routes Coder questions to the PM, detects PR creation, runs the Lead for retrospective (summary, memory extraction, improvement proposals per role — user approves), merges PR, cleans up worktree, closes thread. Each step involves decisions, tool calls, and state management.
+CodeButler receives a message and then: classifies intent, selects a workflow from `workflows.md`, follows the workflow steps (exploring codebase, delegating web research to the Researcher when needed), detects conflicts with other active threads, proposes a plan with file:line references, waits for user approval, creates an isolated git worktree, runs the Coder with plan + context, routes escalations from any role back to the PM, detects PR creation, runs the Lead for retrospective (summary, memory extraction, workflow evolution proposals — user approves), merges PR, cleans up worktree, closes thread. Each step involves decisions, tool calls, and state management.
 
 ### 1.4 Architecture: OpenRouter + Native Tools (No CLI Dependencies)
 
@@ -48,7 +48,7 @@ This means CodeButler has **zero dependency on Claude Code CLI**. It IS its own 
 
 Each role has its own MD file per repo that defines its system prompt, personality, and available tools. Plus one shared MD for cross-role knowledge and interaction patterns.
 
-Under `<repo>/.codebutler/`: `prompts/` has pm.md, researcher.md, coder.md, lead.md, artist.md, shared.md (system prompts per role + shared knowledge). `memory/` has pm.md, lead.md, and artist.md (evolving knowledge per role). The Researcher and Coder don't have memory files — the Researcher is stateless (each search is self-contained), the Coder's knowledge goes into `coder.md`.
+Under `<repo>/.codebutler/`: `prompts/` has pm.md, researcher.md, coder.md, lead.md, artist.md, shared.md (system prompts per role + shared knowledge). `memory/` has workflows.md (process playbook), pm.md, lead.md, and artist.md (evolving knowledge per role). The Researcher and Coder don't have memory files — the Researcher is stateless (each search is self-contained), the Coder's knowledge goes into `coder.md`.
 
 **Why per-role MDs instead of CLAUDE.md:**
 - Each role has a different personality, different tools, different restrictions
@@ -169,9 +169,9 @@ All LLM calls (PM, Researcher, Coder, Lead) route through OpenRouter using the g
 
 Global: `~/.codebutler/config.json`.
 
-Per-repo: `<repo>/.codebutler/` contains config.json, store.db (SQLite), `prompts/` (pm.md, researcher.md, coder.md, lead.md, artist.md, shared.md), `memory/` (pm.md, lead.md, artist.md), `branches/` (git worktrees, 1 per active thread), `images/` (generated), `journals/` (thread narratives).
+Per-repo: `<repo>/.codebutler/` contains config.json, store.db (SQLite), `prompts/` (pm.md, researcher.md, coder.md, lead.md, artist.md, shared.md), `memory/` (workflows.md, pm.md, lead.md, artist.md), `branches/` (git worktrees, 1 per active thread), `images/` (generated), `journals/` (thread narratives).
 
-**Committed to git:** `config.json`, `prompts/`, `memory/`. **Gitignored:** `store.db`, `branches/`, `images/`, `journals/`, `whatsapp-session/`.
+**Committed to git:** `config.json`, `prompts/`, `memory/`. **Gitignored:** `store.db`, `branches/`, `images/`, `journals/`.
 
 SQLite tables: `sessions` (PK: thread_ts, with channel_id, session_id, updated_at) and `messages` (PK: id, with thread_ts, channel_id, from_user, content, timestamp, acked flag).
 
@@ -221,13 +221,32 @@ CodeButler implements ALL the tools Claude Code has, natively in Go. **All roles
 
 **Git/GitHub tools:** GitCommit, GitPush, GHCreatePR, GHStatus.
 
-**CodeButler-specific tools:** SlackNotify (post to thread), ReadMemory (access role memory), ListThreads (see active threads), Research (PM→Researcher delegation), GenerateImage / EditImage (Artist-specific).
+**Escalation tools:** AskPM (any role→PM: request more context, definitions, or research), Research (PM→Researcher: delegate web search).
+
+**CodeButler-specific tools:** SlackNotify (post to thread), ReadMemory (access role memory), ListThreads (see active threads), GenerateImage / EditImage (Artist-specific).
 
 Each role's system prompt defines which tools to use and how. The PM uses Read, Grep, Glob, GitLog for codebase exploration and Research for web queries. The Researcher uses WebSearch + WebFetch exclusively. The Coder uses all tools freely to implement. The Artist adds image generation tools. But technically any role could use any tool — the restriction is behavioral, not structural. This keeps the architecture simple (one tool executor, shared by all roles) and allows future flexibility.
 
 ### Tool Execution Safety
 
 All tools execute in the worktree directory. Path validation ensures no escape. Write/Edit only within worktree. Bash has configurable timeout. Grep/Glob respect .gitignore.
+
+### Escalation to PM (AskPM)
+
+Any role can escalate to the PM when it needs more context. The PM is the orchestrator — the single point that talks to the user, knows the full picture, and can dispatch to other roles.
+
+**Coder escalates** when the plan is incomplete — missing edge case definitions, unclear requirements, needs external API docs. CodeButler pauses the Coder, routes the question to the PM.
+
+**Artist escalates** when image requirements are ambiguous — unclear dimensions, missing brand context, needs reference images.
+
+**Lead escalates** (rare) when retrospective needs clarification — "was this intentional or a workaround?"
+
+The PM can respond in three ways:
+1. **Answer directly** — from what it already knows or from codebase exploration
+2. **Ask the user** — if it's a product decision the PM can't make
+3. **Spawn a Researcher** — if it needs external info (API docs, library behavior)
+
+The answer flows back to the calling role, which continues. Each escalation is logged in the thread journal. The Lead sees every escalation at retrospective time and uses them as learning signals — "this type of task always needs auth context" or "PM should always check for database migrations in refactor tasks."
 
 ### Coder System Prompt (`coder.md`)
 
@@ -239,7 +258,7 @@ The per-repo `coder.md` replaces CLAUDE.md. Contains: personality and behavior r
 
 The PM uses the same OpenRouter API, tool-calling loop, and tool set as the Coder. The difference is behavioral — the PM's system prompt (`pm.md`) instructs it to only use read-only codebase tools: Read, Grep, Glob, GitLog, GitDiff, ReadMemory, ListThreads, GHStatus. When it needs external information, it calls Research tools which spawn Researcher subagents — multiple in parallel if needed. Output-capped, max 15 tool-calling iterations.
 
-The PM system prompt comes from per-repo `pm.md` + `shared.md` + memory.
+The PM system prompt comes from per-repo `pm.md` + `shared.md` + `memory/pm.md` + `memory/workflows.md`. The workflows guide the PM's behavior for each task type.
 
 ---
 
@@ -268,13 +287,28 @@ The Lead runs once per thread, at close time (after PR creation, before merge). 
 
 **What the Lead produces:**
 
-- **Thread summary** → PR description via `gh pr edit` (replaces PM doing this)
-- **Memory extraction** → proposes updates to pm.md, lead.md, artist.md, and suggests coder.md additions. User approves/edits before commit.
-- **Per-role improvement proposals** → "PM should have mentioned X in the plan", "Coder wasted 3 turns on Y because the system prompt doesn't mention Z", "Artist generated wrong size because the prompt doesn't specify dimensions"
+- **Thread summary** → PR description via `gh pr edit`
+- **Memory extraction** → proposes updates to workflows.md, pm.md, lead.md, artist.md, and suggests coder.md additions. User approves/edits before commit.
+- **Workflow evolution** → the Lead's most valuable output (see below)
+- **Per-role improvement proposals** → "PM should have mentioned X in the plan", "Coder wasted 3 turns on Y because the system prompt doesn't mention Z"
 - **Thread usage report** → token/cost breakdown, tool call stats, behind-the-scenes (PM↔Coder exchanges), tips for better prompting
 - **Journal finalization** → close entry + cost table, committed to PR branch
 
-The Lead uses Claude Sonnet (smart enough to analyze cross-role patterns, cheaper than Opus). Its system prompt comes from `lead.md` + `shared.md` + its own memory (`memory/lead.md`). Over time, the Lead learns what makes threads efficient and what patterns to flag.
+### Workflow Evolution
+
+The Lead reads the current `workflows.md`, compares it against what actually happened in the thread (including every AskPM escalation), and proposes changes. Three types of proposals:
+
+**Add step to existing workflow** — "The Coder escalated asking about database migrations. Add step 2.5 to `refactor` workflow: PM should check for pending migrations before proposing plan."
+
+**Create new workflow** — "This thread was about setting up a new CI pipeline. No workflow matched. Proposed new workflow: `ci-setup` with steps: 1. PM: check current CI config... 2. Researcher: latest best practices for [platform]... 3. Coder: implement..."
+
+**Automate a step** — "In the last 3 `feature` threads, the PM always asked the Researcher about API rate limits. Make this automatic: when workflow is `feature` and plan mentions external API, always spawn Researcher for rate limit check."
+
+The Lead presents these to the user in the thread. The user approves, edits, or rejects. Approved changes get committed to `workflows.md` on the PR branch and land on main with merge.
+
+**The flywheel:** rough workflow → thread runs → escalations + friction → Lead proposes improvement → user approves → better workflow → smoother next thread. Each thread makes the team more efficient.
+
+The Lead uses Claude Sonnet (smart enough to analyze cross-role patterns, cheaper than Opus). Its system prompt comes from `lead.md` + `shared.md` + `workflows.md` + its own memory (`memory/lead.md`).
 
 ---
 
@@ -335,32 +369,83 @@ Short code (<20 lines) inline as Slack code blocks. Long code (≥20 lines) uplo
 
 ## 15. Memory System
 
-### Files — One Memory Per Role
+### Files
 
-Three memory files: `pm.md` (workflows, project knowledge, planning notes), `lead.md` (retrospective patterns, what makes threads efficient, cross-role coordination insights), and `artist.md` (style preferences, colors, icon conventions). The Coder doesn't have a separate memory file — its knowledge goes into `coder.md` (the system prompt) which users maintain. The Lead suggests additions to `coder.md` during retrospective.
+Four memory files, all in `memory/`:
+
+| File | What it holds | Who reads it | Who updates it |
+|------|--------------|-------------|---------------|
+| `workflows.md` | Process playbook: step-by-step workflows for each task type | PM (selects workflow), Lead (proposes changes) | Lead (via user approval) |
+| `pm.md` | Project knowledge, planning notes, inter-role coordination tips | PM | Lead (via user approval) |
+| `lead.md` | Retrospective patterns, what makes threads efficient, escalation patterns | Lead | Lead (via user approval) |
+| `artist.md` | Style preferences, colors, icon conventions, dimension defaults | Artist | Lead (via user approval) |
+
+The Coder and Researcher don't have memory files — the Coder's knowledge goes into `coder.md` (the system prompt) which users maintain, the Researcher is stateless. The Lead suggests `coder.md` additions during retrospective.
+
+### `workflows.md` — The Process Playbook
+
+Workflows are the team's learned process for each type of task. They live in their own file, separate from role memory, because they're cross-role — a workflow defines what the PM does, what the Researcher investigates, what the Coder builds, what the Lead checks.
+
+**Seeded on first run** with defaults:
+
+```markdown
+## bugfix
+1. PM: reproduce description, find relevant code (Read, Grep), identify root cause
+2. PM: if external API involved → Researcher: check known issues/changelogs
+3. PM: propose fix plan with file:line references
+4. User: approve
+5. Coder: implement fix, add test for regression
+6. Coder: run existing tests
+
+## feature
+1. PM: clarify requirements with user, explore codebase for integration points
+2. PM: if unfamiliar tech → Researcher: API docs, best practices, examples
+3. PM: propose plan with file:line references and acceptance criteria
+4. User: approve
+5. Coder: implement, write tests
+6. Coder: run full test suite
+
+## question
+1. PM: explore codebase, answer directly
+2. PM: if needs external context → Researcher: search
+3. PM: respond to user (no Coder needed)
+
+## refactor
+1. PM: analyze current code, identify scope
+2. PM: propose refactor plan with before/after structure
+3. User: approve
+4. Coder: refactor, ensure tests pass
+```
+
+**How the PM uses it:** When a message arrives, the PM classifies intent and selects the matching workflow. The workflow steps guide the PM's behavior — which tools to call, when to spawn the Researcher, what to include in the plan, what to tell the Coder. This is how the system gets more structured over time.
+
+**How workflows evolve:** See section 15.5 — the Lead proposes workflow changes based on what it observes.
 
 ### Git Flow
 
-Memory files follow PR flow: after PR creation, the Lead extracts learnings → proposes in thread → user approves → committed to PR branch → lands on main with merge. Versioned, reviewable, branch-isolated, conflict-resolved by git.
+Memory files (including `workflows.md`) follow PR flow: after PR creation, the Lead extracts learnings → proposes in thread → user approves → committed to PR branch → lands on main with merge. Versioned, reviewable, branch-isolated, conflict-resolved by git.
 
 ### Memory Extraction (Lead Role)
 
-After PR creation, the Lead analyzes the full thread transcript (user messages, PM planning, Coder tool calls, Artist outputs, git diff). It proposes updates routed to the right memory file:
+After PR creation, the Lead analyzes the full thread transcript (user messages, PM planning, Coder escalations, Coder tool calls, Artist outputs, git diff). It proposes updates routed to the right file:
 
-- Planning workflows, project knowledge → `pm.md`
-- Retrospective patterns, cross-role coordination → `lead.md`
+- Workflow refinements (new steps, new workflows, automations) → `workflows.md`
+- Project knowledge, inter-role coordination → `pm.md`
+- Retrospective patterns, escalation patterns → `lead.md`
 - Visual style, colors, icon conventions → `artist.md`
 - Coding conventions → suggested as tip for user to add to `coder.md`
 
 User controls what gets remembered: "yes" saves all, "remove 3" skips item 3, "add: ..." adds custom learning, "no" discards all.
 
+### Escalation-Driven Learning
+
+Every Coder→PM escalation (`AskPM`) is a learning signal. If the Coder keeps asking "what's the auth method?" for feature tasks, the Lead notices and proposes: "add step to `feature` workflow: PM should always check auth requirements before proposing plan." Over time, escalations decrease because the workflows get more complete.
+
+The pattern: **escalation today → workflow improvement tomorrow → no escalation next time.**
+
 ### Inter-Role Learning
 
 Each memory file has a "Working with Other Roles" section. The PM learns what context the Coder needs (e.g., "always mention test framework in plans"). The Artist learns what formats the Coder expects. Over time, roles form a well-coordinated team.
-
-### Workflows Are Living Documents
-
-Workflows live in `pm.md` and evolve per project. Defaults seeded on first run (bugfix, feature, question, etc.). Users can add custom workflows. After each thread, memory extraction proposes workflow refinements.
 
 ---
 
@@ -581,7 +666,10 @@ Phase 6: Conflict detection + merge coordination
 - [x] **Per-role system prompt MDs** (pm.md, researcher.md, coder.md, lead.md, artist.md, shared.md per repo)
 - [x] **No CLAUDE.md dependency** — CodeButler manages its own prompts
 - [x] **Researcher role** for web research on PM demand (WebSearch/WebFetch)
-- [x] Per-role memory files (pm.md, lead.md, artist.md) with git flow
+- [x] **AskPM escalation** — any role can escalate to PM for more context (Coder, Artist, Lead)
+- [x] **workflows.md** — standalone process playbook, separate from role memory, evolved by Lead
+- [x] **Escalation-driven learning** — Coder questions today → workflow improvements tomorrow
+- [x] Per-role memory files (workflows.md, pm.md, lead.md, artist.md) with git flow
 - [x] Per-repo config committed to git (models per role, channel, limits)
 - [x] PM model pool with hot swap (`/pm claude`, `/pm kimi`)
 - [x] **Lead role** for thread retrospective (summary, memory, per-role improvements)
