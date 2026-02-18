@@ -255,30 +255,85 @@ All tools execute in the worktree directory. Path validation ensures no escape. 
 
 ### Inter-Agent Communication
 
-Agents talk to each other via `SendMessage`. The daemon routes messages between agent instances. This is the core of the multi-agent system — not a special escalation tool, but a natural communication bus.
+Agents talk to each other via `SendMessage`. The daemon only routes — it does NOT orchestrate phase transitions. **Agents drive the flow themselves.** The Coder tells the Reviewer when it's done. The Reviewer tells the Lead when the review is approved. The PM hands off to the Lead in discovery. Each agent decides when to pass work forward.
 
 **SendMessage(to, message, waitForReply):**
 - `to` — target agent: `"pm"`, `"coder"`, `"reviewer"`, `"lead"`, `"researcher"`, `"artist"`
 - `message` — free-form text (question, task, feedback, discussion point)
 - `waitForReply` — if true, calling agent pauses until reply arrives; if false, fire-and-forget
 
-The daemon handles routing: if the target agent is already running, deliver to its context. If not, spawn a new instance with the appropriate config. The caller can continue working (async) or wait for a response (sync).
+The daemon handles routing: if the target agent is already running, deliver to its context. If not, spawn a new instance with the appropriate config.
 
-**Common patterns:**
+### Natural Conversation Flows
 
-- **PM → Coder** (task): `SendMessage("coder", "implement this plan: ...", false)` — PM sends the task and stays available for questions
-- **Coder → PM** (question): `SendMessage("pm", "what auth method does this project use?", true)` — Coder pauses, PM answers, Coder continues
-- **PM → Researcher** (research): equivalent to the `Research` tool — spawn, get result, continue
-- **Reviewer → Coder** (feedback): `SendMessage("coder", "3 issues found: [list]", true)` — Coder fixes, Reviewer re-reviews
-- **Reviewer → Lead** (approved): `SendMessage("lead", "review approved, 2 rounds, 1 security fix", false)` — triggers Lead retrospective
-- **Lead → PM** (feedback): `SendMessage("pm", "you missed checking migrations in refactor tasks", true)` — Lead discusses improvements with PM
-- **Lead → Coder** (feedback): `SendMessage("coder", "you spent 5 turns on type errors, should strict mode be in your prompt?", true)` — Lead discusses with Coder
-- **Lead → Reviewer** (feedback): `SendMessage("reviewer", "you missed the SQL injection the user found later — add parameterized query check", true)` — Lead helps Reviewer learn
-- **PM → Lead** (response): `SendMessage("lead", "I didn't have that info, add it to the workflow", true)` — agents discuss and reach consensus
+**PM ↔ Coder** — the most frequent conversation. PM sends the task. Coder works but messages the PM when it needs more context or disagrees with the plan:
 
-**Visibility:** All inter-agent messages are logged in the thread journal. The user sees a summary of behind-the-scenes communication in the usage report. Full transparency.
+```
+PM → Coder: "implement this plan: [plan]"
+Coder (working...) → PM: "the plan says to use REST but this project uses GraphQL everywhere. should I adapt?"
+PM → Coder: "good catch, use GraphQL. here's the existing schema: [explores codebase, sends context]"
+Coder (continues...)
+```
 
-**Cost control:** Inter-agent exchanges are capped per thread (configurable). The Lead's retrospective discussion has a budget. Agents are instructed to be concise.
+If they can't agree (Coder thinks the approach is wrong, PM insists), either one escalates to the Lead:
+
+```
+Coder → Lead: "PM wants me to add a new database table but I think we should extend the existing one. here's why: [reasoning]"
+Lead (reads context) → PM: "the Coder has a point — extending the existing table avoids a migration. thoughts?"
+PM → Lead: "agreed, let's go with that"
+Lead → Coder: "extend the existing table, PM agrees"
+```
+
+**Coder → Reviewer** — Coder initiates the review when it's done. Not the daemon, not a phase trigger — the Coder itself decides it's ready:
+
+```
+Coder → Reviewer: "PR ready for review. branch: codebutler/add-notifications. key changes: [summary]"
+Reviewer (reads diff, runs tests...)
+Reviewer → Coder: "3 issues: [security] unsanitized input line 47, [test] missing edge case for empty list, [quality] duplicated error handler"
+Coder (fixes...) → Reviewer: "fixed all 3, pushed"
+Reviewer (re-reviews...) → Coder: "approved"
+```
+
+**Coder ↔ Reviewer** — if they disagree on whether something is actually an issue, either one escalates to the Lead:
+
+```
+Reviewer → Coder: "this function is too complex, refactor into smaller pieces"
+Coder → Reviewer: "it's a state machine, splitting it would make it harder to follow"
+Reviewer → Lead: "Coder and I disagree on function complexity in daemon.go:150. I say split, Coder says it's a state machine that's clearer as one block"
+Lead (reads the code) → Reviewer: "the Coder is right — state machines are clearer as one block. but add a comment explaining the states"
+Lead → Coder: "keep it, but add a comment explaining the state transitions"
+```
+
+**PM → Researcher** — PM delegates web research. Fire-and-forget or wait:
+
+```
+PM → Researcher: "find the rate limits for the Stripe API v2024-12"
+Researcher (searches, synthesizes...) → PM: "Stripe API: 100 req/s in test, 10k req/s in production. docs: [link]"
+```
+
+**Lead ↔ all agents** — at retrospective, Lead talks to each agent about improvements:
+
+```
+Lead → PM: "Coder asked you 3 times about auth. add auth-check step to implement workflow?"
+PM → Lead: "I didn't know this project uses JWT. add it to my memory too"
+Lead → Coder: "you spent 5 turns on type errors. should strict mode go in coder.md?"
+Coder → Lead: "yes, suggest enabling it"
+Lead → Reviewer: "you missed the unhandled error on line 47. add error-return check to your patterns?"
+Reviewer → Lead: "yes, add to reviewer.md: always check error returns in Go"
+Lead → User: "here's what we learned: [proposals]"
+```
+
+### Escalation Rule
+
+**When two agents disagree → they ask the Lead.** The Lead reads the context, evaluates based on the common good (code quality, team efficiency, workflow improvement), and decides. If the Lead can't decide → it asks the user.
+
+The escalation chain: `agent ↔ agent → Lead → user`. Never skip to the user directly (except the PM, who always talks to the user).
+
+### Visibility & Cost
+
+All inter-agent messages are logged in the thread journal. The user sees a summary of behind-the-scenes communication in the usage report. Full transparency.
+
+Inter-agent exchanges are capped per thread (configurable). The Lead's retrospective discussion has a turn budget. Agents are instructed to be concise.
 
 Every inter-agent message is a learning signal. The Lead sees all of them at retrospective time — "the Coder asked the PM 3 questions about auth, let's add that to the workflow."
 
@@ -321,7 +376,7 @@ The Researcher is a **subagent** — spawned by the PM on demand, runs a short f
 
 ## 12. Reviewer Architecture: Code Review Loop
 
-The Reviewer activates after the Coder finishes and the PR is created. Its job: read the diff, catch what the Coder missed. It does NOT write code — it sends feedback to the Coder, who fixes.
+The Reviewer activates when the Coder messages it — not by daemon trigger, but by the Coder itself deciding it's done. The Coder sends `SendMessage("reviewer", "PR ready: [branch, summary]")`. The Reviewer's job: read the diff, catch what the Coder missed. It does NOT write code — it sends feedback to the Coder, who fixes.
 
 ### What the Reviewer Checks
 
@@ -335,14 +390,12 @@ The Reviewer activates after the Coder finishes and the PR is created. Its job: 
 ### The Review Loop
 
 ```
-1. Coder finishes → PR created
-2. Reviewer activates → reads diff (git diff main...branch)
+1. Coder finishes → SendMessage("reviewer", "PR ready: branch, key changes summary")
+2. Reviewer reads diff (git diff main...branch)
 3. Reviewer runs linters/tests if configured (Bash, read-only intent)
-4. If issues found → SendMessage("coder", "issues: [list]", true)
-5. Coder fixes → pushes
-6. Reviewer re-reviews the new diff
-7. Repeat until Reviewer approves
-8. Reviewer → "approved" → Lead activates for retrospective
+4. If issues → SendMessage("coder", "issues: [list]") → Coder fixes → pushes → Reviewer re-reviews
+5. If disagreement on an issue → either escalates to Lead → Lead decides
+6. Reviewer approves → SendMessage("lead", "review done, N rounds, summary") → Lead activates
 ```
 
 The Reviewer is thorough but not adversarial. It's a safety net, not a gatekeeper. It catches the things that slip through when the Coder is focused on making things work — the forgotten null check, the SQL injection in a query builder, the test that only covers the happy path.
@@ -556,9 +609,22 @@ user to define specs. Lead produces a roadmap with ordered tasks.
     commit roadmap document to repo — user decides format
 12. Lead: retrospective on discovery process — propose workflow improvements
 
-Each roadmap item becomes a future `implement` thread. When the user starts
-one ("implement task 3 from the notifications roadmap"), the PM reads the
-proposal/issue and uses it as the starting spec.
+Each roadmap item becomes a future `implement` thread. Three ways to start:
+
+1. **User starts manually** — new Slack message: "implement task 3 from
+   the notifications roadmap". PM reads the GitHub issue, uses it as
+   starting spec, may skip some interview steps (already defined).
+
+2. **User says "start next"** — PM checks the roadmap, picks the next
+   unstarted task by priority, starts the implement workflow.
+
+3. **User says "start all"** — PM creates one thread per roadmap item
+   (respecting maxConcurrentThreads). Each runs independently with
+   its own worktree.
+
+The PM links back: when starting from a roadmap item, it references the
+discovery thread and GitHub issue in the plan. The Lead links forward:
+when closing an implement thread, it updates the roadmap issue as done.
 
 ## bugfix
 1. PM: reproduce description, find relevant code (Read, Grep), identify
@@ -633,11 +699,11 @@ Each memory file has a "Working with Other Roles" section. The PM learns what co
 Non-negotiable. States: `created → working → pr_opened → reviewing → approved → merged (closed)`. Only the user closes a thread ("merge"/"done"/"dale"). No timeouts, no automatic close.
 
 ### After PR Creation
-- Add thread URL to PR body
-- Detect TODOs/FIXMEs in code, warn in thread
-- Journal: append "PR opened" entry
-- Reviewer activates: review diff → feedback loop with Coder until approved
-- After Reviewer approves → Lead retrospective: analyze full thread → propose memory/workflow updates → user approves → commit to PR branch
+- Coder adds thread URL to PR body, detects TODOs/FIXMEs, warns in thread
+- Coder → Reviewer: "PR ready" (agent-driven handoff)
+- Reviewer ↔ Coder: review loop until approved (escalate to Lead if disagreement)
+- Reviewer → Lead: "approved" (agent-driven handoff)
+- Lead: retrospective — discuss with agents, propose memory/workflow updates → user approves → commit to PR branch
 
 ### On User Close
 - Lead runs: generates PR summary → `gh pr edit`, finalizes journal, posts usage report with per-role improvement proposals
@@ -854,6 +920,8 @@ Phase 6: Conflict detection + merge coordination
 - [x] **PM always on, others on-demand** — Coder/Reviewer/Researcher/Artist/Lead activate only when called
 - [x] **Reviewer agent** — code review loop after Coder, before Lead. Catches security/quality/test issues
 - [x] **Discovery workflow** — PM interviews user → Lead builds roadmap → each item becomes future implement thread
+- [x] **Agent-driven flow** — agents pass work to each other (Coder→Reviewer→Lead), daemon only routes
+- [x] **Escalation rule** — when two agents disagree, they ask the Lead. Lead→user only if needed
 - [x] **Inter-agent communication** — agents message each other via SendMessage (sync or async)
 - [x] **Lead as mediator** — arbitrates agent disagreements, focused on common good + workflow improvement
 - [x] **Researcher agent** for web research on PM demand (WebSearch/WebFetch)
