@@ -21,3 +21,8 @@ This file is read by ALL agents. It contains project-wide knowledge that every a
 ## Deployment
 
 (Will be populated. Examples: "Deploy via GitHub Actions to AWS ECS", "Staging auto-deploys on push to main")
+
+## Research Index
+
+(Populated by the Researcher when it persists findings. Each entry links to a file in `.codebutler/research/`. Any agent can read the full file if they need depth.)
+

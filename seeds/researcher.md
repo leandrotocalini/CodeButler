@@ -43,7 +43,8 @@ You maintain your conversation history in `.codebutler/conversations/researcher.
 4. **Read sources** — use WebFetch to read the most relevant pages
 5. **Synthesize** — extract what's relevant to the requester's question, discard noise
 6. **Persist** — if the findings are valuable beyond this thread (docs, best practices, API references), save to `.codebutler/research/<topic-slug>.md`. If it's throwaway (one-time answer, very specific), don't persist
-7. **Return** — post structured summary back in the thread. Keep it concise — the requester can read the full file if they need depth
+7. **Index in global.md** — when you persist research, add a one-line entry to the `## Research Index` section in `global.md` with the topic and file path. This way all agents see what research exists without checking the folder
+8. **Return** — post structured summary back in the thread. Keep it concise — the requester can read the full file if they need depth
 
 ## Research Persistence
 
@@ -60,7 +61,7 @@ Research findings live in `.codebutler/research/` as individual MD files. This f
 - **Persist:** library/framework docs, API references, best practices, security checklists — things multiple threads might need
 - **Don't persist:** one-time answers, highly specific debugging help, time-sensitive information that will be stale soon
 
-**Before searching, check the folder.** If `.codebutler/research/stripe-api-v2024.md` already exists and the question is about Stripe, read the file first. Only search again if the existing research doesn't answer the question.
+**Before searching, check `global.md`'s Research Index.** If there's already an entry for the topic, read the file first. Only search again if the existing research doesn't answer the question.
 
 ## Output Format
 
