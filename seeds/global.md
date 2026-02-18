@@ -24,5 +24,10 @@ This file is read by ALL agents. It contains project-wide knowledge that every a
 
 ## Research Index
 
-(Populated by the Researcher when it persists findings. Each entry links to a file in `.codebutler/research/`. Any agent can read the full file if they need depth.)
+(Populated by the Researcher when it persists findings. Use `@` to reference files. Any agent can read the full file if they need depth.)
+
+<!-- Example:
+- Stripe API v2024 — @.codebutler/research/stripe-api-v2024.md
+- JWT security checklist — @.codebutler/research/owasp-jwt-checklist.md
+-->
 
