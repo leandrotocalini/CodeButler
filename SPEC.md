@@ -29,9 +29,9 @@ codebutler --role artist      # always running, listens for @codebutler.artist
 
 **Communication between agents is 100% via Slack messages.** No IPC, no RPC, no shared memory. When PM needs Coder, it posts `@codebutler.coder implement...` in the thread. The Coder process picks it up from its Slack listener. Same for all agent-to-agent communication.
 
-**No shared database.** The Slack thread is the source of truth for inter-agent communication — what agents say to each other and the user. But each agent also maintains a **local conversation file** (`<thread-id>/<role>.json`) with its model. This file holds the full back-and-forth: system prompt, tool calls, tool results, intermediate reasoning — most of which never appears in Slack. The model returns many things (tool calls, partial thoughts, retries) that the agent processes internally; only the final curated output gets posted to the thread.
+**No shared database.** The Slack thread is the source of truth for inter-agent communication — what agents say to each other and the user. But each agent also maintains a **local conversation file** in the thread's worktree (`conversations/<role>.json`). This file holds the full back-and-forth with the model: system prompt, tool calls, tool results, intermediate reasoning — most of which never appears in Slack. The model returns many things (tool calls, partial thoughts, retries) that the agent processes internally; only the final curated output gets posted to the thread.
 
-On restart, agents read active threads from Slack to find unprocessed @mentions, and resume model conversations from their local JSON files. No SQLite needed.
+The worktree already maps 1:1 to the thread (via the branch), so conversation files just live there — no separate thread-id directory needed. On restart, agents read active threads from Slack to find unprocessed @mentions, and resume model conversations from the worktree's JSON files. No SQLite needed.
 
 Same agent loop in every process (system prompt → LLM call → tool use → execute → append → repeat), different parameters:
 - **System prompt** — from `<role>.md` + `global.md`. One file per agent that IS the system prompt and evolves with learnings
@@ -55,7 +55,7 @@ All agents share the same tool set. Separation is behavioral via system prompts:
 
 ### 1.3 End-to-End Flow
 
-PM classifies intent → selects workflow from `workflows.md` → interviews user → explores codebase → spawns Researcher for web research if needed → sends to Artist for UI/UX design if feature has visual component → proposes plan (with Artist design) → user approves → creates worktree → sends plan + Artist design to Coder → Coder implements + creates PR → Reviewer reviews diff (loop with Coder until approved) → Lead runs retrospective (discusses with agents, proposes learnings) → user approves learnings → merge PR → cleanup.
+PM creates worktree (conversation persistence from the start) → classifies intent → selects workflow from `workflows.md` → interviews user → explores codebase → spawns Researcher for web research if needed → sends to Artist for UI/UX design if feature has visual component → proposes plan (with Artist design) → user approves → sends plan + Artist design to Coder → Coder implements + creates PR → Reviewer reviews diff (loop with Coder until approved) → Lead runs retrospective (discusses with agents, proposes learnings) → user approves learnings → merge PR → cleanup.
 
 For discovery: PM interviews → Artist designs UX for visual features → Lead builds roadmap → GitHub issues.
 
@@ -374,9 +374,10 @@ No state machine. Slack threads provide natural conversation boundaries. Each ag
 
 ```
 User posts in Slack thread
+  → PM creates worktree + starts conversation file
   → PM plans, explores, proposes
   → PM posts: "@codebutler.coder implement: [plan]"
-  → Coder implements in worktree
+  → Coder implements in worktree (its own conversation file there too)
   → Coder posts: "@codebutler.pm what auth method?" (question)
   → PM responds
   → Coder posts: "@codebutler.reviewer PR ready: [branch]"
@@ -422,20 +423,21 @@ Seeded on first run:
 
 ```markdown
 ## implement
-1. PM: classify as implement
-2. PM: interview user (acceptance criteria, edge cases, constraints)
-3. PM: explore codebase (integration points, patterns)
-4. PM: if unfamiliar tech → Researcher: docs, best practices
-5. PM: if UI component → Artist: design UI/UX. Artist returns proposal
-6. PM: propose plan (file:line refs, Artist design if applicable)
-7. User: approve
-8. Coder: implement in worktree (PM plan + Artist design as input)
-9. Coder: create PR
-10. Reviewer: review diff (quality, security, tests, plan compliance)
-11. Reviewer: if issues → Coder fixes → re-review
-12. Reviewer: approved
-13. Lead: retrospective (discuss with agents, propose learnings)
-14. User: approve learnings, merge
+1. PM: create worktree + conversation file
+2. PM: classify as implement
+3. PM: interview user (acceptance criteria, edge cases, constraints)
+4. PM: explore codebase (integration points, patterns)
+5. PM: if unfamiliar tech → Researcher: docs, best practices
+6. PM: if UI component → Artist: design UI/UX. Artist returns proposal
+7. PM: propose plan (file:line refs, Artist design if applicable)
+8. User: approve
+9. Coder: implement in worktree (PM plan + Artist design as input)
+10. Coder: create PR
+11. Reviewer: review diff (quality, security, tests, plan compliance)
+12. Reviewer: if issues → Coder fixes → re-review
+13. Reviewer: approved
+14. Lead: retrospective (discuss with agents, propose learnings)
+15. User: approve learnings, merge
 
 ## discovery
 1. PM: classify as discovery
@@ -529,7 +531,7 @@ Non-negotiable. Only the user closes a thread. No timeouts.
 
 ## 13. Worktree Isolation
 
-Each thread gets a git worktree in `.codebutler/branches/<branchName>/`. Created only when user approves plan. Branch: `codebutler/<slug>`.
+Each thread gets a git worktree in `.codebutler/branches/<branchName>/`. **Created early by the PM** — as soon as the PM starts working on a thread, it creates the worktree and begins saving its conversation file there. This way every agent that touches the thread has a place to persist its model conversation from the start. Branch: `codebutler/<slug>`.
 
 | Platform | Init | Build Isolation |
 |----------|------|-----------------|
