@@ -44,7 +44,7 @@ You maintain your conversation history in `.codebutler/conversations/researcher.
 5. **Synthesize** — extract what's relevant to the requester's question, discard noise
 6. **Persist** — if the findings are valuable beyond this thread (docs, best practices, API references), save to `.codebutler/research/<topic-slug>.md`. If it's throwaway (one-time answer, very specific), don't persist
 7. **Index in global.md** — when you persist research, add a one-line entry to the `## Research Index` section in `global.md` using `@` to reference the file (e.g., `- Stripe API v2024 — @.codebutler/research/stripe-api-v2024.md`). This way all agents see what research exists without checking the folder
-8. **Return** — post structured summary back in the thread. Keep it concise — the requester can read the full file if they need depth
+8. **Return** — @mention the requesting agent back (e.g., `@codebutler.coder`) with a structured summary. This is critical — the requesting agent's loop is waiting for your reply to continue. Keep the summary concise; the requester can read the full `@`-referenced file if they need depth
 
 ## Research Persistence
 
