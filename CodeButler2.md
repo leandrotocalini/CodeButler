@@ -8,24 +8,37 @@
 
 CodeButler is **a multi-agent AI dev team accessible from Slack**. One Go binary, multiple agents, each with its own personality, context, and memory — all parameterized from the same code. You describe what you want in a Slack thread. A cheap agent (the PM) plans the work, explores the codebase, and proposes a plan. You approve. The Coder agent executes — with a full agent loop, tool use, file editing, test running, and PR creation. At close, the Lead agent mediates a retrospective between all agents to improve workflows. No terminal needed. You can be on your phone.
 
-### 1.1 One Daemon, One Instance Per Agent
+### 1.1 Process Model: Separate Processes, Goroutines Per Thread
+
+**Six independent OS processes**, one per agent. Same Go binary, parameterized by `--role`:
 
 ```bash
-codebutler --role pm          # always running, listens for Slack messages
-codebutler --role coder       # activates only when PM sends it a task
-codebutler --role reviewer    # activates after Coder finishes, reviews the diff
-codebutler --role researcher  # activates only when PM requests research
-codebutler --role lead        # activates at thread close
-codebutler --role artist      # activates for UI/UX design or image generation
+codebutler --role pm          # always running, listens for Slack
+codebutler --role coder       # always running, listens for @codebutler.coder
+codebutler --role reviewer    # always running, listens for @codebutler.reviewer
+codebutler --role researcher  # always running, listens for @codebutler.researcher
+codebutler --role lead        # always running, listens for @codebutler.lead
+codebutler --role artist      # always running, listens for @codebutler.artist
 ```
 
-Same code, same agent loop (system prompt → LLM call → tool use → execute tool → append result → repeat), different parameters:
+**Each process:**
+1. Connects to Slack via Socket Mode (its own listener)
+2. Filters messages: only responds to @mentions directed at it (or user messages for PM)
+3. Maintains a **thread registry** (`map[string]*ThreadWorker`) — one goroutine per active thread
+4. Executes tools locally in its own process (Read, Write, Bash, etc.)
+5. Reads its own MD + `global.md` as system prompt
+6. Calls OpenRouter with its configured model
 
-- **System prompt** — from `<role>.md` + `global.md`. One file per agent that IS the system prompt and evolves with learnings over time
+**Communication between agents is 100% via Slack messages.** No IPC, no RPC, no shared memory. When PM needs Coder, it posts `@codebutler.coder implement...` in the thread. The Coder process picks it up from its Slack listener. Same for all agent-to-agent communication.
+
+**Shared state:** all processes read/write the same SQLite DB (with busy timeout + WAL mode for concurrent access). Session IDs, messages, and ack state are shared.
+
+Same agent loop in every process (system prompt → LLM call → tool use → execute → append → repeat), different parameters:
+- **System prompt** — from `<role>.md` + `global.md`. One file per agent that IS the system prompt and evolves with learnings
 - **Model** — from per-repo config (Kimi for PM, Opus for Coder, Sonnet for others)
 - **Tool permissions** — behavioral (system prompt says what to use), not structural
 
-**The PM is always on.** All other agents are dormant until called. **Mediation:** when agents disagree, they escalate to the Lead. If the Lead can't resolve it, it asks the user.
+**The PM is the entry point** — it handles all user messages. Other agents are idle until @mentioned. **Mediation:** when agents disagree, they escalate to the Lead. If the Lead can't resolve it, it asks the user.
 
 ### 1.2 The Six Agents
 
@@ -248,39 +261,43 @@ When two agents disagree → Lead decides. **The user outranks everyone** — ca
 
 ## 7. Agent Architectures
 
+Each agent is an independent OS process with its own Slack listener. All run the same binary. All execute tools locally. All communicate via Slack messages in the thread.
+
 ### PM — Always-Online Orchestrator
 
-Always available. Talks to user, explores codebase, selects workflow, delegates research, proposes plans, stays available for Coder questions. Cheap model (Kimi by default). System prompt: `pm.md` + `global.md` + `workflows.md`. Capped at 15 tool-calling iterations per activation.
+The entry point for all user messages. Talks to user, explores codebase, selects workflow, delegates to other agents via @mentions in the thread. Cheap model (Kimi by default). System prompt: `pm.md` + `global.md` + `workflows.md`. Capped at 15 tool-calling iterations per activation.
+
+The PM's goroutine for a thread stays alive while the Coder works — when the Coder @mentions PM with a question, the PM's Slack listener routes it to that thread's goroutine and responds.
 
 ### Researcher — Subagent for Web Research
 
-Spawned by PM on demand. Runs WebSearch + WebFetch → synthesizes → returns → dies. Stateless, parallel-capable, non-blocking. Protects PM's context from noisy web results. System prompt: `researcher.md` + `global.md`.
+Listens for @mentions from PM. Runs WebSearch + WebFetch → synthesizes → posts result back in thread. Stateless, parallel-capable (multiple goroutines for concurrent research requests). Protects PM's context from noisy web results. System prompt: `researcher.md` + `global.md`.
 
 ### Artist — UI/UX Designer + Image Gen
 
-Dual-model. Claude Sonnet for UX reasoning (layouts, component structure, UX flows, interaction patterns). OpenAI gpt-image-1 for image gen/editing. Activates when PM sends a feature to design. Output becomes part of the Coder's task prompt. Reads `artist/assets/` for visual references to stay coherent with existing UI. System prompt: `artist.md` + `global.md`.
+Dual-model. Listens for @mentions from PM. Claude Sonnet for UX reasoning (layouts, component structure, UX flows). OpenAI gpt-image-1 for image gen/editing. Posts design proposals back in the thread. Reads `artist/assets/` for visual references to stay coherent with existing UI. System prompt: `artist.md` + `global.md`.
 
 ### Coder — Builder
 
-Claude Opus 4.6. Full tool set. Works in isolated worktree. Creates PRs. Receives PM plan + Artist design as input. Can message PM for missing context. System prompt: `coder.md` + `global.md` + task plan.
+Claude Opus 4.6. Listens for @mentions from PM (task) and Reviewer (feedback). Full tool set, executes locally in isolated worktree. Creates PRs. When it needs context, @mentions PM in the thread. When done, @mentions Reviewer. System prompt: `coder.md` + `global.md` + task context from thread.
 
 **Sandboxing:** MUST NOT install packages, leave worktree, modify system files, or run destructive commands. Enforced at tool execution layer (path validation, command filtering) — stronger than prompt-only.
 
 ### Reviewer — Code Review Loop
 
-Activates when Coder sends "PR ready." Checks: code quality, security (OWASP), test coverage, consistency, best practices, plan compliance. Sends structured feedback (`[security] file:line — description`). Loop until approved (max 3 rounds). Disagreements escalate to Lead. System prompt: `reviewer.md` + `global.md`.
+Listens for @mentions from Coder ("PR ready"). Checks: code quality, security (OWASP), test coverage, consistency, plan compliance. Sends structured feedback back to Coder via @mention. Loop until approved (max 3 rounds). When approved, @mentions Lead. Disagreements escalate to Lead. System prompt: `reviewer.md` + `global.md`.
 
 ### Lead — Mediator + Retrospective
 
-Runs at thread close with **full thread transcript**. Three phases:
+Listens for @mentions from Reviewer ("approved") or from agents in disagreement. At thread close, reads **full thread transcript** from Slack. Three phases:
 
 1. **Analysis** (solo) — identifies friction, wasted turns, escalation patterns
-2. **Discussion** (multi-agent) — @mentions each agent, discusses improvements. Real conversation in the thread
+2. **Discussion** (multi-agent) — @mentions each agent in the thread, discusses improvements
 3. **Proposals** (to user) — concrete updates to agent MDs, `global.md`, `workflows.md`
 
-**Produces:** PR description, learnings for agent MDs, workflow evolution, usage report, journal finalization.
+**Produces:** PR description, learnings for agent MDs, workflow evolution, usage report.
 
-**Workflow evolution** — three types: add step to existing workflow, create new workflow, automate a step. Built collaboratively with agents during discussion.
+**Workflow evolution** — add step, create new workflow, or automate a step. Built collaboratively with agents during discussion.
 
 **The flywheel:** rough workflow → friction → Lead discusses → improvement → user approves → smoother next thread.
 
@@ -290,23 +307,60 @@ System prompt: `lead.md` + `global.md` + `workflows.md`. Turn budget configurabl
 
 ## 8. Message Flow — Event-Driven Threads
 
-No state machine. Slack threads provide natural conversation boundaries.
+No state machine. Slack threads provide natural conversation boundaries. Each agent process handles its own events independently.
 
-### Thread Dispatch
+### Per-Process Event Loop
 
-Thread registry: `map[string]*ThreadWorker`. Main goroutine routes all Slack events to existing workers or spawns new ones. Workers are ephemeral (die after 60s inactivity, ~2KB stack). Session ID persists in SQLite for resume. Panic recovery per goroutine.
+Every agent process runs the same event loop:
+
+```
+1. Connect to Slack via Socket Mode
+2. Receive event from Slack
+3. Filter: is this message directed at me? (@mention or user message for PM)
+4. Extract thread_ts
+5. Route to existing thread goroutine, or spawn new one
+6. Thread goroutine: persist to SQLite (acked=0) → run agent loop → post response → ack
+```
+
+Each process has its own thread registry (`map[string]*ThreadWorker`). The PM process has goroutines for every active thread. The Coder process has goroutines only for threads where it's been @mentioned. And so on.
+
+**Thread goroutines are ephemeral** — die after 60s of inactivity (~2KB stack). Session ID persists in SQLite for resume. Panic recovery per goroutine.
+
+### How a Task Flows Between Processes
+
+```
+User posts in Slack thread
+  → PM process receives event (user message)
+  → PM goroutine: plans, explores, proposes
+  → PM posts: "@codebutler.coder implement: [plan]"
+  → Coder process receives event (@mention)
+  → Coder goroutine: implements in worktree, uses tools locally
+  → Coder posts: "@codebutler.pm what auth method?" (question)
+  → PM process receives event (@mention), PM goroutine responds
+  → Coder posts: "@codebutler.reviewer PR ready: [branch]"
+  → Reviewer process receives event (@mention)
+  → Reviewer goroutine: reads diff, posts feedback
+  → (loop until approved)
+  → Reviewer posts: "@codebutler.lead review done"
+  → Lead process receives event (@mention)
+  → Lead goroutine: reads full thread, runs retrospective
+```
+
+Every step is a Slack message. Every process listens independently. No process orchestrates another — **agents drive the flow themselves via @mentions.**
 
 ### Thread Phases
 
-- **`pm`** — PM planning. If feature has UI → sends to Artist. Interviewing for discovery, answering questions
-- **`coder`** — Coder working in worktree. PM available for questions
-- **`review`** — Reviewer ↔ Coder feedback loop until approved
-- **`lead`** — Retrospective, learnings proposals. For discovery: roadmap
+- **`pm`** — PM planning. If feature has UI → @mentions Artist. Interviewing, answering questions
+- **`coder`** — Coder working in worktree. PM goroutine stays alive for questions
+- **`review`** — Reviewer ↔ Coder feedback loop via @mentions
+- **`lead`** — Lead retrospective. Discusses with agents via @mentions
 - **`closed`** — PR merged, worktree cleaned
 
 ### Durability
 
-Messages persisted to SQLite before processing. On restart, unacked messages reprocessed. Graceful shutdown: close channels → wait for workers → cancel API calls → flush → close DB → disconnect Slack.
+All processes share one SQLite DB (WAL mode for concurrent access). Messages persisted before processing (acked=0). On process restart, unacked messages reprocessed. Session IDs in DB allow any agent to resume its context.
+
+Graceful shutdown per process: close Slack connection → wait for active goroutines → cancel in-flight API calls → close DB handle.
 
 ---
 
@@ -485,22 +539,41 @@ Same `AgentRunner` struct parameterized by config. Shared OpenRouter client. Sta
 ### Logging
 Structured tags: INF, WRN, ERR, DBG, MSG, PM, RSH, CLD, LED, IMG, RSP, MEM, AGT. Ring buffer + SSE for web dashboard.
 
-### Service Install
-macOS: LaunchAgent. Linux: systemd user service. CLI: `--install`, `--uninstall`, `--status`, `--logs`.
+### Service Install — Six Processes
+
+Each agent runs as its own service. All in the same repo directory:
+
+```bash
+# Development: run all agents
+codebutler start              # starts all 6 processes (pm, coder, reviewer, researcher, lead, artist)
+codebutler stop               # stops all
+codebutler status             # shows which agents are running, active threads per agent
+
+# Or individually
+codebutler --role pm          # run just the PM
+codebutler --role coder       # run just the Coder
+```
+
+**Production:** `codebutler install` creates one service per agent. macOS: 6 LaunchAgent plists. Linux: 6 systemd user units. Each has its own log file, restart policy, and WorkingDirectory.
+
+**Minimal mode:** you can run only PM + Coder to start. Reviewer, Artist, Lead, Researcher are optional — if an agent @mentions one that's not running, the message sits in the thread. When the agent starts, it picks up unprocessed @mentions.
 
 ### PR Description
 Lead generates summary at close via `gh pr edit`. Thread journal (`.codebutler/journals/thread-<ts>.md`) captures tool-level detail not visible in Slack.
 
 ### Error Recovery
 
+Each process is independent — one crash doesn't affect others.
+
 | Failure | Recovery |
 |---------|----------|
-| Slack disconnect | Auto-reconnect (SDK) |
-| LLM call hangs | context.WithTimeout → kill |
-| LLM call fails | Error reply, session preserved |
-| PM unreachable | Fallback model → route to Coder |
-| SQLite locked | Busy timeout + backoff |
-| Machine reboot | Service restarts, unacked messages reprocessed |
+| Agent process crashes | Service restarts it. Unacked messages in SQLite reprocessed. Session ID preserved for resume |
+| Slack disconnect | Auto-reconnect per process (SDK handles) |
+| LLM call hangs | context.WithTimeout per goroutine → kill, reply error in thread |
+| LLM call fails | Error reply in thread, session preserved for retry |
+| SQLite contention | WAL mode + busy timeout + backoff (6 processes sharing one DB) |
+| Agent not running | @mention sits in thread. When agent starts, it processes pending messages |
+| Machine reboot | All 6 services restart, each reprocesses its unacked messages |
 
 ### Access Control
 Channel membership = access. Optional: allowed users, max concurrent threads, hourly/daily limits.
@@ -536,8 +609,12 @@ Integration: mock OpenRouter. E2E: real Slack (manual).
 
 ## 18. Decisions
 
-- [x] Multi-agent architecture — one binary, one instance per agent, parameterized by role
-- [x] PM always on, others on-demand
+- [x] **Separate OS processes** — one per agent, each with its own Slack listener, goroutines per thread
+- [x] **Communication 100% via Slack** — no IPC, no RPC. Tasks are @mentions in the thread
+- [x] **Shared SQLite (WAL mode)** — all processes read/write same DB for session/message state
+- [x] **Each agent executes tools locally** — no RPC to a central executor
+- [x] **All agents always running** — idle until @mentioned, pick up pending messages on restart
+- [x] Multi-agent architecture — one binary, parameterized by `--role`
 - [x] One MD per agent = system prompt + project map + learnings (seeded on first run, evolved by Lead)
 - [x] `global.md` — shared project knowledge for all agents
 - [x] `workflows.md` — process playbook, evolved by Lead
