@@ -253,89 +253,126 @@ Each agent's system prompt defines which tools to use and how. The PM uses Read,
 
 All tools execute in the worktree directory. Path validation ensures no escape. Write/Edit only within worktree. Bash has configurable timeout. Grep/Glob respect .gitignore.
 
-### Inter-Agent Communication
+### Inter-Agent Communication — Everything in the Thread
 
-Agents talk to each other via `SendMessage`. The daemon only routes — it does NOT orchestrate phase transitions. **Agents drive the flow themselves.** The Coder tells the Reviewer when it's done. The Reviewer tells the Lead when the review is approved. The PM hands off to the Lead in discovery. Each agent decides when to pass work forward.
+**All inter-agent messages are Slack messages in the same thread.** There is no hidden channel, no behind-the-scenes bus. When `@codebutler.coder` asks `@codebutler.pm` a question, that message appears in the thread. The user sees it in real-time. The thread IS the source of truth.
+
+This means:
+- The user can follow every conversation as it happens
+- The user can intervene at any point ("actually, use JWT not OAuth")
+- The thread is the complete record — no separate journal needed for inter-agent comms
+- Scroll up = full audit trail
+
+**Agent identity — each agent has an @mention:**
+
+| Agent | Identity | Display |
+|-------|----------|---------|
+| PM | `@codebutler.pm` | **PM** |
+| Coder | `@codebutler.coder` | **Coder** |
+| Reviewer | `@codebutler.reviewer` | **Reviewer** |
+| Lead | `@codebutler.lead` | **Lead** |
+| Researcher | `@codebutler.researcher` | **Researcher** |
+| Artist | `@codebutler.artist` | **Artist** |
+
+One Slack bot app, but each agent posts with its own display name and icon. When an agent addresses another, it @mentions them. The daemon parses the mention and routes to the target agent.
 
 **SendMessage(to, message, waitForReply):**
-- `to` — target agent: `"pm"`, `"coder"`, `"reviewer"`, `"lead"`, `"researcher"`, `"artist"`
-- `message` — free-form text (question, task, feedback, discussion point)
-- `waitForReply` — if true, calling agent pauses until reply arrives; if false, fire-and-forget
+- `to` — target agent identity (e.g., `"coder"`)
+- `message` — posted to the thread as a Slack message from the sending agent, @mentioning the target
+- `waitForReply` — if true, sending agent pauses until the target replies in the thread
 
-The daemon handles routing: if the target agent is already running, deliver to its context. If not, spawn a new instance with the appropriate config.
+The daemon only routes — it does NOT orchestrate phase transitions. **Agents drive the flow themselves.** Each agent decides when to pass work forward.
 
 ### Natural Conversation Flows
 
-**PM ↔ Coder** — the most frequent conversation. PM sends the task. Coder works but messages the PM when it needs more context or disagrees with the plan:
+**PM ↔ Coder** — the most frequent conversation. Visible in the thread:
 
 ```
-PM → Coder: "implement this plan: [plan]"
-Coder (working...) → PM: "the plan says to use REST but this project uses GraphQL everywhere. should I adapt?"
-PM → Coder: "good catch, use GraphQL. here's the existing schema: [explores codebase, sends context]"
-Coder (continues...)
+@codebutler.pm: @codebutler.coder implement this plan: [plan]
+@codebutler.coder: @codebutler.pm the plan says to use REST but this
+  project uses GraphQL everywhere. should I adapt?
+@codebutler.pm: @codebutler.coder good catch, use GraphQL. here's the
+  existing schema: [context]
+@codebutler.coder: (continues working...)
 ```
 
-If they can't agree (Coder thinks the approach is wrong, PM insists), either one escalates to the Lead:
+If they can't agree, either one @mentions the Lead:
 
 ```
-Coder → Lead: "PM wants me to add a new database table but I think we should extend the existing one. here's why: [reasoning]"
-Lead (reads context) → PM: "the Coder has a point — extending the existing table avoids a migration. thoughts?"
-PM → Lead: "agreed, let's go with that"
-Lead → Coder: "extend the existing table, PM agrees"
+@codebutler.coder: @codebutler.lead PM wants me to add a new table but I
+  think we should extend the existing one. here's why: [reasoning]
+@codebutler.lead: @codebutler.pm the Coder has a point — extending the
+  existing table avoids a migration. thoughts?
+@codebutler.pm: @codebutler.lead agreed, let's go with that
+@codebutler.lead: @codebutler.coder extend the existing table, PM agrees
 ```
 
-**Coder → Reviewer** — Coder initiates the review when it's done. Not the daemon, not a phase trigger — the Coder itself decides it's ready:
+**Coder → Reviewer** — Coder initiates the review when it's done:
 
 ```
-Coder → Reviewer: "PR ready for review. branch: codebutler/add-notifications. key changes: [summary]"
-Reviewer (reads diff, runs tests...)
-Reviewer → Coder: "3 issues: [security] unsanitized input line 47, [test] missing edge case for empty list, [quality] duplicated error handler"
-Coder (fixes...) → Reviewer: "fixed all 3, pushed"
-Reviewer (re-reviews...) → Coder: "approved"
+@codebutler.coder: @codebutler.reviewer PR ready for review.
+  branch: codebutler/add-notifications. key changes: [summary]
+@codebutler.reviewer: @codebutler.coder 3 issues found:
+  1. [security] executor.go:47 — unsanitized input
+  2. [test] handler_test.go — missing empty thread_ts test
+  3. [quality] daemon.go:120 — duplicated error handler
+@codebutler.coder: @codebutler.reviewer fixed all 3, pushed
+@codebutler.reviewer: @codebutler.coder approved ✓
 ```
 
-**Coder ↔ Reviewer** — if they disagree on whether something is actually an issue, either one escalates to the Lead:
+**Coder ↔ Reviewer disagreement** — escalate to Lead:
 
 ```
-Reviewer → Coder: "this function is too complex, refactor into smaller pieces"
-Coder → Reviewer: "it's a state machine, splitting it would make it harder to follow"
-Reviewer → Lead: "Coder and I disagree on function complexity in daemon.go:150. I say split, Coder says it's a state machine that's clearer as one block"
-Lead (reads the code) → Reviewer: "the Coder is right — state machines are clearer as one block. but add a comment explaining the states"
-Lead → Coder: "keep it, but add a comment explaining the state transitions"
+@codebutler.reviewer: @codebutler.coder this function is too complex, split it
+@codebutler.coder: @codebutler.reviewer it's a state machine, splitting makes
+  it harder to follow
+@codebutler.reviewer: @codebutler.lead disagreement on daemon.go:150 complexity.
+  I say split, Coder says it's clearer as one block
+@codebutler.lead: @codebutler.reviewer Coder is right — state machines read
+  better as one block. @codebutler.coder keep it, but add a comment
+  explaining the state transitions
 ```
 
-**PM → Researcher** — PM delegates web research. Fire-and-forget or wait:
+**Lead retrospective** — also in the thread, user watches live:
 
 ```
-PM → Researcher: "find the rate limits for the Stripe API v2024-12"
-Researcher (searches, synthesizes...) → PM: "Stripe API: 100 req/s in test, 10k req/s in production. docs: [link]"
+@codebutler.lead: @codebutler.pm Coder asked you 3 times about auth. should
+  we add an auth-check step to the implement workflow?
+@codebutler.pm: @codebutler.lead I didn't know this project uses JWT. add it
+  to my memory too
+@codebutler.lead: @codebutler.reviewer you missed the unhandled error on
+  line 47. add error-return check to your patterns?
+@codebutler.reviewer: @codebutler.lead yes, add to reviewer.md
+@codebutler.lead: here's what we learned: [proposals for user]
 ```
 
-**Lead ↔ all agents** — at retrospective, Lead talks to each agent about improvements:
-
-```
-Lead → PM: "Coder asked you 3 times about auth. add auth-check step to implement workflow?"
-PM → Lead: "I didn't know this project uses JWT. add it to my memory too"
-Lead → Coder: "you spent 5 turns on type errors. should strict mode go in coder.md?"
-Coder → Lead: "yes, suggest enabling it"
-Lead → Reviewer: "you missed the unhandled error on line 47. add error-return check to your patterns?"
-Reviewer → Lead: "yes, add to reviewer.md: always check error returns in Go"
-Lead → User: "here's what we learned: [proposals]"
-```
+The user sees all of this as it happens. They can jump in at any point, correct an agent, add context, or override a decision.
 
 ### Escalation Rule
 
-**When two agents disagree → they ask the Lead.** The Lead reads the context, evaluates based on the common good (code quality, team efficiency, workflow improvement), and decides. If the Lead can't decide → it asks the user.
+**When two agents disagree → they @mention the Lead.** The Lead reads the thread context, evaluates based on the common good (code quality, team efficiency, workflow improvement), and decides. If the Lead can't decide → it asks the user.
 
-The escalation chain: `agent ↔ agent → Lead → user`. Never skip to the user directly (except the PM, who always talks to the user).
+The escalation chain: `@agent ↔ @agent → @lead → user`.
 
-### Visibility & Cost
+**But the user outranks everyone.** Since all conversation happens in the thread, the user can jump in at any point — correct an agent, override a decision, add context, settle a disagreement directly. When the user speaks, all agents listen. The user overrides the Lead, the Lead overrides individual agents. This is the hierarchy:
 
-All inter-agent messages are logged in the thread journal. The user sees a summary of behind-the-scenes communication in the usage report. Full transparency.
+```
+User (final authority)
+  └── Lead (mediator, arbiter between agents)
+        ├── PM (orchestrator, talks to user)
+        ├── Coder (builder)
+        ├── Reviewer (quality gate)
+        ├── Researcher (web knowledge)
+        └── Artist (images)
+```
 
-Inter-agent exchanges are capped per thread (configurable). The Lead's retrospective discussion has a turn budget. Agents are instructed to be concise.
+If the user says "use REST, not GraphQL" mid-conversation between PM and Coder, both agents adapt immediately. No escalation needed — the user IS the escalation.
 
-Every inter-agent message is a learning signal. The Lead sees all of them at retrospective time — "the Coder asked the PM 3 questions about auth, let's add that to the workflow."
+### Cost Control
+
+Inter-agent exchanges are capped per thread (configurable). The Lead's retrospective discussion has a turn budget. Agents are instructed to be concise — every message costs tokens and occupies the thread.
+
+Every inter-agent message is a learning signal. The Lead sees all of them in the thread at retrospective time.
 
 ### Coder System Prompt (`coder.md`)
 
@@ -458,7 +495,7 @@ The Lead mediates — its goal is the common good and continuous workflow improv
 - **Thread summary** → PR description via `gh pr edit`
 - **Memory updates** → proposes updates to workflows.md, pm.md, reviewer.md, lead.md, artist.md, and suggests coder.md additions. All informed by the discussion with agents.
 - **Workflow evolution** → the Lead's most valuable output (see below)
-- **Thread usage report** → token/cost breakdown, tool call stats, behind-the-scenes (all inter-agent exchanges), tips for better prompting
+- **Thread usage report** → token/cost breakdown, tool call stats, summary of key exchanges (all already visible in thread), tips for better prompting
 - **Journal finalization** → close entry + cost table, committed to PR branch
 
 ### Workflow Evolution
@@ -528,7 +565,7 @@ Messages are persisted to SQLite before processing (acked=0). On restart, unacke
 ## 14. Features that Change
 
 ### Agent Identity
-Slack identifies bots natively. Outgoing messages get agent prefix (`*PM:*`, `*Researcher:*`, `*Coder:*`, `*Reviewer:*`, `*Artist:*`, `*Lead:*`) so users know which agent is talking.
+One Slack bot app, six agent identities: `@codebutler.pm`, `@codebutler.coder`, `@codebutler.reviewer`, `@codebutler.researcher`, `@codebutler.lead`, `@codebutler.artist`. Each agent posts with its own display name and icon. Inter-agent messages use @mentions — everything visible in the thread.
 
 ### Reactions as Feedback
 - 👀 when processing starts
@@ -714,7 +751,7 @@ Non-negotiable. States: `created → working → pr_opened → reviewing → app
 
 ### Thread Usage Report (Lead)
 
-Posted by the Lead at close. Shows: token/cost breakdown per agent, tool call stats, "behind the scenes" (every inter-agent exchange — PM↔Coder questions, Lead↔agent retrospective discussions), improvement proposals, and tips for better prompting. User can correct wrong PM answers → Lead updates memory immediately.
+Posted by the Lead at close. Shows: token/cost breakdown per agent, tool call stats, summary of key inter-agent exchanges (already visible in the thread, but condensed here), improvement proposals, and tips for better prompting. User can correct wrong PM answers → Lead updates memory immediately.
 
 ---
 
@@ -841,7 +878,7 @@ Format: Summary, Changes (bullet list), Decisions, Participants, Slack Thread li
 
 ### Thread Journal
 
-Detailed narrative MD committed to PR branch (`.codebutler/journals/thread-<ts>.md`). Built incrementally as thread progresses. Shows everything: PM reading files, internal PM↔Coder exchanges, model switches, cost breakdown. Lands on main with merge.
+Detailed narrative MD committed to PR branch (`.codebutler/journals/thread-<ts>.md`). Built incrementally as thread progresses. Records what tools agents used, files read/written, model switches, cost breakdown. Inter-agent conversation is already in the Slack thread (the source of truth) — the journal captures the tool-level detail that doesn't appear in Slack. Lands on main with merge.
 
 ---
 
@@ -920,9 +957,12 @@ Phase 6: Conflict detection + merge coordination
 - [x] **PM always on, others on-demand** — Coder/Reviewer/Researcher/Artist/Lead activate only when called
 - [x] **Reviewer agent** — code review loop after Coder, before Lead. Catches security/quality/test issues
 - [x] **Discovery workflow** — PM interviews user → Lead builds roadmap → each item becomes future implement thread
-- [x] **Agent-driven flow** — agents pass work to each other (Coder→Reviewer→Lead), daemon only routes
-- [x] **Escalation rule** — when two agents disagree, they ask the Lead. Lead→user only if needed
-- [x] **Inter-agent communication** — agents message each other via SendMessage (sync or async)
+- [x] **Thread is source of truth** — all inter-agent messages are Slack messages in the thread, visible in real-time
+- [x] **Agent identities** — `@codebutler.pm`, `@codebutler.coder`, `@codebutler.reviewer`, etc. One bot, six identities
+- [x] **Agent-driven flow** — agents pass work to each other via @mentions, daemon only routes
+- [x] **User outranks everyone** — can jump into any agent conversation, override any decision
+- [x] **Escalation hierarchy** — user > Lead > individual agents
+- [x] **Inter-agent communication** — agents @mention each other in the thread via SendMessage
 - [x] **Lead as mediator** — arbitrates agent disagreements, focused on common good + workflow improvement
 - [x] **Researcher agent** for web research on PM demand (WebSearch/WebFetch)
 - [x] **workflows.md** — standalone process playbook, separate from agent memory, evolved by Lead
