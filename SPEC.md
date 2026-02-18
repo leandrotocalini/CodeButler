@@ -249,6 +249,8 @@ One Slack bot app, six display identities: `@codebutler.pm`, `@codebutler.coder`
 
 LLM tool for posting to the current Slack thread. To direct a message to another agent, the LLM includes `@codebutler.<role>` in the message body — same as a human would. No `to` parameter; routing is handled by each process's message filter when it receives the Slack event.
 
+**Sender identification:** the system automatically prefixes `@codebutler.<self>:` to the posted message. The LLM only writes the body — it doesn't need to identify itself. This guarantees consistent formatting and the receiving agent always knows who sent the message.
+
 ```json
 {
   "name": "SendMessage",
@@ -258,6 +260,8 @@ LLM tool for posting to the current Slack thread. To direct a message to another
   }
 }
 ```
+
+Example: PM calls `SendMessage(message: "@codebutler.coder implement: [plan]")` → posted to Slack as `@codebutler.pm: @codebutler.coder implement: [plan]`.
 
 The daemon only routes — **agents drive the flow themselves**.
 
