@@ -245,9 +245,25 @@ OpenRouter is stateless — full message history sent on every call from the con
 
 One Slack bot app, six display identities: `@codebutler.pm`, `@codebutler.coder`, `@codebutler.reviewer`, `@codebutler.lead`, `@codebutler.researcher`, `@codebutler.artist`. Each posts with its own display name and icon.
 
-### SendMessage(to, message, waitForReply)
+### SendMessage(message, waitForReply)
 
-Posted to the thread as a Slack message with @mention. The daemon only routes — **agents drive the flow themselves**.
+LLM tool for posting to the current Slack thread. To direct a message to another agent, the LLM includes `@codebutler.<role>` in the message body — same as a human would. No `to` parameter; routing is handled by each process's message filter when it receives the Slack event.
+
+**Sender identification:** the system automatically prefixes `@codebutler.<self>:` to the posted message. The LLM only writes the body — it doesn't need to identify itself. This guarantees consistent formatting and the receiving agent always knows who sent the message.
+
+```json
+{
+  "name": "SendMessage",
+  "parameters": {
+    "message": "string — the text to post (include @codebutler.<role> to target an agent)",
+    "waitForReply": "boolean — block the agent loop until a reply arrives in the thread"
+  }
+}
+```
+
+Example: PM calls `SendMessage(message: "@codebutler.coder implement: [plan]")` → posted to Slack as `@codebutler.pm: @codebutler.coder implement: [plan]`.
+
+The daemon only routes — **agents drive the flow themselves**.
 
 ### Conversation Examples
 
