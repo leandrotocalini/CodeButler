@@ -319,7 +319,7 @@ Every agent process runs the same event loop:
 3. Filter: is this message directed at me? (@mention or user message for PM)
 4. Extract thread_ts
 5. Route to existing thread goroutine, or spawn new one
-6. Thread goroutine: persist to SQLite (acked=0) → run agent loop → post response → ack
+6. Thread goroutine: read thread history from Slack → run agent loop → post response
 ```
 
 Each process has its own thread registry (`map[string]*ThreadWorker`). The PM process has goroutines for every active thread. The Coder process has goroutines only for threads where it's been @mentioned. And so on.
