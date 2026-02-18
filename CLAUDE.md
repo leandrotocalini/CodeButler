@@ -8,8 +8,8 @@ what you want in a Slack thread — the agents plan, build, review, and learn.
 
 ## Design Documents
 
-- `CodeButler2.md` — Full design doc (architecture, process model, tool system, etc.)
-- `SPEC.md` — Daemon spec (message routing, conversation persistence, system prompts)
+- `SPEC.md` — Product spec (what the system does, agents, flows, config, memory)
+- `ARCHITECTURE.md` — Implementation details (message routing, event loop, project structure, testing)
 - `seeds/` — Agent seed MDs (identity, personality, routing rules, tools, workflows)
 
 ## Agent Seeds
