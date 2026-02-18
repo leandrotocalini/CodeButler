@@ -68,7 +68,7 @@ This means CodeButler has **zero dependency on Claude Code CLI**. It IS its own 
 
 Each agent has its own MD file per repo that defines its system prompt, personality, and behavioral rules. Plus one shared MD for cross-agent knowledge and interaction patterns.
 
-Under `<repo>/.codebutler/`: `prompts/` has pm.md, researcher.md, coder.md, reviewer.md, lead.md, artist.md, shared.md (system prompts per agent + shared knowledge). `memory/` has workflows.md (process playbook), pm.md, reviewer.md, lead.md, and artist.md (evolving knowledge per agent). The Researcher and Coder don't have memory files — the Researcher is stateless (each search is self-contained), the Coder's knowledge goes into `coder.md`.
+Under `<repo>/.codebutler/`: `prompts/` has pm.md, researcher.md, coder.md, reviewer.md, lead.md, artist.md, shared.md (system prompts per agent + shared knowledge). `memory/` has global.md (shared project knowledge for all agents), workflows.md (process playbook), per-agent MDs (pm.md, reviewer.md, lead.md, artist.md — each with a project map from that agent's perspective), and `artist/assets/` (visual references). The Researcher and Coder don't have memory files — the Researcher is stateless (each search is self-contained), the Coder's knowledge goes into `coder.md`.
 
 **Why per-agent MDs instead of CLAUDE.md:**
 - Each agent has a different personality, different tools, different restrictions
@@ -195,9 +195,29 @@ All LLM calls (PM, Researcher, Coder, Reviewer, Lead, Artist) route through Open
 
 Global: `~/.codebutler/config.json`.
 
-Per-repo: `<repo>/.codebutler/` contains config.json, store.db (SQLite), `prompts/` (pm.md, researcher.md, coder.md, reviewer.md, lead.md, artist.md, shared.md), `memory/` (workflows.md, pm.md, reviewer.md, lead.md, artist.md), `branches/` (git worktrees, 1 per active thread), `images/` (generated), `journals/` (thread narratives).
+Per-repo: `<repo>/.codebutler/` contains:
 
-**Committed to git:** `config.json`, `prompts/`, `memory/`. **Gitignored:** `store.db`, `branches/`, `images/`, `journals/`.
+```
+.codebutler/
+  config.json
+  store.db                       # SQLite (messages + sessions)
+  prompts/                       # System prompts per agent
+    pm.md, researcher.md, coder.md, reviewer.md, lead.md, artist.md, shared.md
+  memory/                        # Evolving knowledge per agent
+    global.md                    # Shared project knowledge (all agents read)
+    workflows.md                 # Process playbook
+    pm.md                        # PM's project map + planning knowledge
+    reviewer.md                  # Reviewer's project map + review patterns
+    lead.md                      # Lead's project map + retrospective patterns
+    artist.md                    # Artist's project map (UI components, design system, screens)
+    artist/
+      assets/                    # Screenshots, mockups, visual references
+  branches/                      # Git worktrees (1 per active thread)
+  images/                        # Generated images
+  journals/                      # Thread narratives
+```
+
+**Committed to git:** `config.json`, `prompts/`, `memory/` (including `artist/assets/`). **Gitignored:** `store.db`, `branches/`, `images/`, `journals/`.
 
 SQLite tables: `sessions` (PK: thread_ts, with channel_id, session_id, updated_at) and `messages` (PK: id, with thread_ts, channel_id, from_user, content, timestamp, acked flag).
 
@@ -396,7 +416,7 @@ Every inter-agent message is a learning signal. The Lead sees all of them in the
 
 ### Coder System Prompt (`coder.md`)
 
-The per-repo `coder.md` replaces CLAUDE.md. Contains: personality and behavior rules, tool documentation (auto-generated from tool definitions), sandbox restrictions, project-specific conventions, build/test commands. The daemon assembles the final prompt: `coder.md` + `shared.md` + task plan + relevant context.
+The per-repo `coder.md` replaces CLAUDE.md. Contains: personality and behavior rules, tool documentation (auto-generated from tool definitions), sandbox restrictions, project-specific conventions, build/test commands. The daemon assembles the final prompt: `coder.md` + `shared.md` + `memory/global.md` + task plan + relevant context.
 
 ---
 
@@ -408,7 +428,7 @@ The PM is the primary agent — it's the first to activate on every thread and s
 
 **Always available:** while the Coder works, the PM is not "dead" — it can receive messages from the Coder (questions, blockers) and respond. The daemon keeps the PM's context alive for the duration of the thread. Output-capped at 15 tool-calling iterations per activation.
 
-The PM system prompt comes from per-repo `pm.md` + `shared.md` + `memory/pm.md` + `memory/workflows.md`. The workflows guide the PM's behavior for each task type.
+The PM system prompt comes from per-repo `pm.md` + `shared.md` + `memory/global.md` + `memory/pm.md` + `memory/workflows.md`. The workflows guide the PM's behavior for each task type.
 
 ---
 
@@ -427,7 +447,7 @@ The Researcher is a **subagent** — spawned by the PM on demand, runs a short f
 
 **What the Researcher uses:** WebSearch, WebFetch. No codebase tools — the Researcher doesn't read project files. Its job is purely external knowledge.
 
-**Lifecycle:** Spawned → runs loop → returns result → dies. Stateless (no memory file, no session persistence). Each search is self-contained. Its system prompt comes from `researcher.md` + `shared.md`.
+**Lifecycle:** Spawned → runs loop → returns result → dies. Stateless (no memory file, no session persistence). Each search is self-contained. Its system prompt comes from `researcher.md` + `shared.md` + `memory/global.md`.
 
 ---
 
@@ -475,7 +495,7 @@ The Coder receives this, fixes, and signals completion. Max review rounds config
 
 ### Reviewer Configuration
 
-Uses Claude Sonnet (same tier as Lead — smart enough to spot issues, cheaper than Opus). Its system prompt comes from `reviewer.md` + `shared.md` + `memory/reviewer.md`. Over time, the Reviewer learns project-specific patterns: "this project always forgets to handle context cancellation" or "SQL queries here always need parameterized inputs."
+Uses Claude Sonnet (same tier as Lead — smart enough to spot issues, cheaper than Opus). Its system prompt comes from `reviewer.md` + `shared.md` + `memory/global.md` + `memory/reviewer.md`. Over time, the Reviewer learns project-specific patterns: "this project always forgets to handle context cancellation" or "SQL queries here always need parameterized inputs."
 
 ### Reviewer Memory (`memory/reviewer.md`)
 
@@ -534,7 +554,7 @@ The Lead presents these to the user. The user approves, edits, or rejects. Appro
 
 ### Lead Configuration
 
-The Lead uses Claude Sonnet (smart enough to analyze cross-role patterns and mediate discussions, cheaper than Opus). Its system prompt comes from `lead.md` + `shared.md` + `workflows.md` + its own memory (`memory/lead.md`). The retrospective discussion has a configurable turn budget to control cost.
+The Lead uses Claude Sonnet (smart enough to analyze cross-role patterns and mediate discussions, cheaper than Opus). Its system prompt comes from `lead.md` + `shared.md` + `memory/global.md` + `workflows.md` + its own memory (`memory/lead.md`). The retrospective discussion has a configurable turn budget to control cost.
 
 ---
 
@@ -603,15 +623,25 @@ Short code (<20 lines) inline as Slack code blocks. Long code (≥20 lines) uplo
 
 ### Files
 
-Five memory files, all in `memory/`:
+All memory lives in `<repo>/.codebutler/memory/`:
 
 | File | What it holds | Who reads it | Who updates it |
 |------|--------------|-------------|---------------|
+| `global.md` | Shared project knowledge: architecture overview, tech stack, conventions, decisions that affect all agents | All agents | Lead (via user approval) |
 | `workflows.md` | Process playbook: step-by-step workflows for each task type | PM (selects workflow), Lead (proposes changes) | Lead (via user approval) |
-| `pm.md` | Project knowledge, planning notes, inter-agent coordination tips | PM | Lead (via user approval) |
-| `reviewer.md` | Code review patterns, recurring issues, project-specific quality rules | Reviewer | Lead (via user approval) |
-| `lead.md` | Retrospective patterns, what makes threads efficient, mediation patterns | Lead | Lead (via user approval) |
-| `artist.md` | UI/UX patterns, component conventions, layout preferences, interaction patterns, style guide, colors, icon conventions, dimension defaults | Artist | Lead (via user approval) |
+| `pm.md` | **Project map:** feature areas, domain models, stakeholder context. **Behavioral learnings:** how to interview effectively, what context the Coder needs, when to spawn Researcher, coordination tips | PM | Lead + user |
+| `reviewer.md` | **Project map:** quality hotspots, test coverage gaps, security-sensitive areas. **Behavioral learnings:** project-specific review rules, recurring issues to watch for, how strict to be, interaction patterns with Coder | Reviewer | Lead + user |
+| `lead.md` | **Project map:** team efficiency patterns, what makes threads successful. **Behavioral learnings:** mediation strategies that work, retrospective formats that produce results, how to interact with each agent | Lead | Lead + user |
+| `artist.md` | **Project map:** existing UI components, design system, screens inventory, layout patterns, color palette, typography, interaction conventions. **Behavioral learnings:** what level of detail the Coder needs, when to propose alternatives vs follow existing patterns, how to present designs | Artist | Lead + user |
+| `artist/assets/` | Visual references: screenshots of current UI, mockups, design exports. Artist reads these to stay coherent with the existing product | Artist | Artist (during design), Lead (proposes additions) |
+
+**Each agent's MD has two parts:**
+
+1. **Project map** — the project described from that agent's perspective. The PM maps features and domains. The Reviewer maps quality hotspots and test gaps. The Artist maps every screen, component, and visual pattern already in the project. This is how agents stay coherent — the Artist never proposes a UX wildly different from what exists because its memory contains the current state of the UI.
+
+2. **Behavioral learnings** — how the agent should behave, interact with other agents, and improve. Things like: "when the Coder asks about auth, always provide the full JWT flow" (PM), "this project always forgets context cancellation" (Reviewer), "the Coder prefers component specs with explicit props" (Artist). These learnings come from the Lead's retrospective or direct user feedback.
+
+**`global.md`** holds what every agent needs to know: architecture decisions, tech stack, naming conventions, coding standards, deployment patterns. When the PM explores the codebase or the Coder implements, they both read `global.md` for shared context. The Lead updates it when project-wide decisions are made.
 
 The Coder and Researcher don't have memory files — the Coder's knowledge goes into `coder.md` (the system prompt) which users maintain, the Researcher is stateless. The Lead suggests `coder.md` additions during retrospective.
 
@@ -737,12 +767,16 @@ Memory files (including `workflows.md`) follow PR flow: after PR creation, the L
 
 After PR creation, the Lead analyzes the full thread transcript (user messages, PM planning, inter-agent messages, Coder tool calls, Artist outputs, git diff). It discusses improvements with each agent, then proposes updates routed to the right file:
 
+- Architecture decisions, tech stack changes, shared conventions → `global.md`
 - Workflow refinements (new steps, new workflows, automations) → `workflows.md`
-- Project knowledge, inter-agent coordination → `pm.md`
-- Code review patterns, recurring issues → `reviewer.md`
-- Retrospective patterns, mediation patterns → `lead.md`
-- UI/UX patterns, component conventions, visual style, colors → `artist.md`
+- Feature areas, domain knowledge, inter-agent coordination → `pm.md` (project map + knowledge)
+- Quality hotspots, review patterns, recurring issues → `reviewer.md` (project map + patterns)
+- Retrospective patterns, mediation patterns → `lead.md` (project map + patterns)
+- UI components, screens, design patterns, visual style → `artist.md` (project map + conventions)
+- New screenshots or mockups of implemented UI → `artist/assets/`
 - Coding conventions → suggested as tip for user to add to `coder.md`
+
+**Project map updates:** when a thread adds a new screen, changes an API, or introduces a pattern, the Lead updates the relevant agent's project map section. The Artist's project map stays current with every new UI component. The PM's project map grows with every new feature area. Over time, agents know the project intimately.
 
 User controls what gets remembered: "yes" saves all, "remove 3" skips item 3, "add: ..." adds custom learning, "no" discards all.
 
@@ -754,7 +788,7 @@ The pattern: **Coder question today → Lead discusses with PM → workflow impr
 
 ### Inter-Role Learning
 
-Each memory file has a "Working with Other Roles" section. The PM learns what context the Coder needs (e.g., "always mention test framework in plans"). The Artist learns what formats the Coder expects. Over time, roles form a well-coordinated team.
+Each agent's behavioral learnings include how to interact with other agents. The PM learns what context the Coder needs (e.g., "always mention test framework in plans"). The Artist learns what level of detail the Coder expects for component specs. The Reviewer learns when to push back vs accept pragmatic shortcuts. These learnings come from the Lead's retrospective or direct user corrections. Cross-cutting knowledge that all agents need goes into `global.md` — the shared brain. Over time, agents form a well-coordinated team that knows the project intimately and knows how to work with each other.
 
 ---
 
@@ -998,7 +1032,10 @@ Phase 6: Conflict detection + merge coordination
 - [x] **Researcher agent** for web research on PM demand (WebSearch/WebFetch)
 - [x] **workflows.md** — standalone process playbook, separate from agent memory, evolved by Lead
 - [x] **Escalation-driven learning** — Coder questions today → workflow improvements tomorrow
-- [x] Per-agent memory files (workflows.md, pm.md, lead.md, artist.md) with git flow
+- [x] **global.md** — shared project knowledge for all agents (architecture, tech stack, conventions)
+- [x] **Project map per agent** — each agent's MD has a project map from its perspective + behavioral learnings
+- [x] **Artist visual memory** — `artist/assets/` folder with screenshots, mockups, design references
+- [x] Per-agent memory files (global.md, workflows.md, pm.md, lead.md, artist.md) with git flow
 - [x] Per-repo config committed to git (models per role, channel, limits)
 - [x] PM model pool with hot swap (`/pm claude`, `/pm kimi`)
 - [x] **Lead role** for thread retrospective (summary, memory, per-role improvements)
