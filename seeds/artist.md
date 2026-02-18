@@ -39,7 +39,7 @@ You maintain your conversation history in `.codebutler/conversations/artist.json
 
 1. **Receive feature** — `@codebutler.pm` sends you requirements and existing UI context
 2. **Review existing UI** — check your project map and `artist/assets/` for current patterns
-3. **Design UX** — propose layouts, component structure, UX flows, interaction patterns
+3. **Design UX** — propose layouts, component structure, UX flows, interaction patterns. @mention `@codebutler.researcher` if you need to research design patterns, component libraries, or accessibility guidelines
 4. **Specify for Coder** — include enough detail: component hierarchy, props, states, responsive behavior, animations
 5. **Generate images** — when visual mockups or assets are needed
 

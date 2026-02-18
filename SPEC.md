@@ -57,7 +57,9 @@ All agents share the same tool set. Separation is behavioral via system prompts:
 
 PM creates worktree (conversation persistence from the start) → classifies intent → selects workflow from `workflows.md` → interviews user → explores codebase → spawns Researcher for web research if needed → sends to Artist for UI/UX design if feature has visual component → proposes plan (with Artist design) → user approves → sends plan + Artist design to Coder → Coder implements + creates PR → Reviewer reviews diff (loop with Coder until approved) → Lead runs retrospective (discusses with agents, proposes learnings) → user approves learnings → merge PR → cleanup.
 
-For discovery: PM interviews → Artist designs UX for visual features → Lead builds roadmap → GitHub issues.
+For discovery: PM interviews → Artist designs UX for visual features → Lead builds roadmap in `.codebutler/roadmap.md`. Each roadmap item → future implement thread, or `develop` for all at once.
+
+For learn (onboarding): all agents explore codebase in parallel from their perspective → populate project maps + `global.md` → user approves.
 
 ### 1.4 Architecture: OpenRouter + Native Tools
 
@@ -117,9 +119,9 @@ Bot token scopes: `channels:history`, `channels:read`, `chat:write`, `files:read
 go install github.com/leandrotocalini/codebutler/cmd/codebutler@latest
 ```
 
-### First Run — Automatic Wizard
+### `codebutler init`
 
-Run `codebutler --role <any>` in a git repo. The binary detects missing config and triggers the wizard automatically. No separate `init` command.
+Run `codebutler init` in a git repo. If the repo isn't configured, this is the only way to set it up — running `codebutler --role <any>` in an unconfigured repo tells you to run `init` first.
 
 **Step 1: Global tokens** (only once per machine — `~/.codebutler/config.json` doesn't exist):
 
@@ -135,21 +137,36 @@ Run `codebutler --role <any>` in a git repo. The binary detects missing config a
 3. **`.gitignore`** — adds `.codebutler/branches/`, `.codebutler/images/` if not present
 4. Saves channel to per-repo `config.json`
 
-**Step 3: Service install** (once per repo):
+**Step 3: Service install** (once per machine):
 
-1. Detects OS (macOS / Linux)
-2. Installs 6 services — one per agent, `WorkingDirectory=<repo>`, restart on failure:
-   - macOS: 6 LaunchAgent plists (`~/Library/LaunchAgents/codebutler.<repo>.<role>.plist`)
-   - Linux: 6 systemd user units (`~/.config/systemd/user/codebutler.<repo>.<role>.service`)
-3. Starts all 6 services
+1. Asks which agents to install on this machine (default: all 6). Different agents can run on different machines
+2. Detects OS (macOS / Linux)
+3. Installs selected services — one per agent, `WorkingDirectory=<repo>`, restart on failure:
+   - macOS: LaunchAgent plists (`~/Library/LaunchAgents/codebutler.<repo>.<role>.plist`)
+   - Linux: systemd user units (`~/.config/systemd/user/codebutler.<repo>.<role>.service`)
+4. Starts selected services
 
-**Subsequent repos:** Step 1 is skipped (tokens exist). Only steps 2-3 run. Same Slack app, different channel, 6 new services.
+**Subsequent repos:** Step 1 is skipped (tokens exist). Only steps 2-3 run. Same Slack app, different channel, new services.
+
+**Subsequent machines:** Step 2 is skipped (`.codebutler/` already exists in git). Only steps 1 + 3 run. Same repo, different machine, different agents.
+
+### `codebutler configure`
+
+For post-init changes. Run `codebutler configure` in a configured repo.
+
+- **Change Slack channel** — switch to a different channel
+- **Add agent** — install a new agent service on this machine (e.g., add Coder to a more powerful machine)
+- **Remove agent** — stop and uninstall an agent service from this machine
+- **Update tokens** — change API keys
+- **Show config** — display current config (machine + repo)
 
 ### Service Management
 
 ```bash
-codebutler start              # start all 6 agents for current repo
-codebutler stop               # stop all 6
+codebutler init               # first-time setup (tokens + repo + services)
+codebutler configure           # change config post-init
+codebutler start              # start all agents installed on this machine
+codebutler stop               # stop all agents on this machine
 codebutler status             # show running agents, active threads per agent
 codebutler --role <role>      # run single agent in foreground (dev mode)
 ```
@@ -208,6 +225,10 @@ All LLM calls route through OpenRouter. Agents needing multiple models define th
   workflows.md                   # Process playbook
   artist/
     assets/                      # Screenshots, mockups, visual references
+  research/                      # Researcher findings (committed, merged with PRs)
+    stripe-api.md                # Example: Stripe best practices
+    vite-plugins.md              # Example: Vite plugin system docs
+  roadmap.md                     # Planned work items with status + dependencies
   branches/                      # Git worktrees, 1 per active thread (gitignored)
     <branchName>/                # One worktree per thread
       conversations/             # Agent↔model conversation files
@@ -217,7 +238,7 @@ All LLM calls route through OpenRouter. Agents needing multiple models define th
   images/                        # Generated images (gitignored)
 ```
 
-**Committed to git:** `config.json`, all `.md` files, `artist/assets/`. **Gitignored:** `branches/` (including conversation files), `images/`.
+**Committed to git:** `config.json`, all `.md` files, `artist/assets/`, `research/`, `roadmap.md`. **Gitignored:** `branches/` (including conversation files), `images/`.
 
 **Two layers of state:**
 1. **Slack thread** — inter-agent messages + user interaction. The public record. Source of truth for what was communicated.
@@ -346,9 +367,15 @@ The entry point for all user messages. Talks to user, explores codebase, selects
 
 The PM's goroutine for a thread stays alive while the Coder works — when the Coder @mentions PM with a question, the PM's Slack listener routes it to that thread's goroutine and responds.
 
-### Researcher — Subagent for Web Research
+### Researcher — On-Demand Web Research
 
-Listens for @mentions from PM. Runs WebSearch + WebFetch → synthesizes → posts result back in thread. Stateless, parallel-capable (multiple goroutines for concurrent research requests). Protects PM's context from noisy web results. System prompt: `researcher.md` + `global.md`.
+Listens for @mentions from **any agent** (not just PM). Any agent can `@codebutler.researcher` when it needs external context — docs, best practices, API references, vulnerability databases, design patterns. Runs WebSearch + WebFetch → synthesizes → posts summary back in thread. Parallel-capable (multiple goroutines for concurrent research requests).
+
+**Research persistence:** findings are saved to `.codebutler/research/` as individual MD files. When the Researcher persists a finding, it also adds a one-line entry to the `## Research Index` section in `global.md` using `@` references (e.g., `- Stripe API v2024 — @.codebutler/research/stripe-api-v2024.md`). Since all agents read `global.md` as part of their system prompt, they can see what research exists and read the full file when they need depth. Persisted research is committed to git and merges with PRs — knowledge accumulates across threads. The Researcher checks the index before searching again.
+
+**The Researcher never acts on its own initiative.** It only activates when another agent asks. Its knowledge grows on-demand, driven by real questions from agents who encounter something they don't know.
+
+System prompt: `researcher.md` + `global.md`.
 
 ### Artist — UI/UX Designer + Image Gen
 
@@ -426,7 +453,8 @@ Every step is a Slack message. Agents drive the flow themselves via @mentions.
 | `reviewer.md` | Personality + rules. Review checklist. **Project map:** quality hotspots. **Learnings:** recurring issues | Lead + user |
 | `lead.md` | Personality + rules. Retrospective structure. **Project map:** efficiency patterns. **Learnings:** mediation strategies | Lead + user |
 | `artist.md` | Personality + rules. Design guidelines. **Project map:** UI components, screens, design system. **Learnings:** what Coder needs | Lead + user |
-| `researcher.md` | Personality + rules. Search strategies. Stateless — no learnings | Rarely changes |
+| `researcher.md` | Personality + rules. Search strategies. **Research index:** what it has investigated, where findings are stored | Lead + self |
+| `research/` | Persisted research findings as individual MD files. Committed to git, merges with PRs. Researcher decides what to persist | Researcher |
 | `global.md` | Shared project knowledge: architecture, tech stack, conventions, deployment | Lead + user |
 | `workflows.md` | Process playbook: step-by-step workflows per task type | Lead + user |
 | `artist/assets/` | Screenshots, mockups, visual references | Artist + Lead |
@@ -500,6 +528,7 @@ After PR creation, Lead proposes updates routed to the right file:
 - Agent-specific learnings → the relevant agent's MD
 - New UI screenshots → `artist/assets/`
 - Coding conventions → `coder.md`
+- Roadmap status updates → `roadmap.md`
 
 **Project maps evolve:** when a thread adds a screen, changes an API, or introduces a pattern, the Lead updates the relevant agent's project map. User approves.
 
@@ -545,9 +574,44 @@ Non-negotiable. Only the user closes a thread. No timeouts.
 
 ---
 
-## 13. Worktree Isolation
+## 13. Worktree Isolation & Git Sync
 
-Each thread gets a git worktree in `.codebutler/branches/<branchName>/`. **Created early by the PM** — as soon as the PM starts working on a thread, it creates the worktree and begins saving its conversation file there. This way every agent that touches the thread has a place to persist its model conversation from the start. Branch: `codebutler/<slug>`.
+Each thread gets a git worktree in `.codebutler/branches/<branchName>/`. **Created early by the PM** — as soon as the PM starts working on a thread, it creates the worktree, pushes the branch to remote, and begins saving its conversation file there. Branch: `codebutler/<slug>`.
+
+### Git Sync Protocol
+
+**Every change an agent makes to the worktree must be committed and pushed.** This is non-negotiable — it ensures all agents (whether on the same machine or different machines) see the latest state.
+
+1. **After any file change** (code, MDs, conversation files, research): `git add` + `git commit` + `git push`
+2. **Before reading shared state** (agent MDs, global.md, research/): `git pull` to get the latest
+3. **On branch creation** (PM starts a thread): create worktree, push branch to remote immediately
+4. **When an agent is @mentioned for a branch it doesn't have locally**: pull the branch, create local worktree, start working
+
+### Divergence Handling
+
+If two agents push to the same branch concurrently (e.g., Coder pushed code while Researcher pushed a research file):
+
+1. The second push fails (non-fast-forward)
+2. Agent pulls with rebase: `git pull --rebase`
+3. If conflicts: agent resolves automatically (each agent knows its own files — conversation files never conflict, agent MDs rarely conflict)
+4. If unresolvable: agent posts in thread asking for help, marks the issue
+
+In practice, conflicts are rare because agents work on different files: Coder writes code, Researcher writes to `research/`, Lead writes to MDs. The main risk is two agents editing the same MD — the Lead handles most MD writes, so this is serialized naturally.
+
+### Distributed Agents
+
+Agents can run on different machines. The default is all 6 on one machine, but the architecture supports distribution:
+
+- **Same machine (default):** all agents share the filesystem. Git sync still applies — agents commit and push after every change. This is the simplest setup and works for most cases
+- **Multiple machines:** each machine runs a subset of agents (e.g., Coder on a powerful GPU machine, PM on a cheap always-on server). Each machine has its own clone of the repo. Agents coordinate through git (code/files) and Slack (messages)
+
+**What changes with distribution:**
+- `codebutler init` on each machine — same repo, same Slack app, different agents installed as services
+- Each machine creates local worktrees for active branches on demand (pull from remote)
+- Conversation files are per-agent, so no conflicts — each agent owns its own `conversations/<role>.json`
+- The PM pushes the branch immediately after creation so other agents on other machines can pull it
+
+**What doesn't change:** Slack is still the communication bus. @mentions still drive the flow. The agent loop is the same. The only difference is that "read file" might require a `git pull` first.
 
 | Platform | Init | Build Isolation |
 |----------|------|-----------------|
@@ -599,6 +663,156 @@ Channel membership = access. Optional: allowed users, max concurrent threads, ho
 
 ---
 
+## 15. Learn Workflow — Onboarding & Re-learn
+
+### First Run (Automatic)
+
+When `.codebutler/` is seeded for the first time on a repo that already has code (detected: files exist outside `.codebutler/`), the learn workflow triggers automatically after the wizard completes. A Slack thread is created in the project channel for the learn session.
+
+### Re-learn (Manual or Suggested)
+
+- **Manual:** user posts "re-learn" or "refresh knowledge" in the channel
+- **Suggested:** the Lead proposes a re-learn when it detects project maps are significantly out of sync with the codebase (after many threads, major refactors, etc.)
+
+### How It Works
+
+All agents participate in parallel in a single thread, each exploring the codebase from their own perspective:
+
+| Agent | What it explores | What it populates |
+|-------|-----------------|-------------------|
+| **PM** | Project structure, README, entry points, features, domains | PM project map |
+| **Coder** | Architecture, patterns, conventions, build system, test framework, dependencies | Coder project map |
+| **Reviewer** | Test coverage, CI config, linting, security patterns, quality hotspots | Reviewer project map |
+| **Artist** | UI components, design system, styles, screens, responsive patterns | Artist project map |
+| **Lead** | Reads what all agents found, synthesizes shared knowledge | `global.md` |
+| **Researcher** | Nothing on its own — purely reactive, responds when other agents ask | `research/` folder |
+
+**Each agent is intelligent about what to read.** No fixed budget or exploration rules. The PM reads entry points and READMEs, not test files. The Coder reads core modules and build config, not docs. Each agent's personality and perspective naturally guides what's relevant.
+
+**Researcher is purely reactive.** It does not explore on its own. Other agents @mention it on demand when they encounter something they need external context for:
+- PM finds Stripe integration → `@codebutler.researcher Stripe API best practices?`
+- Coder sees unfamiliar framework → `@codebutler.researcher Vite 6 plugin system docs?`
+- Reviewer sees custom linter → `@codebutler.researcher eslint-config-airbnb rules?`
+
+The Researcher's knowledge accumulates organically, driven by real questions — not a dump of everything that might be useful.
+
+### Output
+
+Each agent populates their **project map** section in their MD file. The Lead populates `global.md` with shared knowledge (architecture, tech stack, conventions, key decisions). The user reviews and approves all changes before they're committed.
+
+### Re-learn vs Incremental Learning
+
+| Type | When | What happens |
+|------|------|-------------|
+| **Incremental** | After each thread (default) | Lead updates specific project maps surgically. Small, targeted changes |
+| **Re-learn** | On demand or suggested | Full refresh. Agents re-read the codebase, compare with existing knowledge, **compact**: remove outdated info, update what changed, add what's new. Result is cleaner and possibly smaller — not just additive |
+
+Re-learn is knowledge garbage collection. The project maps should reflect the project as it is now, not as it was plus every change that ever happened.
+
+---
+
+## 17. Roadmap System & Unattended Development
+
+### Roadmap File
+
+The roadmap lives in `.codebutler/roadmap.md` — a committed file in the repo. Source of truth for planned work. The PM updates status as threads execute. The user can read and edit it directly at any time.
+
+```markdown
+# Roadmap: [project/feature set name]
+
+## 1. Auth system
+- Status: done
+- Branch: codebutler/auth-system
+- Depends on: —
+- Acceptance criteria: JWT-based auth, login/register endpoints, middleware
+
+## 2. User profile API
+- Status: in_progress
+- Branch: codebutler/user-profile
+- Depends on: 1
+- Acceptance criteria: CRUD endpoints, avatar upload, validation
+
+## 3. Profile UI
+- Status: pending
+- Depends on: 1, 2
+- Acceptance criteria: Profile page, edit form, avatar picker
+
+## 4. Notification system
+- Status: pending
+- Depends on: —
+- Acceptance criteria: Email + push, per-user preferences, queue-based
+```
+
+Statuses: `pending`, `in_progress`, `done`, `blocked`.
+
+If the user wants GitHub issues at any point, the Lead can generate them from the roadmap — but the roadmap file remains the source of truth.
+
+### Three Thread Types
+
+#### 1. Add to Roadmap (`roadmap-add`)
+
+User starts a thread to define new features. PM interviews the user (structured discovery), Artist proposes UX if needed, and the result is new items added to `roadmap.md`. No code, no worktree, no PR.
+
+This can happen multiple times — the roadmap grows incrementally. Each thread adds items. The user can also edit the file directly.
+
+#### 2. Implement Roadmap Item (`roadmap-implement`)
+
+User starts a thread and references a roadmap item: "implement item 3" or describes it. PM picks the item from the roadmap, runs the standard `implement` workflow. On completion, PM marks the item as `done` in the roadmap and updates the branch name.
+
+Same as a regular implement thread, but the plan comes from the roadmap item's acceptance criteria instead of a fresh interview.
+
+#### 3. Implement All (`develop`)
+
+User starts a thread and says "start all", "develop everything", or "implement the roadmap". PM orchestrates **unattended execution** of all `pending` items in the roadmap:
+
+1. Reads `roadmap.md`, builds a dependency graph
+2. Launches independent items in parallel (respecting `maxConcurrentThreads` from config)
+3. Creates a **new Slack thread for each item** (1 thread = 1 branch = 1 PR, non-negotiable)
+4. When an item completes (`done`), checks if dependent items are now unblocked → launches them
+5. Posts periodic status updates in the **orchestration thread** (the original thread where the user said "start all")
+
+The orchestration thread is the dashboard. The PM posts updates there:
+```
+Roadmap progress:
+✅ 1. Auth system — done (PR #12 merged)
+🔄 2. User profile API — in progress
+🔄 4. Notification system — in progress
+⏳ 3. Profile UI — waiting on 1, 2
+```
+
+### Unattended Execution Model
+
+In `develop` mode, the PM has autonomy to approve plans within the scope of the roadmap. **The roadmap IS the approval.** The user approved the acceptance criteria when they approved the roadmap — the PM doesn't need to ask again for each item.
+
+The PM:
+- Creates the plan following the roadmap item's acceptance criteria
+- Hands off to Coder directly (skips user approval step)
+- Only escalates to user when something is genuinely ambiguous, blocked, or outside the roadmap's scope
+
+### User Tagging
+
+When any agent needs user input during unattended execution (or any thread):
+
+1. Read the Slack thread history
+2. Extract all Slack user IDs that have participated in the thread (posted messages, not just reactions)
+3. Tag them in the message requesting input
+
+```
+@user1 @user2 — blocked on item 3: the roadmap says "JWT auth" but the existing
+codebase uses session cookies. Should I migrate to JWT or adapt the plan to sessions?
+```
+
+This ensures the right people get notified even when they're not actively watching. The thread creator is always included.
+
+### Failure Handling
+
+- If a thread blocks (needs user input, unfixable test failures, etc.), other independent items continue executing
+- Items that depend on a blocked item are marked `blocked` in the roadmap with a reason
+- PM posts a summary in the orchestration thread: "item 3 blocked — needs user input on auth approach. Items 4, 5 continuing. Item 6 waiting on 3."
+- When the user unblocks an item (answers the question), the PM resumes automatically
+
+---
+
 ---
 
 ## 18. Migration Path
@@ -632,7 +846,7 @@ Channel membership = access. Optional: allowed users, max concurrent threads, ho
 - [x] Agent identities — `@codebutler.pm`, `@codebutler.coder`, etc. One bot, six identities
 - [x] Agent-driven flow — agents pass work via @mentions, daemon only routes
 - [x] Escalation hierarchy — user > Lead > individual agents
-- [x] Discovery workflow — PM interviews → Artist designs → Lead builds roadmap → GitHub issues
+- [x] Discovery workflow — PM interviews → Artist designs → Lead builds roadmap
 - [x] Escalation-driven learning — questions today → workflow improvements tomorrow
 - [x] Project map per agent — each knows the project from its perspective
 - [x] Artist visual memory — `artist/assets/` for screenshots, mockups
@@ -643,11 +857,21 @@ Channel membership = access. Optional: allowed users, max concurrent threads, ho
 - [x] PM model pool with hot swap
 - [x] `gh` CLI for GitHub operations
 - [x] Goroutine-per-thread, buffered channels, panic recovery
-- [x] **Automatic first-run wizard** — no separate `init` command. Detects missing config and guides token setup + repo seed + service install
+- [x] **`codebutler init` + `codebutler configure`** — explicit init command for first setup (tokens + repo + services). Configure for post-init changes (channel, add/remove agents, tokens)
 - [x] **OpenAI key mandatory** — required for image generation (Artist) and voice transcription (Whisper). OpenRouter can't generate images
 - [x] **OS services with auto-restart** — LaunchAgent (macOS) / systemd (Linux). 6 services per repo. Survive reboots, restart on crash
 - [x] **Multi-repo = same Slack app, different channels** — global tokens shared, per-repo config separate
 - [x] **Agent↔model conversation files** — per-agent, per-thread JSON in worktree. Full model transcript (tool calls, reasoning, retries) separate from Slack messages. Agent decides what to post publicly
+- [x] **Learn workflow** — automatic onboarding on first run (repo with existing code), re-learn on demand or suggested by Lead. Each agent explores from its perspective, Researcher reactive on demand. Compacts knowledge on re-learn
+- [x] **Roadmap file** — `.codebutler/roadmap.md`, committed to git. Source of truth for planned work. Not GitHub issues (can generate them optionally)
+- [x] **Three roadmap thread types** — add items (discovery → roadmap), implement one item, implement all (unattended batch)
+- [x] **Unattended develop** — PM orchestrates all roadmap items, approves plans within roadmap scope, only escalates when genuinely blocked
+- [x] **Researcher open access** — any agent can @mention Researcher, not just PM. Research persisted in `.codebutler/research/`, committed to git, merges with PRs
+- [x] **User tagging** — when agents need input, tag all users who participated in the thread
+- [x] **Git sync protocol** — every file change is committed + pushed. Agents pull before reading shared state. Non-negotiable for distributed support
+- [x] **Distributed agents** — agents can run on different machines. Same repo, same Slack, different services. Git + Slack as coordination. Default is all on one machine
+- [x] **PM workflow menu** — when user intent is ambiguous, PM presents available workflows as options. Teaches new users what CodeButler can do
+- [x] **Research Index in global.md** — Researcher adds `@` references to persisted findings in global.md. All agents see what research exists via their system prompt
 
 ---
 
