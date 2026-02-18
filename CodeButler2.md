@@ -109,11 +109,60 @@ Bot token scopes: `channels:history`, `channels:read`, `chat:write`, `files:read
 
 ---
 
-## 3. Config & Storage
+## 3. Installation
+
+### Install Binary
+
+```bash
+go install github.com/leandrotocalini/codebutler/cmd/codebutler@latest
+```
+
+### First Run — Automatic Wizard
+
+Run `codebutler --role <any>` in a git repo. The binary detects missing config and triggers the wizard automatically. No separate `init` command.
+
+**Step 1: Global tokens** (only once per machine — `~/.codebutler/config.json` doesn't exist):
+
+1. **Slack app** — guides you through creating the Slack app (scopes, Socket Mode, bot user). Asks for Bot Token (`xoxb-...`) + App Token (`xapp-...`)
+2. **OpenRouter** — asks for API key (`sk-or-...`). Used for all LLM calls
+3. **OpenAI** — asks for API key (`sk-...`). Used for image generation (Artist) and voice transcription (Whisper). **Required**
+4. Saves all tokens to `~/.codebutler/config.json`
+
+**Step 2: Repo setup** (once per repo — `<repo>/.codebutler/` doesn't exist):
+
+1. **Seed `.codebutler/`** — creates folder, copies seed MDs (`pm.md`, `coder.md`, `reviewer.md`, `lead.md`, `artist.md`, `researcher.md`, `global.md`, `workflows.md`), creates `config.json` with default models, creates `artist/assets/`, `branches/`, `images/`
+2. **Channel selection** — recommends creating `codebutler-<reponame>`. User can pick an existing channel or accept the recommendation
+3. **`.gitignore`** — adds `.codebutler/branches/`, `.codebutler/images/` if not present
+4. Saves channel to per-repo `config.json`
+
+**Step 3: Service install** (once per repo):
+
+1. Detects OS (macOS / Linux)
+2. Installs 6 services — one per agent, `WorkingDirectory=<repo>`, restart on failure:
+   - macOS: 6 LaunchAgent plists (`~/Library/LaunchAgents/codebutler.<repo>.<role>.plist`)
+   - Linux: 6 systemd user units (`~/.config/systemd/user/codebutler.<repo>.<role>.service`)
+3. Starts all 6 services
+
+**Subsequent repos:** Step 1 is skipped (tokens exist). Only steps 2-3 run. Same Slack app, different channel, 6 new services.
+
+### Service Management
+
+```bash
+codebutler start              # start all 6 agents for current repo
+codebutler stop               # stop all 6
+codebutler status             # show running agents, active threads per agent
+codebutler --role <role>      # run single agent in foreground (dev mode)
+```
+
+On machine reboot, all services restart automatically. If an agent crashes, the service manager restarts it. The agent reads active threads from Slack and picks up where it left off.
+
+---
+
+## 4. Config & Storage
 
 ### Config — Two Levels
 
-**Global** (`~/.codebutler/config.json`) — secrets, gitignored:
+**Global** (`~/.codebutler/config.json`) — secrets, never committed:
 ```json
 {
   "slack": { "botToken": "xoxb-...", "appToken": "xapp-..." },
@@ -169,7 +218,7 @@ All LLM calls route through OpenRouter. Agents needing multiple models define th
 
 ---
 
-## 4. Dependencies
+## 5. Dependencies
 
 **Remove** (from v1): `whatsmeow`, QR code libs.
 **Add**: `github.com/slack-go/slack`, OpenRouter HTTP client, OpenAI HTTP client (image gen).
@@ -177,7 +226,7 @@ All LLM calls route through OpenRouter. Agents needing multiple models define th
 
 ---
 
-## 5. Files to Modify/Create/Delete
+## 6. Files to Modify/Create/Delete
 
 **Delete:** `internal/whatsapp/`
 
@@ -199,7 +248,7 @@ All LLM calls route through OpenRouter. Agents needing multiple models define th
 
 ---
 
-## 6. Inter-Agent Communication
+## 7. Inter-Agent Communication
 
 **All inter-agent messages are Slack messages in the same thread.** No hidden bus. The user sees everything in real-time. The thread IS the source of truth.
 
@@ -259,7 +308,7 @@ When two agents disagree → Lead decides. **The user outranks everyone** — ca
 
 ---
 
-## 7. Agent Architectures
+## 8. Agent Architectures
 
 Each agent is an independent OS process with its own Slack listener. All run the same binary. All execute tools locally. All communicate via Slack messages in the thread.
 
@@ -305,7 +354,7 @@ System prompt: `lead.md` + `global.md` + `workflows.md`. Turn budget configurabl
 
 ---
 
-## 8. Message Flow — Event-Driven Threads
+## 9. Message Flow — Event-Driven Threads
 
 No state machine. Slack threads provide natural conversation boundaries. Each agent process handles its own events independently.
 
@@ -367,7 +416,7 @@ Graceful shutdown per process: close Slack connection → wait for active gorout
 
 ---
 
-## 9. Memory System
+## 10. Memory System
 
 ### One File Per Agent = System Prompt + Memory
 
@@ -466,7 +515,7 @@ All MDs follow PR flow: Lead proposes → user approves → committed to PR bran
 
 ---
 
-## 10. Thread Lifecycle
+## 11. Thread Lifecycle
 
 ### 1 Thread = 1 Branch = 1 PR
 
@@ -486,7 +535,7 @@ Non-negotiable. Only the user closes a thread. No timeouts.
 
 ---
 
-## 11. Conflict Coordination
+## 12. Conflict Coordination
 
 **Detection:** file overlap, directory overlap, semantic overlap (PM analyzes). Checked at thread start and after each Coder response.
 
@@ -496,7 +545,7 @@ Non-negotiable. Only the user closes a thread. No timeouts.
 
 ---
 
-## 12. Worktree Isolation
+## 13. Worktree Isolation
 
 Each thread gets a git worktree in `.codebutler/branches/<branchName>/`. Created only when user approves plan. Branch: `codebutler/<slug>`.
 
@@ -510,13 +559,13 @@ Each thread gets a git worktree in `.codebutler/branches/<branchName>/`. Created
 
 ---
 
-## 13. Multi-Model Orchestration
+## 14. Multi-Model Orchestration
 
 All via OpenRouter. PM has model pool with hot swap. Cost controls: per-thread cap, per-day cap, per-user hourly limit. Circuit breaker: 3x PM failure → fallback for 5 minutes.
 
 ---
 
-## 14. Agent Interface
+## 15. Agent Interface
 
 ```go
 type Agent interface {
@@ -531,7 +580,7 @@ Same `AgentRunner` struct parameterized by config. Shared OpenRouter client. Sta
 
 ---
 
-## 15. Operational Details
+## 16. Operational Details
 
 ### Slack Features
 - Agent identity: one bot, six display names + icons
@@ -541,25 +590,6 @@ Same `AgentRunner` struct parameterized by config. Shared OpenRouter client. Sta
 
 ### Logging
 Structured tags: INF, WRN, ERR, DBG, MSG, PM, RSH, CLD, LED, IMG, RSP, MEM, AGT. Ring buffer + SSE for web dashboard.
-
-### Service Install — Six Processes
-
-Each agent runs as its own service. All in the same repo directory:
-
-```bash
-# Development: run all agents
-codebutler start              # starts all 6 processes (pm, coder, reviewer, researcher, lead, artist)
-codebutler stop               # stops all
-codebutler status             # shows which agents are running, active threads per agent
-
-# Or individually
-codebutler --role pm          # run just the PM
-codebutler --role coder       # run just the Coder
-```
-
-**Production:** `codebutler install` creates one service per agent. macOS: 6 LaunchAgent plists. Linux: 6 systemd user units. Each has its own log file, restart policy, and WorkingDirectory.
-
-**Minimal mode:** you can run only PM + Coder to start. Reviewer, Artist, Lead, Researcher are optional — if an agent @mentions one that's not running, the message sits in the thread. When the agent starts, it picks up unprocessed @mentions.
 
 ### PR Description
 Lead generates summary at close via `gh pr edit`. Thread journal (`.codebutler/journals/thread-<ts>.md`) captures tool-level detail not visible in Slack.
@@ -582,7 +612,7 @@ Channel membership = access. Optional: allowed users, max concurrent threads, ho
 
 ---
 
-## 16. Testing Strategy
+## 17. Testing Strategy
 
 | Package | What to Test |
 |---------|-------------|
@@ -598,7 +628,7 @@ Integration: mock OpenRouter. E2E: real Slack (manual).
 
 ---
 
-## 17. Migration Path
+## 18. Migration Path
 
 1. Slack client + messaging (replace WhatsApp)
 2. Thread dispatch + worktrees (replace state machine)
@@ -609,7 +639,7 @@ Integration: mock OpenRouter. E2E: real Slack (manual).
 
 ---
 
-## 18. Decisions
+## 19. Decisions
 
 - [x] **Separate OS processes** — one per agent, each with its own Slack listener, goroutines per thread
 - [x] **Communication 100% via Slack** — no IPC, no RPC. Tasks are @mentions in the thread
@@ -640,10 +670,14 @@ Integration: mock OpenRouter. E2E: real Slack (manual).
 - [x] PM model pool with hot swap
 - [x] `gh` CLI for GitHub operations
 - [x] Goroutine-per-thread, buffered channels, panic recovery
+- [x] **Automatic first-run wizard** — no separate `init` command. Detects missing config and guides token setup + repo seed + service install
+- [x] **OpenAI key mandatory** — required for image generation (Artist) and voice transcription (Whisper). OpenRouter can't generate images
+- [x] **OS services with auto-restart** — LaunchAgent (macOS) / systemd (Linux). 6 services per repo. Survive reboots, restart on crash
+- [x] **Multi-repo = same Slack app, different channels** — global tokens shared, per-repo config separate
 
 ---
 
-## 19. v1 vs v2
+## 20. v1 vs v2
 
 | Aspect | v1 (WhatsApp) | v2 (Slack + OpenRouter) |
 |--------|---------------|------------------------|
