@@ -6,11 +6,9 @@
 
 ## 1. What is CodeButler
 
-CodeButler is **a multi-agent AI dev team accessible from Slack**. One runtime, multiple agents, each with its own personality, context, and memory — all parameterized from the same Go code. You describe what you want in a Slack thread. A cheap agent (the PM) plans the work, explores the codebase, and proposes a plan. You approve. The Coder agent executes — with a full agent loop, tool use, file editing, test running, and PR creation. At close, the Lead agent mediates a retrospective between all agents to improve workflows. No terminal needed. You can be on your phone.
+CodeButler is **a multi-agent AI dev team accessible from Slack**. One Go binary, multiple agents, each with its own personality, context, and memory — all parameterized from the same code. You describe what you want in a Slack thread. A cheap agent (the PM) plans the work, explores the codebase, and proposes a plan. You approve. The Coder agent executes — with a full agent loop, tool use, file editing, test running, and PR creation. At close, the Lead agent mediates a retrospective between all agents to improve workflows. No terminal needed. You can be on your phone.
 
 ### 1.1 One Daemon, One Instance Per Agent
-
-CodeButler is a single Go binary. You run one instance per agent, each parameterized by role:
 
 ```bash
 codebutler --role pm          # always running, listens for Slack messages
@@ -24,139 +22,85 @@ codebutler --role artist      # activates for UI/UX design or image generation
 Same code, same agent loop (system prompt → LLM call → tool use → execute tool → append result → repeat), different parameters:
 
 - **System prompt** — from `<role>.md` + `global.md`. One file per agent that IS the system prompt and evolves with learnings over time
-- **Model** — from per-repo config (Kimi for PM, Opus for Coder, Sonnet for Lead, etc.)
+- **Model** — from per-repo config (Kimi for PM, Opus for Coder, Sonnet for others)
 - **Tool permissions** — behavioral (system prompt says what to use), not structural
 
-**The PM is always on** — it listens for Slack messages, talks to the user, explores the codebase, orchestrates. All other agents are dormant until someone calls them. The PM sends a task to the Coder, the Coder activates, works, and can message back. When a thread closes, the Lead activates, studies the transcript, and tells the team what to improve.
-
-**Mediation:** when agents disagree or hit a decision they can't make alone, they escalate to the Lead. The Lead is the arbiter — it decides based on the common good and workflow improvement. If neither can resolve it, the Lead asks the user.
+**The PM is always on.** All other agents are dormant until called. **Mediation:** when agents disagree, they escalate to the Lead. If the Lead can't resolve it, it asks the user.
 
 ### 1.2 The Six Agents
 
 | Agent | What it does | Model | Writes code? | Cost |
 |-------|-------------|-------|-------------|------|
-| **PM** | Plans, explores codebase, orchestrates, talks to user | Kimi / GPT-4o-mini / Claude (swappable via OpenRouter) | Never | ~$0.001/msg |
-| **Researcher** | Subagent: web research on demand (spawned, returns, dies) | Cheap model via OpenRouter (same tier as PM) | Never | ~$0.001/search |
-| **Artist** | UI/UX designer: proposes layouts, component structure, UX flows, interaction patterns. Also generates and edits images | Claude Sonnet via OpenRouter (UX reasoning) + OpenAI gpt-image-1 (image gen) | Never | ~$0.02-0.10/task |
-| **Coder** | Writes code, runs tests, creates PRs | Claude Opus 4.6 via OpenRouter | Always | ~$0.30-2.00/task |
-| **Reviewer** | Code review: reads diff, checks quality/security/tests, sends feedback to Coder | Claude Sonnet via OpenRouter | Never | ~$0.02-0.10/review |
-| **Lead** | Thread retrospective: mediates discussion, evolves workflows | Claude Sonnet via OpenRouter | Never | ~$0.01-0.05/thread |
+| **PM** | Plans, explores codebase, orchestrates, talks to user | Kimi / GPT-4o-mini / Claude (swappable) | Never | ~$0.001/msg |
+| **Researcher** | Subagent: web research on demand (spawned, returns, dies) | Cheap model (same tier as PM) | Never | ~$0.001/search |
+| **Artist** | UI/UX designer + image generation | Claude Sonnet (UX reasoning) + OpenAI gpt-image-1 (images) | Never | ~$0.02-0.10/task |
+| **Coder** | Writes code, runs tests, creates PRs | Claude Opus 4.6 | Always | ~$0.30-2.00/task |
+| **Reviewer** | Code review: quality, security, tests, plan compliance | Claude Sonnet | Never | ~$0.02-0.10/review |
+| **Lead** | Thread retrospective: mediates, evolves workflows and agent MDs | Claude Sonnet | Never | ~$0.01-0.05/thread |
 
-All agents run the same Go code with the same tool set (Read, Write, Edit, Bash, Grep, Glob, WebSearch, WebFetch, etc.) — the restriction is behavioral via system prompts, not structural. The PM's prompt says "explore code, delegate web research," the Researcher's says "search the web, return structured findings," the Artist's says "design UI/UX, propose layouts and interaction patterns," the Coder's says "do whatever it takes." Separation of powers: the PM explores code + orchestrates, the Researcher searches the web, the Artist designs UI/UX, the Coder writes code, the Reviewer checks quality, the Lead reviews and mediates, only the user approves.
+All agents share the same tool set. Separation is behavioral via system prompts: the PM explores + orchestrates, the Researcher searches the web, the Artist designs UI/UX, the Coder builds, the Reviewer checks quality, the Lead mediates. Only the user approves.
 
-### 1.3 What Makes It a Multi-Agent System
+### 1.3 End-to-End Flow
 
-Agents are not isolated workers — they communicate. The PM sends a task to the Coder. The Coder asks the PM for missing context. The Lead talks to each agent about what to improve. They can discuss, disagree, and reach consensus — with the Lead mediating and the user having final say.
+PM classifies intent → selects workflow from `workflows.md` → interviews user → explores codebase → spawns Researcher for web research if needed → sends to Artist for UI/UX design if feature has visual component → proposes plan (with Artist design) → user approves → creates worktree → sends plan + Artist design to Coder → Coder implements + creates PR → Reviewer reviews diff (loop with Coder until approved) → Lead runs retrospective (discusses with agents, proposes learnings) → user approves learnings → merge PR → cleanup.
 
-CodeButler receives a message and then: the PM classifies intent, selects a workflow from `workflows.md`, follows the workflow steps (interviewing the user, exploring codebase, messaging the Researcher for web research), detects conflicts with other active threads, if the feature has a UI component sends requirements to the Artist for UI/UX design (layouts, component structure, UX flows), proposes a plan with file:line references + Artist design, waits for user approval, creates an isolated git worktree, messages the Coder with plan + Artist design as input, routes Coder questions back to the PM, detects PR creation, activates the Reviewer who reviews the diff and sends feedback to the Coder until satisfied, activates the Lead who leads a retrospective discussion with all agents (workflow evolution proposals — user approves), merges PR, cleans up worktree, closes thread. For discovery threads: PM interviews the user, Artist designs UX for visual features, then hands off to the Lead who produces a roadmap.
+For discovery: PM interviews → Artist designs UX for visual features → Lead builds roadmap → GitHub issues.
 
-### 1.4 Architecture: OpenRouter + Native Tools (No CLI Dependencies)
+### 1.4 Architecture: OpenRouter + Native Tools
 
-**All LLM calls go through OpenRouter.** CodeButler is a standalone Go binary with a single agent runtime. Each agent is an instance of this runtime with different config. It does NOT shell out to `claude` CLI or any external tool:
+**All LLM calls go through OpenRouter.** CodeButler implements the full agent loop natively in Go — no `claude` CLI, no subprocess. Each agent is the same runtime with different config.
 
-- **PM agent**: Any model via OpenRouter (Kimi, GPT-4o-mini, Claude Sonnet, etc.). Read-only codebase tools. Stays alive during the thread.
-- **Researcher agent**: Any cheap model via OpenRouter. Spawned on demand — uses WebSearch + WebFetch, synthesizes findings, returns result, dies. Multiple can run in parallel.
-- **Coder agent**: Claude Opus 4.6 via OpenRouter API. Full tool set (Read, Write, Edit, Bash, Grep, Glob, etc.) implemented natively in Go. Can message the PM when it needs more context.
-- **Reviewer agent**: Claude Sonnet via OpenRouter. Activates after Coder finishes. Reads the diff, checks code quality/security/tests, sends feedback to Coder. Review loop until satisfied.
-- **Lead agent**: Claude Sonnet via OpenRouter. Runs at thread close. Messages other agents to discuss improvements, then presents proposals to user.
-- **Artist agent**: Dual-model. Claude Sonnet via OpenRouter for UI/UX reasoning (layouts, component structure, UX flows, interaction patterns). OpenAI gpt-image-1 API directly for image generation/editing. Activates when PM sends it a feature to design or when images are needed. Its UI/UX output becomes part of the Coder's task prompt.
+All tools (Read, Write, Edit, Bash, Grep, Glob, WebSearch, WebFetch, GitCommit, GitPush, GHCreatePR, SendMessage, Research, GenerateImage, etc.) are implemented natively. The Artist is dual-model: Claude Sonnet via OpenRouter for UX reasoning + OpenAI gpt-image-1 directly for image generation.
 
-This means CodeButler has **zero dependency on Claude Code CLI**. It IS its own Claude Code — with the same tools, same capabilities, plus Slack integration, inter-agent communication, memory, and multi-agent orchestration.
+### 1.5 Agent MDs (System Prompt = Memory)
 
-### 1.5 Per-Agent MDs (System Prompt = Memory)
-
-Each agent has **one MD file** that is both its system prompt and its evolving memory. No separation between "prompt" and "memory" — it's the same file. Seeded with defaults on first run, then the Lead appends learnings after each PR (only to agents that need them).
-
-All agent MDs live in `<repo>/.codebutler/`: pm.md, researcher.md, coder.md, reviewer.md, lead.md, artist.md, global.md, workflows.md, and `artist/assets/` (visual references).
+Each agent has **one MD file** in `<repo>/.codebutler/` that is both its system prompt and its evolving memory. Seeded with defaults on first run, then the Lead appends learnings after each PR — only to agents that need them.
 
 **Each agent MD has three sections:**
-1. **Personality + rules** — behavioral instructions, tool permissions, interaction patterns (seeded, rarely changes)
+1. **Personality + rules** — behavioral instructions, tool permissions (seeded, rarely changes)
 2. **Project map** — the project from that agent's perspective (evolves as the project grows)
-3. **Behavioral learnings** — how to work better, interact with other agents, avoid past mistakes (evolves from Lead retrospectives and direct user feedback)
+3. **Behavioral learnings** — how to work better, interact with other agents, avoid past mistakes (from Lead retrospectives or direct user feedback)
 
-**Why per-agent MDs instead of CLAUDE.md:**
-- Each agent has a different personality, different tools, different restrictions
-- The Coder's MD includes ALL tool definitions (Read, Write, Edit, Bash, Grep, Glob, etc.) — it's essentially a custom Claude Code system prompt
-- The PM's MD includes only read-only tools + exploration guidelines
-- The Researcher's MD defines web search strategies and structured output format
-- The Reviewer's MD defines code review checklist, security patterns, quality standards, and feedback format
-- The Lead's MD defines retrospective structure, mediation rules, and cross-agent analysis
-- `global.md` contains shared project knowledge for all agents (architecture, tech stack, conventions — seeded + evolves)
-- `workflows.md` contains the process playbook
-- Users can customize each agent independently per project
-- No dependency on CLAUDE.md — CodeButler manages its own MDs entirely
+This is how agents stay coherent — the Artist never proposes UX wildly different from what exists because its MD contains the current UI state. The Coder knows the conventions because they're in its MD.
 
-**On first run**, CodeButler seeds all MDs with defaults. Users can edit them. After each PR, the Lead proposes learnings to specific agents — only the ones that need them. User approves what gets saved.
+Plus two shared files all agents read: `global.md` (shared project knowledge: architecture, tech stack, conventions) and `workflows.md` (process playbook).
 
 ### 1.6 MCP — Model Context Protocol
 
-Claude Code supports MCP servers natively. Since CodeButler implements the same tool-calling loop, it can also support MCP servers. MCP config is read from `.claude/mcp.json` in the repo (standard location). This lets the Coder connect to databases, APIs, documentation servers, Figma, Linear, Jira, Sentry, etc.
-
-The PM can also use MCP servers (future) for external knowledge during planning.
+CodeButler implements the same tool-calling loop as Claude Code, so it can support MCP servers. Config from `.claude/mcp.json`. Lets agents connect to databases, APIs, Figma, Linear, Jira, Sentry, etc.
 
 ### 1.7 Why CodeButler Exists
 
-**vs. Claude Code in terminal:** CodeButler wraps Claude Code's capabilities in Slack. PM planning is 100x cheaper (~$0.001 vs ~$0.10). Memory is automated. N parallel threads with isolated worktrees. Audit trail via Slack + PRs.
-
-**vs. Cursor/Windsurf:** Fire-and-forget. Describe → approve → get PR. No IDE needed. Team-native.
-
-**vs. Devin/OpenHands:** Uses Claude's native capabilities but self-hosted. PM-mediated with user approval. Cost-transparent. Memory system improves with every thread. Runs on your machine.
-
+**vs. Claude Code:** Slack-native. PM planning 100x cheaper. Automated memory. N parallel threads. Audit trail.
+**vs. Cursor/Windsurf:** Fire-and-forget. No IDE needed. Team-native.
+**vs. Devin/OpenHands:** Self-hosted. PM-mediated. Cost-transparent. Memory improves per thread.
 **vs. Simple Slack bots:** They generate text. CodeButler ships code with PRs.
 
 ---
 
-## 2. Concept Mapping (WhatsApp → Slack)
+## 2. Slack Integration
+
+### Concept Mapping (v1 → v2)
 
 | WhatsApp | Slack | Notes |
 |----------|-------|-------|
 | Group JID | Channel ID | Identifier |
-| User JID | User ID | Identifier |
 | QR code pairing | OAuth App + Bot Token | Auth |
-| whatsmeow events | Slack Socket Mode / Events API | Reception |
-| `SendMessage(jid, text)` | `chat.postMessage(channel, text)` | Send text |
-| `SendImage(jid, png, caption)` | `files.upload` + message | Send images |
-| Bot prefix `[BOT]` | Bot messages have `bot_id` | Slack filters bots natively |
-| Voice messages (Whisper) | Audio files in Slack → Whisper | Same flow |
+| whatsmeow events | Slack Socket Mode | Reception |
+| `SendMessage` | `chat.postMessage` | Send text |
+| Bot prefix `[BOT]` | Bot messages have `bot_id` | Native filtering |
+
+### Slack App Setup
+
+Bot token scopes: `channels:history`, `channels:read`, `chat:write`, `files:read`, `files:write`, `groups:history`, `groups:read`, `reactions:write`, `users:read`. Socket Mode enabled. Events: `message.channels`, `message.groups`. Tokens: Bot (`xoxb-...`) + App (`xapp-...`).
 
 ---
 
-## 3. Architecture
+## 3. Config & Storage
 
-Slack connects via slack-go SDK to the daemon. One daemon binary, one running instance per agent (parameterized by `--role`). The PM instance is always on; others activate on demand. All instances share SQLite (messages + sessions) and communicate via inter-agent messaging. Each instance calls OpenRouter API with its configured model. Git worktrees provide isolation per thread. Tools are executed natively — no external CLI processes.
+### Config — Two Levels
 
----
-
-## 4. Dependencies
-
-### Remove (from v1)
-- `go.mau.fi/whatsmeow` and all subdependencies
-- `github.com/skip2/go-qrcode`, `github.com/mdp/qrterminal/v3`
-
-### Add
-- `github.com/slack-go/slack` — Slack SDK (Socket Mode, Events, Web API)
-- OpenRouter HTTP client (custom, in `internal/provider/openrouter/`)
-- OpenAI HTTP client (for image gen — direct, not via OpenRouter)
-
-### System Requirements
-- `gh` (GitHub CLI) — required for PR operations. Must be installed and `gh auth login` done.
-
----
-
-## 5. Slack App Setup
-
-Create a Slack App with bot token scopes: `channels:history`, `channels:read`, `chat:write`, `files:read`, `files:write`, `groups:history`, `groups:read`, `reactions:write` (optional), `users:read`. Enable Socket Mode (generates `xapp-...` token). Enable Events (`message.channels`, `message.groups`). Install to Workspace → copy Bot Token (`xoxb-...`).
-
-Required tokens: Bot Token (`xoxb-...`) for API ops, App Token (`xapp-...`) for Socket Mode.
-
----
-
-## 6. Config
-
-Two levels. Global holds secrets (tokens, API keys). Per-repo holds project-specific settings (channel, models per role, limits). The per-repo config is committed to git — it's part of the project, not a secret.
-
-**Global** (`~/.codebutler/config.json`) — gitignored, never committed:
-
+**Global** (`~/.codebutler/config.json`) — secrets, gitignored:
 ```json
 {
   "slack": { "botToken": "xoxb-...", "appToken": "xapp-..." },
@@ -166,923 +110,472 @@ Two levels. Global holds secrets (tokens, API keys). Per-repo holds project-spec
 ```
 
 **Per-repo** (`<repo>/.codebutler/config.json`) — committed to git:
-
 ```json
 {
   "slack": { "channelID": "C0123...", "channelName": "codebutler-myproject" },
   "models": {
     "pm": {
       "default": "moonshotai/kimi-k2",
-      "pool": {
-        "kimi": "moonshotai/kimi-k2",
-        "claude": "anthropic/claude-sonnet-4-5-20250929",
-        "gpt": "openai/gpt-4o-mini"
-      }
+      "pool": { "kimi": "moonshotai/kimi-k2", "claude": "anthropic/claude-sonnet-4-5-20250929", "gpt": "openai/gpt-4o-mini" }
     },
     "researcher": { "model": "moonshotai/kimi-k2" },
     "coder": { "model": "anthropic/claude-opus-4-6" },
     "reviewer": { "model": "anthropic/claude-sonnet-4-5-20250929" },
     "lead": { "model": "anthropic/claude-sonnet-4-5-20250929" },
-    "artist": {
-      "uxModel": "anthropic/claude-sonnet-4-5-20250929",
-      "imageModel": "openai/gpt-image-1"
-    }
+    "artist": { "uxModel": "anthropic/claude-sonnet-4-5-20250929", "imageModel": "openai/gpt-image-1" }
   },
   "limits": { "maxConcurrentThreads": 3, "maxCallsPerHour": 100 }
 }
 ```
 
-All LLM calls (PM, Researcher, Coder, Reviewer, Lead, Artist) route through OpenRouter using the global API key. Model fields use OpenRouter model IDs. Agents that need more than one model define them explicitly in config (e.g., Artist has `uxModel` for UI/UX reasoning via OpenRouter + `imageModel` for image generation via OpenAI directly). The PM has a model pool for hot swap (`/pm claude`, `/pm kimi`); other roles have a single model each (or multiple named models if needed).
+All LLM calls route through OpenRouter. Agents needing multiple models define them explicitly (e.g., Artist has `uxModel` + `imageModel`). PM has a model pool for hot swap (`/pm claude`, `/pm kimi`).
 
----
-
-## 7. Storage
-
-Global: `~/.codebutler/config.json`.
-
-Per-repo: `<repo>/.codebutler/` contains:
+### Storage — `.codebutler/` Folder
 
 ```
-.codebutler/
-  config.json
-  store.db                       # SQLite (messages + sessions)
+<repo>/.codebutler/
+  config.json                    # Per-repo settings (committed)
+  store.db                       # SQLite: messages + sessions (gitignored)
   # Agent MDs — each is system prompt + project map + learnings
   pm.md                          # PM agent
   coder.md                       # Coder agent
   researcher.md                  # Researcher agent
   reviewer.md                    # Reviewer agent
   lead.md                        # Lead agent
-  artist.md                      # Artist agent (UI components, design system, screens)
-  global.md                      # Shared project knowledge (all agents read, evolves)
-  workflows.md                   # Process playbook (evolves with learnings)
+  artist.md                      # Artist agent
+  global.md                      # Shared project knowledge (all agents read)
+  workflows.md                   # Process playbook
   artist/
     assets/                      # Screenshots, mockups, visual references
-  branches/                      # Git worktrees (1 per active thread)
-  images/                        # Generated images
-  journals/                      # Thread narratives
+  branches/                      # Git worktrees, 1 per active thread (gitignored)
+  images/                        # Generated images (gitignored)
+  journals/                      # Thread narratives (gitignored)
 ```
 
 **Committed to git:** `config.json`, all `.md` files, `artist/assets/`. **Gitignored:** `store.db`, `branches/`, `images/`, `journals/`.
 
-SQLite tables: `sessions` (PK: thread_ts, with channel_id, session_id, updated_at) and `messages` (PK: id, with thread_ts, channel_id, from_user, content, timestamp, acked flag).
+SQLite: `sessions` (thread_ts → session_id) and `messages` (thread_ts, from_user, content, acked).
 
 ---
 
-## 8. Files to Modify/Create/Delete
+## 4. Dependencies
 
-### Delete
-All of `internal/whatsapp/` (replaced by Slack client).
-
-### Create
-- `internal/slack/` — client.go, handler.go, channels.go, snippets.go
-- `internal/github/github.go` — PR detection, merge polling, description updates via `gh`
-- `internal/journal/journal.go` — thread journal (incremental MD narrative)
-- `internal/models/interfaces.go` — ProductManager, Researcher, Coder, Lead, Artist interfaces + types
-- `internal/provider/openrouter/client.go` — OpenRouter HTTP client (auth, rate limiting, retries)
-- `internal/provider/openrouter/chat.go` — Chat completions with tool-calling support
-- `internal/provider/openai/images.go` — Image gen/edit via OpenAI API
-- `internal/tools/definition.go` — Tool definitions for PM (read-only) and Coder (full)
-- `internal/tools/executor.go` — Sandboxed tool execution (read, write, edit, bash, grep, glob)
-- `internal/tools/loop.go` — Provider-agnostic tool-calling loop
-- `internal/router/router.go` — Message classifier
-- `internal/conflicts/tracker.go` — Thread lifecycle tracking, file overlap detection
-- `internal/conflicts/notify.go` — Slack notifications for conflicts
-- `internal/worktree/worktree.go` — Create, remove, list, init worktrees
-- `internal/worktree/init.go` — Per-platform init (npm ci, pod install, venv, etc.)
-
-### Modify
-- `cmd/codebutler/main.go` — Setup wizard for Slack tokens + channel selection
-- `internal/config/` — SlackConfig, GlobalConfig, RepoConfig, OpenRouter config
-- `internal/daemon/daemon.go` — Replace WhatsApp with Slack, delete state machine, add thread dispatch
-- `internal/store/` — Column renames, thread_ts as session key
+**Remove** (from v1): `whatsmeow`, QR code libs.
+**Add**: `github.com/slack-go/slack`, OpenRouter HTTP client, OpenAI HTTP client (image gen).
+**Requires**: `gh` CLI (GitHub operations).
 
 ---
 
-## 9. Coder Architecture: Native Agent Loop via OpenRouter
+## 5. Files to Modify/Create/Delete
 
-The Coder is NOT `claude -p`. CodeButler implements the full agent loop natively: build system prompt → call OpenRouter with tools → execute returned tool_calls locally → append results → repeat until LLM returns text with no more tool calls. All in Go, no subprocess.
+**Delete:** `internal/whatsapp/`
 
-### Tools — Shared Across All Roles
+**Create:**
+- `internal/slack/` — client, handler, channels, snippets
+- `internal/github/github.go` — PR detection, merge, description updates via `gh`
+- `internal/journal/journal.go` — thread journal
+- `internal/models/interfaces.go` — Agent interface + types
+- `internal/provider/openrouter/` — client, chat completions with tool-calling
+- `internal/provider/openai/images.go` — image gen/edit
+- `internal/tools/` — definition, executor (sandboxed), loop (provider-agnostic)
+- `internal/router/router.go` — message classifier
+- `internal/conflicts/` — tracker, notify
+- `internal/worktree/` — worktree, init (per-platform)
 
-CodeButler implements ALL the tools Claude Code has, natively in Go. **All roles can use all tools** — the difference is what the system prompt allows, not what's technically available:
+**Modify:** `cmd/codebutler/main.go`, `internal/config/`, `internal/daemon/daemon.go`, `internal/store/`
 
-**Core tools** (same as Claude Code): Read, Write, Edit, Bash, Grep, Glob.
+---
 
-**Web tools:** WebSearch, WebFetch (primarily used by Researcher).
+## 6. Inter-Agent Communication
 
-**Git/GitHub tools:** GitCommit, GitPush, GHCreatePR, GHStatus.
+**All inter-agent messages are Slack messages in the same thread.** No hidden bus. The user sees everything in real-time. The thread IS the source of truth.
 
-**Inter-agent tools:** SendMessage (any agent→any agent: ask questions, delegate work, discuss improvements), Research (PM→Researcher: delegate web search — shortcut for spawning a Researcher subagent).
+### Agent Identities
 
-**CodeButler-specific tools:** SlackNotify (post to thread), ReadMemory (access agent memory), ListThreads (see active threads), GenerateImage / EditImage (Artist-specific).
+One Slack bot app, six display identities: `@codebutler.pm`, `@codebutler.coder`, `@codebutler.reviewer`, `@codebutler.lead`, `@codebutler.researcher`, `@codebutler.artist`. Each posts with its own display name and icon.
 
-Each agent's system prompt defines which tools to use and how. The PM uses Read, Grep, Glob, GitLog for codebase exploration and Research for web queries. The Researcher uses WebSearch + WebFetch exclusively. The Coder uses all tools freely to implement. The Artist uses its UX model for design reasoning and its image model for generation. But technically any agent could use any tool — the restriction is behavioral, not structural. This keeps the architecture simple (one tool executor, shared by all agents) and allows future flexibility.
+### SendMessage(to, message, waitForReply)
 
-### Tool Execution Safety
+Posted to the thread as a Slack message with @mention. The daemon only routes — **agents drive the flow themselves**.
 
-All tools execute in the worktree directory. Path validation ensures no escape. Write/Edit only within worktree. Bash has configurable timeout. Grep/Glob respect .gitignore.
+### Conversation Examples
 
-### Inter-Agent Communication — Everything in the Thread
-
-**All inter-agent messages are Slack messages in the same thread.** There is no hidden channel, no behind-the-scenes bus. When `@codebutler.coder` asks `@codebutler.pm` a question, that message appears in the thread. The user sees it in real-time. The thread IS the source of truth.
-
-This means:
-- The user can follow every conversation as it happens
-- The user can intervene at any point ("actually, use JWT not OAuth")
-- The thread is the complete record — no separate journal needed for inter-agent comms
-- Scroll up = full audit trail
-
-**Agent identity — each agent has an @mention:**
-
-| Agent | Identity | Display |
-|-------|----------|---------|
-| PM | `@codebutler.pm` | **PM** |
-| Coder | `@codebutler.coder` | **Coder** |
-| Reviewer | `@codebutler.reviewer` | **Reviewer** |
-| Lead | `@codebutler.lead` | **Lead** |
-| Researcher | `@codebutler.researcher` | **Researcher** |
-| Artist | `@codebutler.artist` | **Artist** |
-
-One Slack bot app, but each agent posts with its own display name and icon. When an agent addresses another, it @mentions them. The daemon parses the mention and routes to the target agent.
-
-**SendMessage(to, message, waitForReply):**
-- `to` — target agent identity (e.g., `"coder"`)
-- `message` — posted to the thread as a Slack message from the sending agent, @mentioning the target
-- `waitForReply` — if true, sending agent pauses until the target replies in the thread
-
-The daemon only routes — it does NOT orchestrate phase transitions. **Agents drive the flow themselves.** Each agent decides when to pass work forward.
-
-### Natural Conversation Flows
-
-**PM ↔ Coder** — the most frequent conversation. Visible in the thread:
-
+**PM ↔ Coder:**
 ```
 @codebutler.pm: @codebutler.coder implement this plan: [plan]
-@codebutler.coder: @codebutler.pm the plan says to use REST but this
-  project uses GraphQL everywhere. should I adapt?
-@codebutler.pm: @codebutler.coder good catch, use GraphQL. here's the
-  existing schema: [context]
-@codebutler.coder: (continues working...)
+@codebutler.coder: @codebutler.pm the plan says REST but this project uses GraphQL. adapt?
+@codebutler.pm: @codebutler.coder good catch, use GraphQL. here's the schema: [context]
 ```
 
-If they can't agree, either one @mentions the Lead:
-
+**PM → Artist:**
 ```
-@codebutler.coder: @codebutler.lead PM wants me to add a new table but I
-  think we should extend the existing one. here's why: [reasoning]
-@codebutler.lead: @codebutler.pm the Coder has a point — extending the
-  existing table avoids a migration. thoughts?
-@codebutler.pm: @codebutler.lead agreed, let's go with that
-@codebutler.lead: @codebutler.coder extend the existing table, PM agrees
+@codebutler.pm: @codebutler.artist feature: notification settings. requirements: [details]
+@codebutler.artist: @codebutler.pm UX proposal:
+  - layout: tabbed sections (channels, schedule, preview)
+  - interaction: auto-save with toast confirmation
+  - mobile: tabs collapse to accordion
 ```
 
-**PM → Artist** — PM sends the feature to the Artist for UI/UX design:
-
+**Coder → Reviewer:**
 ```
-@codebutler.pm: @codebutler.artist feature: notification settings page.
-  requirements: user can toggle per-channel notifications, set quiet
-  hours, preview notification style. existing UI uses shadcn/ui + tailwind
-@codebutler.artist: @codebutler.pm here's my UX proposal:
-  - layout: settings page with tabbed sections (channels, schedule, preview)
-  - channel toggles: grouped by category with bulk on/off
-  - quiet hours: time range picker with timezone display
-  - preview: live notification mock that updates as user changes settings
-  - interaction: changes auto-save with subtle toast confirmation
-  - mobile: tabs collapse to accordion, time picker uses native input
-@codebutler.pm: (incorporates Artist's design into the plan for the Coder)
-```
-
-**Coder → Reviewer** — Coder initiates the review when it's done:
-
-```
-@codebutler.coder: @codebutler.reviewer PR ready for review.
-  branch: codebutler/add-notifications. key changes: [summary]
-@codebutler.reviewer: @codebutler.coder 3 issues found:
-  1. [security] executor.go:47 — unsanitized input
-  2. [test] handler_test.go — missing empty thread_ts test
-  3. [quality] daemon.go:120 — duplicated error handler
+@codebutler.coder: @codebutler.reviewer PR ready. branch: codebutler/add-notifications
+@codebutler.reviewer: @codebutler.coder 3 issues: [security] executor.go:47, [test] missing edge case, [quality] duplicated handler
 @codebutler.coder: @codebutler.reviewer fixed all 3, pushed
 @codebutler.reviewer: @codebutler.coder approved ✓
 ```
 
-**Coder ↔ Reviewer disagreement** — escalate to Lead:
-
+**Disagreement → Lead:**
 ```
-@codebutler.reviewer: @codebutler.coder this function is too complex, split it
-@codebutler.coder: @codebutler.reviewer it's a state machine, splitting makes
-  it harder to follow
-@codebutler.reviewer: @codebutler.lead disagreement on daemon.go:150 complexity.
-  I say split, Coder says it's clearer as one block
-@codebutler.lead: @codebutler.reviewer Coder is right — state machines read
-  better as one block. @codebutler.coder keep it, but add a comment
-  explaining the state transitions
+@codebutler.reviewer: @codebutler.lead disagreement on daemon.go:150 complexity
+@codebutler.lead: Coder is right — state machines read better as one block. Add a comment.
 ```
 
-**Lead retrospective** — also in the thread, user watches live:
-
-```
-@codebutler.lead: @codebutler.pm Coder asked you 3 times about auth. should
-  we add an auth-check step to the implement workflow?
-@codebutler.pm: @codebutler.lead I didn't know this project uses JWT. add it
-  to my memory too
-@codebutler.lead: @codebutler.reviewer you missed the unhandled error on
-  line 47. add error-return check to your patterns?
-@codebutler.reviewer: @codebutler.lead yes, add to reviewer.md
-@codebutler.lead: here's what we learned: [proposals for user]
-```
-
-The user sees all of this as it happens. They can jump in at any point, correct an agent, add context, or override a decision.
-
-### Escalation Rule
-
-**When two agents disagree → they @mention the Lead.** The Lead reads the thread context, evaluates based on the common good (code quality, team efficiency, workflow improvement), and decides. If the Lead can't decide → it asks the user.
-
-The escalation chain: `@agent ↔ @agent → @lead → user`.
-
-**But the user outranks everyone.** Since all conversation happens in the thread, the user can jump in at any point — correct an agent, override a decision, add context, settle a disagreement directly. When the user speaks, all agents listen. The user overrides the Lead, the Lead overrides individual agents. This is the hierarchy:
+### Escalation Hierarchy
 
 ```
 User (final authority)
-  └── Lead (mediator, arbiter between agents)
-        ├── PM (orchestrator, talks to user)
+  └── Lead (mediator, arbiter)
+        ├── PM (orchestrator)
         ├── Coder (builder)
         ├── Reviewer (quality gate)
         ├── Researcher (web knowledge)
         └── Artist (UI/UX design + images)
 ```
 
-If the user says "use REST, not GraphQL" mid-conversation between PM and Coder, both agents adapt immediately. No escalation needed — the user IS the escalation.
-
-### Cost Control
-
-Inter-agent exchanges are capped per thread (configurable). The Lead's retrospective discussion has a turn budget. Agents are instructed to be concise — every message costs tokens and occupies the thread.
-
-Every inter-agent message is a learning signal. The Lead sees all of them in the thread at retrospective time.
-
-### Coder System Prompt (`coder.md`)
-
-The per-repo `coder.md` replaces CLAUDE.md. Contains: personality and behavior rules, tool documentation (auto-generated from tool definitions), sandbox restrictions, project-specific conventions, build/test commands, project map, and behavioral learnings. The daemon assembles the final prompt: `coder.md` + `global.md` + task plan + relevant context.
+When two agents disagree → Lead decides. **The user outranks everyone** — can jump in at any point, override any decision. The user IS the escalation.
 
 ---
 
-## 10. PM Architecture: Always-Online Orchestrator
+## 7. Agent Architectures
 
-The PM is the primary agent — it's the first to activate on every thread and stays available throughout. Same runtime as every other agent, parameterized with `pm.md` as system prompt, read-only codebase tools, and a cheap model (Kimi by default).
+### PM — Always-Online Orchestrator
 
-**The PM's job:** talk to the user, explore the codebase, select and follow a workflow from `workflows.md`, delegate web research to Researcher agents (via `SendMessage` or `Research` tool), propose plans, and send tasks to the Coder. When the Coder messages back with questions, the PM answers — from its own knowledge, by exploring the codebase, by asking the user, or by spawning a Researcher.
+Always available. Talks to user, explores codebase, selects workflow, delegates research, proposes plans, stays available for Coder questions. Cheap model (Kimi by default). System prompt: `pm.md` + `global.md` + `workflows.md`. Capped at 15 tool-calling iterations per activation.
 
-**Always available:** while the Coder works, the PM is not "dead" — it can receive messages from the Coder (questions, blockers) and respond. The daemon keeps the PM's context alive for the duration of the thread. Output-capped at 15 tool-calling iterations per activation.
+### Researcher — Subagent for Web Research
 
-The PM's system prompt is `pm.md` (personality + project map + learnings) + `global.md` + `workflows.md`. Everything is in one place — no separate prompt and memory files. The workflows guide the PM's behavior for each task type.
+Spawned by PM on demand. Runs WebSearch + WebFetch → synthesizes → returns → dies. Stateless, parallel-capable, non-blocking. Protects PM's context from noisy web results. System prompt: `researcher.md` + `global.md`.
 
----
+### Artist — UI/UX Designer + Image Gen
 
-## 11. Researcher Architecture: Subagent for Web Research
+Dual-model. Claude Sonnet for UX reasoning (layouts, component structure, UX flows, interaction patterns). OpenAI gpt-image-1 for image gen/editing. Activates when PM sends a feature to design. Output becomes part of the Coder's task prompt. Reads `artist/assets/` for visual references to stay coherent with existing UI. System prompt: `artist.md` + `global.md`.
 
-The Researcher is a **subagent** — spawned by the PM on demand, runs a short focused loop, returns results, dies. Same pattern as Claude Code's `Task` tool with specialized subagents.
+### Coder — Builder
 
-**How it works:** The PM calls a `Research` tool with a structured query (topic, context, what it needs to know). CodeButler spawns the Researcher as a subagent with that query. The Researcher runs its own agent loop: WebSearch → WebFetch → synthesize → return structured findings. The PM receives the synthesized result and continues planning.
+Claude Opus 4.6. Full tool set. Works in isolated worktree. Creates PRs. Receives PM plan + Artist design as input. Can message PM for missing context. System prompt: `coder.md` + `global.md` + task plan.
 
-**Subagent advantages:**
+**Sandboxing:** MUST NOT install packages, leave worktree, modify system files, or run destructive commands. Enforced at tool execution layer (path validation, command filtering) — stronger than prompt-only.
 
-- **Context protection** — web search results are verbose and noisy. The Researcher synthesizes externally and returns only what's relevant, keeping the PM's context window clean.
-- **Parallel research** — the PM can spawn multiple Researchers concurrently (e.g., search API docs + compare two libraries at the same time). Each runs independently.
-- **Non-blocking** — the PM can continue exploring the codebase while Researchers search. Results arrive when ready.
-- **Independently swappable** — use a model that's good at search synthesis without affecting PM planning quality.
+### Reviewer — Code Review Loop
 
-**What the Researcher uses:** WebSearch, WebFetch. No codebase tools — the Researcher doesn't read project files. Its job is purely external knowledge.
+Activates when Coder sends "PR ready." Checks: code quality, security (OWASP), test coverage, consistency, best practices, plan compliance. Sends structured feedback (`[security] file:line — description`). Loop until approved (max 3 rounds). Disagreements escalate to Lead. System prompt: `reviewer.md` + `global.md`.
 
-**Lifecycle:** Spawned → runs loop → returns result → dies. Stateless — its MD doesn't accumulate learnings (each search is self-contained). Its system prompt comes from `researcher.md` + `global.md`.
+### Lead — Mediator + Retrospective
 
----
+Runs at thread close with **full thread transcript**. Three phases:
 
-## 12. Reviewer Architecture: Code Review Loop
+1. **Analysis** (solo) — identifies friction, wasted turns, escalation patterns
+2. **Discussion** (multi-agent) — @mentions each agent, discusses improvements. Real conversation in the thread
+3. **Proposals** (to user) — concrete updates to agent MDs, `global.md`, `workflows.md`
 
-The Reviewer activates when the Coder messages it — not by daemon trigger, but by the Coder itself deciding it's done. The Coder sends `SendMessage("reviewer", "PR ready: [branch, summary]")`. The Reviewer's job: read the diff, catch what the Coder missed. It does NOT write code — it sends feedback to the Coder, who fixes.
+**Produces:** PR description, learnings for agent MDs, workflow evolution, usage report, journal finalization.
 
-### What the Reviewer Checks
+**Workflow evolution** — three types: add step to existing workflow, create new workflow, automate a step. Built collaboratively with agents during discussion.
 
-- **Code quality** — readability, naming, duplication, dead code, overly complex logic
-- **Security** — injection vectors, hardcoded secrets, unsafe patterns (OWASP top 10)
-- **Test coverage** — are the new paths tested? Are edge cases covered? Can it run the tests and see if they pass?
-- **Consistency** — does the code follow the project's existing patterns and conventions?
-- **Best practices** — error handling, resource cleanup, race conditions, performance pitfalls
-- **Plan compliance** — does the implementation match what the PM planned and the user approved?
+**The flywheel:** rough workflow → friction → Lead discusses → improvement → user approves → smoother next thread.
 
-### The Review Loop
-
-```
-1. Coder finishes → SendMessage("reviewer", "PR ready: branch, key changes summary")
-2. Reviewer reads diff (git diff main...branch)
-3. Reviewer runs linters/tests if configured (Bash, read-only intent)
-4. If issues → SendMessage("coder", "issues: [list]") → Coder fixes → pushes → Reviewer re-reviews
-5. If disagreement on an issue → either escalates to Lead → Lead decides
-6. Reviewer approves → SendMessage("lead", "review done, N rounds, summary") → Lead activates
-```
-
-The Reviewer is thorough but not adversarial. It's a safety net, not a gatekeeper. It catches the things that slip through when the Coder is focused on making things work — the forgotten null check, the SQL injection in a query builder, the test that only covers the happy path.
-
-### Review Feedback Format
-
-The Reviewer sends structured feedback to the Coder via `SendMessage`:
-
-```
-Issues found in PR:
-1. [security] internal/tools/executor.go:47 — command string is interpolated
-   without sanitization, allows injection via user-supplied path
-2. [test] internal/slack/handler_test.go — missing test for message with
-   empty thread_ts (edge case that causes nil pointer)
-3. [quality] internal/daemon/daemon.go:120 — duplicated error handling block,
-   extract to helper
-```
-
-The Coder receives this, fixes, and signals completion. Max review rounds configurable (default: 3) — if still issues after 3 rounds, Reviewer summarizes remaining concerns in the PR and the Lead decides during retrospective.
-
-### Reviewer Configuration
-
-Uses Claude Sonnet (same tier as Lead — smart enough to spot issues, cheaper than Opus). Its system prompt comes from `reviewer.md` (personality + project map + learnings) + `global.md`. Over time, the Reviewer learns project-specific patterns: "this project always forgets to handle context cancellation" or "SQL queries here always need parameterized inputs."
-
-### Reviewer Learnings
-
-The Reviewer's MD evolves over time. The Lead appends learnings during retrospective based on what the Reviewer caught (and what it missed). Patterns accumulate: recurring issues become checklist items, project-specific conventions become review rules. All in one file — the same `reviewer.md` that is the system prompt.
+System prompt: `lead.md` + `global.md` + `workflows.md`. Turn budget configurable.
 
 ---
 
-## 13. Lead Architecture: Mediator + Retrospective
+## 8. Message Flow — Event-Driven Threads
 
-The Lead is the team's mediator. It runs at thread close (after PR creation, before merge) with the **full thread transcript**: user messages, PM planning + tool calls, Artist UI/UX designs + image results, Coder tool calls + outputs, Reviewer feedback, inter-agent messages, and the git diff. No other agent has this complete picture.
-
-### What the Lead Does
-
-**Phase 1 — Analysis** (solo): reads the full transcript, identifies friction points, wasted turns, missing context, escalation patterns. Produces draft proposals.
-
-**Phase 2 — Discussion** (multi-agent): the Lead @mentions each relevant agent and discusses what went wrong and what to improve. This is a real conversation — agents respond, explain their reasoning, suggest alternatives:
-
-```
-Lead → PM: "The Coder asked you 3 times about auth. Should we add an auth-check
-           step to the implement workflow?"
-PM → Lead: "I didn't know this project uses JWT. Add it to my memory too."
-Lead → Coder: "You spent 5 turns debugging a type mismatch. Would stricter
-              TypeScript config help?"
-Coder → Lead: "Yes, suggest enabling strict mode in coder.md."
-Lead → Reviewer: "You missed the unhandled error on line 47 that the user
-                  found manually. Add error-handling check to your patterns?"
-Reviewer → Lead: "Yes, add to reviewer.md: always check error returns in Go."
-Lead → User: "Here's what we learned: [proposals]"
-```
-
-The Lead mediates — its goal is the common good and continuous workflow improvement. It's not adversarial. If the PM says "I couldn't have known that," the Lead doesn't blame — it finds how to prevent it next time.
-
-**Phase 3 — Proposals** (to user): the Lead synthesizes the discussion into concrete proposals, grouped by type.
-
-### What the Lead Produces
-
-- **Thread summary** → PR description via `gh pr edit`
-- **Memory updates** → proposes updates to workflows.md, pm.md, reviewer.md, lead.md, artist.md, and suggests coder.md additions. All informed by the discussion with agents.
-- **Workflow evolution** → the Lead's most valuable output (see below)
-- **Thread usage report** → token/cost breakdown, tool call stats, summary of key exchanges (all already visible in thread), tips for better prompting
-- **Journal finalization** → close entry + cost table, committed to PR branch
-
-### Workflow Evolution
-
-The Lead reads the current `workflows.md`, compares it against what actually happened in the thread (including every inter-agent message), and proposes changes. Three types of proposals:
-
-**Add step to existing workflow** — "The Coder asked about database migrations. Add step 2.5 to `refactor` workflow: PM should check for pending migrations before proposing plan." (Confirmed with PM during discussion.)
-
-**Create new workflow** — "This thread was about setting up a new CI pipeline. No workflow matched. Proposed new workflow: `ci-setup` with steps: 1. PM: check current CI config... 2. Researcher: latest best practices for [platform]... 3. Coder: implement..." (Built collaboratively with PM and Coder during discussion.)
-
-**Automate a step** — "In the last 3 `feature` threads, the PM always messaged the Researcher about API rate limits. Make this automatic: when workflow is `feature` and plan mentions external API, always spawn Researcher for rate limit check." (PM confirmed this should be automatic.)
-
-The Lead presents these to the user. The user approves, edits, or rejects. Approved changes get committed to `workflows.md` on the PR branch and land on main with merge.
-
-**The flywheel:** rough workflow → thread runs → friction → Lead discusses with agents → proposes improvement → user approves → better workflow → smoother next thread. Each thread makes the team more efficient.
-
-### Lead Configuration
-
-The Lead uses Claude Sonnet (smart enough to analyze cross-role patterns and mediate discussions, cheaper than Opus). Its system prompt comes from `lead.md` (personality + project map + learnings) + `global.md` + `workflows.md`. The retrospective discussion has a configurable turn budget to control cost.
-
----
-
-## 13. Message Flow — Event-Driven Threads
-
-The v1 state machine (AccumulationWindow, ReplyWindow, convActive, pollLoop) is eliminated. Slack threads provide natural conversation boundaries.
+No state machine. Slack threads provide natural conversation boundaries.
 
 ### Thread Dispatch
 
-The daemon maintains a thread registry: `map[string]*ThreadWorker` mapping thread_ts to goroutine workers.
-
-**Main loop** (goroutine principal): receives all Slack events, extracts thread_ts, routes to existing worker or spawns new one. Main never processes messages — it only routes.
-
-**Thread worker** (goroutine per thread): receives messages via buffered channel (cap 100), processes sequentially. Each worker maintains its own Claude session. Workers are ephemeral — they die after 60s of inactivity (goroutines are cheap, ~2KB stack). On death, they notify the registry to remove themselves. Session ID persists in DB, so a new worker can `--resume` via the stored session.
-
-**Panic recovery**: each goroutine is wrapped with `defer recover()` so one thread crashing doesn't affect others or the main loop.
-
-### Message Flow Cases
-
-**Case 1 — New thread, no worker:** Main creates buffered channel, registers in map, spawns goroutine, sends message. Worker starts, waits 3s accumulation window for more messages, processes batch with PM/Coder, saves session ID.
-
-**Case 2 — Existing worker, idle:** Main sends to existing channel. Worker reads immediately, processes.
-
-**Case 3 — Existing worker, busy:** Main sends to channel. Message sits in buffer. When current processing finishes, worker reads pending message as follow-up.
-
-**Case 4 — Worker died, message arrives:** Main sees no entry in registry, creates new worker (Case 1). New worker loads session_id from DB for resume.
+Thread registry: `map[string]*ThreadWorker`. Main goroutine routes all Slack events to existing workers or spawns new ones. Workers are ephemeral (die after 60s inactivity, ~2KB stack). Session ID persists in SQLite for resume. Panic recovery per goroutine.
 
 ### Thread Phases
 
-The phase depends on the workflow. Implementation threads go through all five phases. Discovery and question threads may only use `pm` and `lead`.
+- **`pm`** — PM planning. If feature has UI → sends to Artist. Interviewing for discovery, answering questions
+- **`coder`** — Coder working in worktree. PM available for questions
+- **`review`** — Reviewer ↔ Coder feedback loop until approved
+- **`lead`** — Retrospective, learnings proposals. For discovery: roadmap
+- **`closed`** — PR merged, worktree cleaned
 
-- **`pm`** — PM talking to user, exploring codebase, planning. Also: PM interviewing for discovery, PM answering questions. If feature has UI → PM sends to Artist for UX design
-- **`coder`** — user approved plan, Coder working in worktree. Receives PM plan + Artist UI/UX design as input. PM stays available for Coder questions (inter-agent)
-- **`review`** — Coder finished, PR created. Reviewer reads diff, sends feedback, Coder fixes. Loop until approved
-- **`lead`** — thread closing, Lead runs retrospective. Discusses improvements with all agents. For discovery: Lead builds roadmap
-- **`closed`** — PR merged (or roadmap delivered), worktree cleaned, thread archived
+### Durability
 
-### Graceful Shutdown
-
-Main receives SIGINT/SIGTERM → closes all channels (goroutines detect closed channel and terminate) → waits for active workers with timeout → cancels in-flight LLM calls via context → flushes pending memory → closes SQLite → disconnects Slack.
-
-### Message Durability & Recovery
-
-Messages are persisted to SQLite before processing (acked=0). On restart, unacked messages are reprocessed. Session IDs in DB allow resume.
+Messages persisted to SQLite before processing. On restart, unacked messages reprocessed. Graceful shutdown: close channels → wait for workers → cancel API calls → flush → close DB → disconnect Slack.
 
 ---
 
-## 14. Features that Change
+## 9. Memory System
 
-### Agent Identity
-One Slack bot app, six agent identities: `@codebutler.pm`, `@codebutler.coder`, `@codebutler.reviewer`, `@codebutler.researcher`, `@codebutler.lead`, `@codebutler.artist`. Each agent posts with its own display name and icon. Inter-agent messages use @mentions — everything visible in the thread.
+### One File Per Agent = System Prompt + Memory
 
-### Reactions as Feedback
-- 👀 when processing starts
-- ✅ when done
+| File | What it holds | Who updates it |
+|------|--------------|---------------|
+| `pm.md` | Personality + rules. **Project map:** features, domains. **Learnings:** interview techniques, what Coder needs | Lead + user |
+| `coder.md` | Personality + rules. Tool defs, sandbox. **Project map:** architecture, patterns. **Learnings:** coding patterns | Lead + user |
+| `reviewer.md` | Personality + rules. Review checklist. **Project map:** quality hotspots. **Learnings:** recurring issues | Lead + user |
+| `lead.md` | Personality + rules. Retrospective structure. **Project map:** efficiency patterns. **Learnings:** mediation strategies | Lead + user |
+| `artist.md` | Personality + rules. Design guidelines. **Project map:** UI components, screens, design system. **Learnings:** what Coder needs | Lead + user |
+| `researcher.md` | Personality + rules. Search strategies. Stateless — no learnings | Rarely changes |
+| `global.md` | Shared project knowledge: architecture, tech stack, conventions, deployment | Lead + user |
+| `workflows.md` | Process playbook: step-by-step workflows per task type | Lead + user |
+| `artist/assets/` | Screenshots, mockups, visual references | Artist + Lead |
 
-### Threads = Sessions
-Each Slack thread IS a session (1:1). Thread → branch → PR (1:1:1). Multiple threads run concurrently. No global lock, no state machine.
+**Learnings only go where needed.** If the Reviewer didn't participate, its MD doesn't change. User approves what gets saved.
 
-### Code Snippets
-Short code (<20 lines) inline as Slack code blocks. Long code (≥20 lines) uploaded as file snippets with syntax highlighting.
+### workflows.md — Process Playbook
 
----
-
-## 15. Memory System
-
-### One File Per Agent — System Prompt IS the Memory
-
-There is no separation between "prompt" and "memory." Each agent's MD file in `<repo>/.codebutler/` is both. Seeded with defaults on first run, evolved with learnings after each PR — only for agents that need them.
-
-| File | What it holds | Who reads it | Who updates it |
-|------|--------------|-------------|---------------|
-| `pm.md` | **Personality + rules** (seeded). **Project map:** feature areas, domain models, stakeholder context. **Learnings:** how to interview effectively, what context the Coder needs, when to spawn Researcher | PM | Lead + user (only if needed) |
-| `coder.md` | **Personality + rules** (seeded). Tool definitions, sandbox restrictions, build/test commands. **Project map:** code architecture, key patterns, conventions. **Learnings:** project-specific coding patterns | Coder | Lead + user (only if needed) |
-| `reviewer.md` | **Personality + rules** (seeded). Review checklist, quality standards. **Project map:** quality hotspots, test coverage gaps. **Learnings:** recurring issues, how strict to be, interaction patterns with Coder | Reviewer | Lead + user (only if needed) |
-| `lead.md` | **Personality + rules** (seeded). Retrospective structure, mediation rules. **Project map:** team efficiency patterns. **Learnings:** mediation strategies that work, how to interact with each agent | Lead | Lead + user (only if needed) |
-| `artist.md` | **Personality + rules** (seeded). UI/UX design guidelines. **Project map:** existing UI components, design system, screens, color palette, typography, interaction conventions. **Learnings:** what detail level the Coder needs, when to follow patterns vs innovate | Artist | Lead + user (only if needed) |
-| `researcher.md` | **Personality + rules** (seeded). Web search strategies, structured output format. No project map, no learnings — stateless (each search is self-contained) | Researcher | Rarely changes |
-| `global.md` | Shared project knowledge for all agents: architecture decisions, tech stack, naming conventions, repo context, team conventions, interaction patterns, deployment patterns | All agents | Lead + user (only if needed) |
-| `workflows.md` | Process playbook: step-by-step workflows for each task type | PM (selects workflow), Lead (proposes changes) | Lead + user |
-| `artist/assets/` | Visual references: screenshots of current UI, mockups, design exports. Artist reads these to stay coherent with the existing product | Artist | Artist (during design), Lead (proposes additions) |
-
-**Each agent's MD has three sections:**
-
-1. **Personality + rules** — behavioral instructions, tool permissions, how to interact (seeded on first run, rarely changes unless user wants to tweak the agent's behavior)
-
-2. **Project map** — the project from that agent's perspective. The PM maps features and domains. The Coder maps architecture and code patterns. The Reviewer maps quality hotspots. The Artist maps every screen, component, and visual pattern. This is how agents stay coherent — the Artist never proposes a UX wildly different from what exists because its MD contains the current state of the UI
-
-3. **Behavioral learnings** — how to work better, interact with other agents, avoid past mistakes. Things like: "when the Coder asks about auth, always provide the full JWT flow" (PM), "this project always forgets context cancellation" (Reviewer), "the Coder prefers component specs with explicit props" (Artist). These come from the Lead's retrospective or direct user feedback
-
-**`global.md`** is the one file every agent reads. It holds architecture decisions, tech stack, naming conventions, coding standards, repo context, team conventions, deployment patterns. Seeded with defaults on first run, evolved by the Lead when project-wide decisions are made.
-
-**Learnings only go where needed.** After a PR closes, the Lead proposes learnings to specific agents — not all of them. If the Reviewer didn't participate, its MD doesn't change. If the Coder learned a new project pattern, only `coder.md` and maybe `global.md` get updated. The user approves what gets saved.
-
-### `workflows.md` — The Process Playbook
-
-Workflows are the team's learned process for each type of task. They live in their own file, separate from role memory, because they're cross-role — a workflow defines what the PM does, what the Researcher investigates, what the Coder builds, what the Lead checks.
-
-**Seeded on first run** with defaults:
+Seeded on first run:
 
 ```markdown
 ## implement
-The standard workflow. User requests a feature or change. PM interviews
-until fully defined, then Coder builds, Reviewer checks, Lead learns.
-
-1. PM: read message, classify as implement
-2. PM: interview user — ask clarifying questions until requirements are
-   unambiguous (acceptance criteria, edge cases, constraints)
-3. PM: explore codebase — find integration points, existing patterns,
-   related code (Read, Grep, Glob)
-4. PM: if unfamiliar tech/API → Researcher: docs, best practices, examples
-5. PM: if feature has UI/visual component → Artist: design UI/UX
-   (layouts, component structure, UX flows, interaction patterns).
-   Artist returns design proposal to PM
-6. PM: propose plan — file:line references, acceptance criteria, estimated
-   scope, Artist's UI/UX design (if applicable). Post to thread for
-   user review
-7. User: approve (or request changes → back to step 2)
-8. Coder: implement in worktree — receives PM plan + Artist design as
-   input prompt. Write code, write tests, run test suite
+1. PM: classify as implement
+2. PM: interview user (acceptance criteria, edge cases, constraints)
+3. PM: explore codebase (integration points, patterns)
+4. PM: if unfamiliar tech → Researcher: docs, best practices
+5. PM: if UI component → Artist: design UI/UX. Artist returns proposal
+6. PM: propose plan (file:line refs, Artist design if applicable)
+7. User: approve
+8. Coder: implement in worktree (PM plan + Artist design as input)
 9. Coder: create PR
-10. Reviewer: review diff — code quality, security, tests, plan compliance
-11. Reviewer: if issues → send feedback to Coder → Coder fixes → re-review
+10. Reviewer: review diff (quality, security, tests, plan compliance)
+11. Reviewer: if issues → Coder fixes → re-review
 12. Reviewer: approved
-13. Lead: retrospective — discuss with agents, propose workflow/memory updates
+13. Lead: retrospective (discuss with agents, propose learnings)
 14. User: approve learnings, merge
 
 ## discovery
-Multi-feature discussion. No code, no worktree, no PR. PM interviews the
-user to define specs. Lead produces a roadmap with ordered tasks.
+1. PM: classify as discovery
+2. PM: structured discussion (goals, constraints, priorities, user stories)
+3. PM: if needs external context → Researcher
+4. PM: if UI features → Artist: propose UX flows
+5. PM: produce proposals (summary, user story, criteria, Artist design, complexity, dependencies)
+6. User: approve proposals
+7. PM → Lead: hand off
+8. Lead: create roadmap (priority, dependencies, milestones)
+9. User: approve roadmap
+10. Lead: create GitHub issues or commit roadmap
+11. Lead: retrospective
 
-1. PM: read message, classify as discovery
-2. PM: lead structured discussion — ask about goals, constraints, priorities,
-   user stories. Iterate until user says "that's all"
-3. PM: for each feature discussed, if needs external context →
-   Researcher: market research, technical feasibility, API availability
-4. PM: for features with UI/visual component → Artist: propose
-   UX flows, layouts, interaction patterns. Artist output included
-   in the proposal
-5. PM: produce structured proposals — numbered list, each with:
-   summary, user story, acceptance criteria, Artist UI/UX design
-   (if applicable), estimated complexity, dependencies
-6. PM: present proposals to user for review/refinement
-7. User: approve final set of proposals
-8. PM → Lead: hand off proposals
-9. Lead: create roadmap — order proposals by priority and dependencies,
-   group into milestones if applicable. Consider: what blocks what,
-   what's highest value, what's quick wins vs big efforts
-10. Lead: present roadmap to user
-11. User: approve (or reorder/modify)
-12. Lead: create GitHub issues (one per task, labeled, ordered) or
-    commit roadmap document to repo — user decides format
-13. Lead: retrospective on discovery process — propose workflow improvements
-
-Each roadmap item becomes a future `implement` thread. Three ways to start:
-
-1. **User starts manually** — new Slack message: "implement task 3 from
-   the notifications roadmap". PM reads the GitHub issue, uses it as
-   starting spec, may skip some interview steps (already defined).
-
-2. **User says "start next"** — PM checks the roadmap, picks the next
-   unstarted task by priority, starts the implement workflow.
-
-3. **User says "start all"** — PM creates one thread per roadmap item
-   (respecting maxConcurrentThreads). Each runs independently with
-   its own worktree.
-
-The PM links back: when starting from a roadmap item, it references the
-discovery thread and GitHub issue in the plan. The Lead links forward:
-when closing an implement thread, it updates the roadmap issue as done.
+Each roadmap item → future implement thread. Start: manually, "start next", or "start all".
 
 ## bugfix
-1. PM: reproduce description, find relevant code (Read, Grep), identify
-   root cause hypothesis
-2. PM: if external API involved → Researcher: check known issues/changelogs
-3. PM: propose fix plan with file:line references
+1. PM: find relevant code, root cause hypothesis
+2. PM: if external API → Researcher
+3. PM: propose fix plan
 4. User: approve
-5. Coder: implement fix, add regression test, run test suite
-6. Coder: create PR
-7. Reviewer: review diff — verify fix is correct, no regressions introduced,
-   test covers the bug
-8. Reviewer: if issues → Coder fixes → re-review
-9. Lead: retrospective
+5. Coder: fix + regression test
+6. Reviewer: review → loop
+7. Lead: retrospective
 
 ## question
-No code, no worktree, no PR. PM answers directly.
-
 1. PM: explore codebase, answer directly
-2. PM: if needs external context → Researcher: search
-3. PM: respond to user
-4. (No Coder, no Reviewer, no Lead — unless user says "actually implement that")
+2. PM: if needs context → Researcher
+3. (No Coder, no Reviewer, no Lead — unless user escalates)
 
 ## refactor
-1. PM: analyze current code, identify scope and risk
-2. PM: propose refactor plan with before/after structure
-3. User: approve
-4. Coder: refactor, ensure all existing tests pass, add tests if needed
-5. Coder: create PR
-6. Reviewer: review diff — verify behavior preservation, no regressions,
-   improved structure
-7. Reviewer: if issues → Coder fixes → re-review
-8. Lead: retrospective
+1. PM: analyze code, propose before/after
+2. User: approve
+3. Coder: refactor, ensure tests pass
+4. Reviewer: review → loop
+5. Lead: retrospective
 ```
 
-**How the PM uses it:** When a message arrives, the PM classifies intent and selects the matching workflow. The workflow steps guide the PM's behavior — which tools to call, when to spawn the Researcher, what to include in the plan, what to tell the Coder. This is how the system gets more structured over time.
+### Memory Extraction (Lead)
 
-**How workflows evolve:** See section 15.5 — the Lead proposes workflow changes based on what it observes.
+After PR creation, Lead proposes updates routed to the right file:
+- Architecture decisions, shared conventions → `global.md`
+- Workflow refinements, new workflows, automations → `workflows.md`
+- Agent-specific learnings → the relevant agent's MD
+- New UI screenshots → `artist/assets/`
+- Coding conventions → `coder.md`
+
+**Project maps evolve:** when a thread adds a screen, changes an API, or introduces a pattern, the Lead updates the relevant agent's project map. User approves.
+
+### Learning Patterns
+
+**Message-driven:** Coder keeps asking PM about auth → Lead proposes workflow step for auth check → no question next time.
+
+**Inter-agent:** Each agent's MD accumulates how to work with other agents. PM learns what Coder needs. Artist learns what detail level Coder expects. Cross-cutting knowledge goes to `global.md`.
 
 ### Git Flow
 
-Memory files (including `workflows.md`) follow PR flow: after PR creation, the Lead extracts learnings → proposes in thread → user approves → committed to PR branch → lands on main with merge. Versioned, reviewable, branch-isolated, conflict-resolved by git.
-
-### Memory Extraction (Lead Role)
-
-After PR creation, the Lead analyzes the full thread transcript (user messages, PM planning, inter-agent messages, Coder tool calls, Artist outputs, git diff). It discusses improvements with each agent, then proposes updates routed to the right file:
-
-- Architecture decisions, tech stack changes, shared conventions → `global.md`
-- Workflow refinements (new steps, new workflows, automations) → `workflows.md`
-- Feature areas, domain knowledge, inter-agent coordination → `pm.md` (project map + knowledge)
-- Quality hotspots, review patterns, recurring issues → `reviewer.md` (project map + patterns)
-- Retrospective patterns, mediation patterns → `lead.md` (project map + patterns)
-- UI components, screens, design patterns, visual style → `artist.md` (project map + conventions)
-- New screenshots or mockups of implemented UI → `artist/assets/`
-- Coding conventions → suggested as tip for user to add to `coder.md`
-
-**Project map updates:** when a thread adds a new screen, changes an API, or introduces a pattern, the Lead updates the relevant agent's project map section. The Artist's project map stays current with every new UI component. The PM's project map grows with every new feature area. Over time, agents know the project intimately.
-
-User controls what gets remembered: "yes" saves all, "remove 3" skips item 3, "add: ..." adds custom learning, "no" discards all.
-
-### Message-Driven Learning
-
-Every inter-agent message is a learning signal. If the Coder keeps messaging the PM "what's the auth method?" for feature tasks, the Lead notices and proposes: "add step to `feature` workflow: PM should always check auth requirements before proposing plan." Over time, these questions decrease because the workflows get more complete.
-
-The pattern: **Coder question today → Lead discusses with PM → workflow improvement → no question next time.**
-
-### Inter-Role Learning
-
-Each agent's MD accumulates learnings about how to interact with other agents. The PM learns what context the Coder needs (e.g., "always mention test framework in plans"). The Artist learns what level of detail the Coder expects for component specs. The Reviewer learns when to push back vs accept pragmatic shortcuts. These learnings come from the Lead's retrospective or direct user corrections — and they go right into the agent's MD, alongside the personality and project map. Cross-cutting knowledge goes into `global.md`. Over time, agents form a well-coordinated team that knows the project intimately and knows how to work with each other.
+All MDs follow PR flow: Lead proposes → user approves → committed to PR branch → lands on main with merge. Git IS the knowledge transport.
 
 ---
 
-## 16. Thread Lifecycle & Resource Cleanup
+## 10. Thread Lifecycle
 
-### The Rule: 1 Thread = 1 Branch = 1 PR
+### 1 Thread = 1 Branch = 1 PR
 
-Non-negotiable. States: `created → working → pr_opened → reviewing → approved → merged (closed)`. Only the user closes a thread ("merge"/"done"/"dale"). No timeouts, no automatic close.
+Non-negotiable. Only the user closes a thread. No timeouts.
 
 ### After PR Creation
-- Coder adds thread URL to PR body, detects TODOs/FIXMEs, warns in thread
-- Coder → Reviewer: "PR ready" (agent-driven handoff)
-- Reviewer ↔ Coder: review loop until approved (escalate to Lead if disagreement)
-- Reviewer → Lead: "approved" (agent-driven handoff)
-- Lead: retrospective — discuss with agents, propose memory/workflow updates → user approves → commit to PR branch
+1. Coder → Reviewer: "PR ready" (agent-driven handoff)
+2. Reviewer ↔ Coder: review loop until approved
+3. Reviewer → Lead: "approved"
+4. Lead: retrospective, proposes learnings → user approves → commit to PR branch
 
 ### On User Close
-- Lead runs: generates PR summary → `gh pr edit`, finalizes journal, posts usage report with per-role improvement proposals
-- User approves memory updates → committed to PR branch
+- Lead: PR summary via `gh pr edit`, usage report, journal finalization
 - Merge PR (`gh pr merge --squash`)
 - Delete remote branch, remove worktree
 - Notify overlapping threads to rebase
 
-### Thread Usage Report (Lead)
+---
 
-Posted by the Lead at close. Shows: token/cost breakdown per agent, tool call stats, summary of key inter-agent exchanges (already visible in the thread, but condensed here), improvement proposals, and tips for better prompting. User can correct wrong PM answers → Lead updates memory immediately.
+## 11. Conflict Coordination
+
+**Detection:** file overlap, directory overlap, semantic overlap (PM analyzes). Checked at thread start and after each Coder response.
+
+**Merge order:** PM suggests smallest-first when multiple PRs touch overlapping files.
+
+**Post-merge:** PM notifies other active threads to rebase.
 
 ---
 
-## 17. Conflict Coordination
+## 12. Worktree Isolation
 
-### Detection
-
-Three levels: same file overlap, same directory overlap, semantic overlap (PM analyzes). Checked when new thread starts (PM predicts files from message) and after each Coder response (extract modified files from output).
-
-### Merge Order
-
-When multiple threads have open PRs touching overlapping files, PM suggests merge order (smallest first to minimize rebase work). Posts in channel.
-
-### Post-Merge Notifications
-
-When a PR merges, PM notifies other active threads that touch overlapping files to rebase.
-
----
-
-## 18. Worktree Isolation
-
-Each thread gets its own git worktree in `.codebutler/branches/<branchName>/`. Worktrees share `.git` with root repo — instant creation, minimal disk, full isolation. The Coder runs inside its worktree and has no idea other threads exist.
-
-Worktree is created only when user approves the plan (not during PM planning). Branch name: `codebutler/<slug>`.
-
-### Per-Platform Init
-
-Different project types need different initialization after worktree creation:
+Each thread gets a git worktree in `.codebutler/branches/<branchName>/`. Created only when user approves plan. Branch: `codebutler/<slug>`.
 
 | Platform | Init | Build Isolation |
 |----------|------|-----------------|
-| iOS/Xcode | `pod install` (if needed) | `-derivedDataPath .derivedData` |
+| iOS/Xcode | `pod install` | `-derivedDataPath .derivedData` |
 | Node.js | `npm ci` | `node_modules/` per worktree |
-| Go | Nothing | Module cache is global + safe |
+| Go | Nothing | Module cache is global |
 | Python | `venv + pip install` | `.venv/` per worktree |
 | Rust | Nothing | `CARGO_TARGET_DIR=.target` |
 
-Init overlaps with PM planning to hide latency. Resource profiles limit concurrent builds (e.g., only 1 Xcode build at a time).
+---
+
+## 13. Multi-Model Orchestration
+
+All via OpenRouter. PM has model pool with hot swap. Cost controls: per-thread cap, per-day cap, per-user hourly limit. Circuit breaker: 3x PM failure → fallback for 5 minutes.
 
 ---
 
-## 19. Multi-Model Orchestration via OpenRouter
-
-All LLM calls go through OpenRouter. Single API key, multiple models.
-
-### Cost Structure
-
-PM = brain (~$0.001/call), Researcher = web eyes (~$0.001/search), Coder = hands (~$0.10-1.00/call), Reviewer = quality gate (~$0.02-0.10/review), Lead = retrospective (~$0.01-0.05/thread), Artist = UI/UX designer + image gen (~$0.02-0.10/task for UX reasoning via Sonnet, ~$0.02/image for gen via OpenAI), Whisper = ears (~$0.006/min).
-
-### PM Model Pool + Hot Swap
-
-The PM role has a pool of models. Default is cheap (Kimi). Users switch mid-thread with `/pm claude` or `/pm kimi`. The new model gets full conversation history — nothing lost.
-
-Memory extraction is the Lead's job (Claude Sonnet). It's the most valuable output — learnings compound.
-
-### Cost Controls
-
-Per-thread cap, per-day cap, per-user hourly limit. When exceeded, PM warns and switches to default/cheapest model.
-
----
-
-## 20. Agent Interface
-
-One Go interface, shared by all agents:
+## 14. Agent Interface
 
 ```go
 type Agent interface {
-    Run(ctx context.Context, task Task) (Result, error)     // execute a task
-    Resume(ctx context.Context, id string) (Result, error)  // resume previous session
-    SendMessage(ctx context.Context, msg Message) error     // receive inter-agent message
-    Name() string                                            // agent identity
+    Run(ctx context.Context, task Task) (Result, error)
+    Resume(ctx context.Context, id string) (Result, error)
+    SendMessage(ctx context.Context, msg Message) error
+    Name() string
 }
 ```
 
-Each agent instance is the same `AgentRunner` struct parameterized by config (role, model, system prompt, memory, tool permissions). The runner implements the standard loop: load prompt → LLM call → tool use → execute → append → repeat.
-
-**Task** contains: what to do (plan, question, research query), context (relevant files, thread history), workflow step being executed.
-
-**Message** contains: from (sender agent), content (free-form text), waitForReply (sync vs async).
-
-**Result** contains: output text, tool calls made, tokens used, cost, session ID for resume.
-
-### Provider Implementation
-
-All agents use a shared OpenRouter client (HTTP, auth, rate limiting). The `AgentRunner` delegates LLM calls to the client with the configured model ID. Each instance runs its own agent loop: load system prompt → build messages → run tool-calling loop → handle SendMessage from other agents → track turns/tokens/cost → return result.
+Same `AgentRunner` struct parameterized by config. Shared OpenRouter client. Standard loop: load prompt → LLM call → tool use → execute → append → repeat.
 
 ---
 
-## 21. Coder Sandboxing
+## 15. Operational Details
 
-The Coder's system prompt (from `coder.md`) starts with restrictions:
+### Slack Features
+- Agent identity: one bot, six display names + icons
+- Reactions: 👀 processing, ✅ done
+- Threads = sessions (1:1). Multiple concurrent
+- Code snippets: <20 lines inline, ≥20 lines as file uploads
 
-- MUST NOT install software/packages/dependencies
-- MUST NOT leave the worktree directory
-- MUST NOT modify system files or env vars
-- MUST NOT run destructive commands (rm -rf, git push --force, DROP TABLE)
-- If a task requires any of the above, explain and STOP
+### Logging
+Structured tags: INF, WRN, ERR, DBG, MSG, PM, RSH, CLD, LED, IMG, RSP, MEM, AGT. Ring buffer + SSE for web dashboard.
 
-Allowed: `gh` (PRs, issues), `git` (on own branch only), project build/test tools.
+### Service Install
+macOS: LaunchAgent. Linux: systemd user service. CLI: `--install`, `--uninstall`, `--status`, `--logs`.
 
-Since CodeButler executes tools itself (not the LLM), it can enforce these restrictions at the tool execution layer — path validation, command filtering, etc. This is stronger than prompt-only sandboxing.
+### PR Description
+Lead generates summary at close via `gh pr edit`. Thread journal (`.codebutler/journals/thread-<ts>.md`) captures tool-level detail not visible in Slack.
 
----
-
-## 22. Logging
-
-Single structured log format with tags: INF, WRN, ERR, DBG, MSG (user message), PM (PM activity), RSH (Researcher activity), CLD (Coder activity), LED (Lead activity), IMG (image gen), RSP (response sent), MEM (memory ops), AGT (inter-agent message). Each line: timestamp + tag + thread ID + description.
-
-Ring buffer + SSE for web dashboard. No ANSI/TUI — everything plain.
-
----
-
-## 23. Service Install
-
-Run as system service. macOS: LaunchAgent plist. Linux: systemd user service. Both run in user session (access to tools, keychain, PATH). CLI flags: `--install`, `--uninstall`, `--status`, `--logs`. Each repo is an independent service with its own WorkingDirectory and log file.
-
----
-
-## 24. PR Description as Development Journal
-
-PR description IS the history. When the thread closes, the Lead generates a summary of the full thread and puts it in the PR body via `gh pr edit`.
-
-Format: Summary, Changes (bullet list), Decisions, Participants, Slack Thread link. Bidirectional: Slack → PR link, PR → Slack link.
-
-### Thread Journal
-
-Detailed narrative MD committed to PR branch (`.codebutler/journals/thread-<ts>.md`). Built incrementally as thread progresses. Records what tools agents used, files read/written, model switches, cost breakdown. Inter-agent conversation is already in the Slack thread (the source of truth) — the journal captures the tool-level detail that doesn't appear in Slack. Lands on main with merge.
-
----
-
-## 25. Knowledge Sharing via Memory + PR Merge
-
-Memory files follow git flow. Thread A's learnings land on main when its PR merges. Thread B (branched after merge) inherits them. Thread C (branched before merge) gets them on next rebase.
-
-No custom sync mechanism — git IS the knowledge transport. Isolation by default. Review gate (visible in PR diff). Audit trail (every learning is a commit).
-
----
-
-## 26. Error Recovery & Resilience
+### Error Recovery
 
 | Failure | Recovery |
 |---------|----------|
-| Slack disconnect | Auto-reconnect (slack-go SDK) |
-| Coder LLM call hangs | context.WithTimeout → kill, reply "timed out" |
-| Coder LLM call fails | Reply with error, session preserved for retry |
-| PM model unreachable | Try fallback model → if all fail, route to Coder directly |
-| SQLite locked | Busy timeout + retry with backoff |
-| Machine reboot | systemd/launchd restarts, unacked messages reprocessed |
+| Slack disconnect | Auto-reconnect (SDK) |
+| LLM call hangs | context.WithTimeout → kill |
+| LLM call fails | Error reply, session preserved |
+| PM unreachable | Fallback model → route to Coder |
+| SQLite locked | Busy timeout + backoff |
+| Machine reboot | Service restarts, unacked messages reprocessed |
 
-### Circuit Breaker
-If primary PM fails 3x in a row, switch to fallback for 5 minutes.
-
-### Graceful Shutdown
-SIGINT/SIGTERM → stop accepting messages → close channels → wait for active workers (with timeout) → cancel in-flight API calls → flush memory → close SQLite → disconnect Slack.
+### Access Control
+Channel membership = access. Optional: allowed users, max concurrent threads, hourly/daily limits.
 
 ---
 
-## 27. Access Control & Rate Limiting
-
-Channel membership IS access control. Optional restrictions: allowed users list, max concurrent threads, max calls per hour, max per user, daily cost ceiling.
-
-Four rate limiting layers: Slack API (platform-enforced, 1msg/s), concurrent Coder limit (configurable semaphore, depends on machine), per-user hourly limit, daily cost ceiling.
-
----
-
-## 28. Testing Strategy
+## 16. Testing Strategy
 
 | Package | What to Test |
 |---------|-------------|
-| `internal/slack/snippets.go` | Code block extraction, size-based routing |
-| `internal/tools/executor.go` | Tool execution, sandboxing, output limits |
-| `internal/tools/loop.go` | Tool-calling loop, iteration, truncation |
-| `internal/conflicts/tracker.go` | File overlap detection, merge ordering |
+| `internal/slack/snippets.go` | Code block extraction, routing |
+| `internal/tools/executor.go` | Execution, sandboxing, limits |
+| `internal/tools/loop.go` | Tool-calling loop, truncation |
+| `internal/conflicts/tracker.go` | Overlap detection, merge ordering |
 | `internal/github/github.go` | PR detection, merge polling |
-| `internal/provider/openrouter/` | API client, request/response mapping, error handling |
+| `internal/provider/openrouter/` | API client, error handling |
 | `internal/worktree/` | Create, init, remove, isolation |
 
-Integration tests with mock OpenRouter responses. End-to-end with real Slack workspace (manual).
+Integration: mock OpenRouter. E2E: real Slack (manual).
 
 ---
 
-## 29. Migration Path: v1 → v2
+## 17. Migration Path
 
-Phase 1: Slack client + basic messaging (replace WhatsApp)
-Phase 2: Thread dispatch + worktrees (replace state machine)
-Phase 3: OpenRouter integration + native agent loop (replace `claude -p`)
-Phase 4: PM tools + memory system
-Phase 5: Artist integration + image flow
-Phase 6: Conflict detection + merge coordination
+1. Slack client + messaging (replace WhatsApp)
+2. Thread dispatch + worktrees (replace state machine)
+3. OpenRouter + native agent loop (replace `claude -p`)
+4. PM tools + memory system
+5. Artist integration + image/UX flow
+6. Conflict detection + merge coordination
 
 ---
 
-## 30. Decisions Made
+## 18. Decisions
 
-- [x] Threads = Sessions (1:1 mapping)
-- [x] No state machine — event-driven thread dispatch
-- [x] Concurrent threads with goroutine-per-thread model
-- [x] **OpenRouter for all LLM calls** (no `claude -p` CLI dependency)
-- [x] **CodeButler owns all tools natively** (same as Claude Code + more)
-- [x] **One MD per agent = system prompt + memory** — seeded on first run, evolved with learnings after PRs (only if needed)
-- [x] **No separate prompts/ and memory/** — each agent's MD is the single source of truth for its behavior and knowledge
-- [x] **Per-agent MDs** (pm.md, researcher.md, coder.md, reviewer.md, lead.md, artist.md per repo)
-- [x] **No CLAUDE.md dependency** — CodeButler manages its own prompts
-- [x] **Multi-agent architecture** — one daemon binary, one instance per agent, parameterized by role
-- [x] **PM always on, others on-demand** — Coder/Reviewer/Researcher/Artist/Lead activate only when called
-- [x] **Reviewer agent** — code review loop after Coder, before Lead. Catches security/quality/test issues
-- [x] **Discovery workflow** — PM interviews user → Lead builds roadmap → each item becomes future implement thread
-- [x] **Thread is source of truth** — all inter-agent messages are Slack messages in the thread, visible in real-time
-- [x] **Agent identities** — `@codebutler.pm`, `@codebutler.coder`, `@codebutler.reviewer`, etc. One bot, six identities
-- [x] **Agent-driven flow** — agents pass work to each other via @mentions, daemon only routes
-- [x] **User outranks everyone** — can jump into any agent conversation, override any decision
-- [x] **Escalation hierarchy** — user > Lead > individual agents
-- [x] **Artist as UI/UX designer** — dual-model (Sonnet for UX reasoning, OpenAI for images). Designs layouts, UX flows, interaction patterns before Coder implements. Artist output + PM plan = Coder input
-- [x] **Multi-model agents** — agents can define multiple models in config (e.g., Artist has uxModel + imageModel)
-- [x] **Inter-agent communication** — agents @mention each other in the thread via SendMessage
-- [x] **Lead as mediator** — arbitrates agent disagreements, focused on common good + workflow improvement
-- [x] **Researcher agent** for web research on PM demand (WebSearch/WebFetch)
-- [x] **workflows.md** — standalone process playbook, separate from agent memory, evolved by Lead
-- [x] **Escalation-driven learning** — Coder questions today → workflow improvements tomorrow
-- [x] **global.md** — shared project knowledge for all agents (architecture, tech stack, conventions)
-- [x] **Project map per agent** — each agent's MD has a project map from its perspective + behavioral learnings
-- [x] **Artist visual memory** — `artist/assets/` folder with screenshots, mockups, design references
-- [x] Per-agent memory files (global.md, workflows.md, pm.md, lead.md, artist.md) with git flow
-- [x] Per-repo config committed to git (models per role, channel, limits)
-- [x] PM model pool with hot swap (`/pm claude`, `/pm kimi`)
-- [x] **Lead role** for thread retrospective (summary, memory, per-role improvements)
-- [x] Memory extraction by Lead (full thread visibility, not PM)
+- [x] Multi-agent architecture — one binary, one instance per agent, parameterized by role
+- [x] PM always on, others on-demand
+- [x] One MD per agent = system prompt + project map + learnings (seeded on first run, evolved by Lead)
+- [x] `global.md` — shared project knowledge for all agents
+- [x] `workflows.md` — process playbook, evolved by Lead
+- [x] OpenRouter for all LLM calls (no CLI dependency)
+- [x] Native tools in Go (same as Claude Code + more)
+- [x] Artist as UI/UX designer — dual-model (Sonnet for UX, OpenAI for images). Artist output + PM plan = Coder input
+- [x] Reviewer agent — code review loop after Coder, before Lead
+- [x] Thread is source of truth — all inter-agent messages visible in Slack thread
+- [x] Agent identities — `@codebutler.pm`, `@codebutler.coder`, etc. One bot, six identities
+- [x] Agent-driven flow — agents pass work via @mentions, daemon only routes
+- [x] Escalation hierarchy — user > Lead > individual agents
+- [x] Discovery workflow — PM interviews → Artist designs → Lead builds roadmap → GitHub issues
+- [x] Escalation-driven learning — questions today → workflow improvements tomorrow
+- [x] Project map per agent — each knows the project from its perspective
+- [x] Artist visual memory — `artist/assets/` for screenshots, mockups
 - [x] Thread = Branch = PR (1:1:1, non-negotiable)
 - [x] User closes thread explicitly (no timeouts)
-- [x] Worktree isolation (one per thread)
-- [x] Thread journal (incremental narrative, committed to PR branch)
-- [x] Thread usage report with "behind the scenes" transparency
-- [x] Conflict detection + merge order suggestions
-- [x] `gh` CLI for all GitHub operations
-- [x] Buffered channels (cap 100) for non-blocking main loop
-- [x] Goroutine panic recovery (defer recover in worker wrapper)
-- [x] 60s inactivity timeout for worker goroutines (ephemeral, ~2KB stack)
+- [x] Worktree isolation, per-platform init
+- [x] Git flow for all MDs — learnings land on main with merge
+- [x] PM model pool with hot swap
+- [x] `gh` CLI for GitHub operations
+- [x] Goroutine-per-thread, buffered channels, panic recovery
 
 ---
 
-## 31. v1 vs v2 Comparison
+## 19. v1 vs v2
 
 | Aspect | v1 (WhatsApp) | v2 (Slack + OpenRouter) |
 |--------|---------------|------------------------|
 | Platform | WhatsApp (whatsmeow) | Slack (Socket Mode) |
-| LLM execution | `claude -p` subprocess | OpenRouter API (native agent loop) |
-| Tools | Delegated to Claude Code | Owned by CodeButler (Read, Write, Edit, Bash, etc.) |
-| System prompts | CLAUDE.md | Per-agent MDs (pm.md, coder.md, reviewer.md, lead.md, artist.md, researcher.md + global.md, workflows.md) — each MD = prompt + memory |
-| Parallelism | 1 conversation at a time | N concurrent threads (goroutine per thread) |
-| State machine | ~300 lines, 4 states, 3 timers | None (event-driven dispatch) |
-| Goroutines | 1 (poll loop, permanent) | N (ephemeral, one per active thread) |
-| Isolation | Shared directory | Git worktrees (1 per thread) |
-| Session key | Chat JID | thread_ts |
-| Agents | 1 (Claude) | 6 (PM, Researcher, Coder, Reviewer, Lead, Artist/Designer) — same binary, parameterized |
-| Communication | N/A (single model) | Inter-agent messaging (SendMessage) |
-| Config | Flat file, gitignored | Global (secrets) + per-repo (committed to git) |
-| Memory | None | Per-agent, git flow, Lead-extracted, user-approved |
-| Knowledge sharing | Local CLAUDE.md | Memory files via PR merge |
-| UX | Flat chat, `[BOT]` prefix | Structured threads, native bot identity |
+| LLM execution | `claude -p` subprocess | OpenRouter API (native loop) |
+| Tools | Delegated to Claude Code | Owned by CodeButler |
+| System prompts | CLAUDE.md | Per-agent MDs (= prompt + memory) + global.md + workflows.md |
+| Parallelism | 1 conversation | N concurrent threads |
+| State machine | ~300 lines, 4 states | None (event-driven) |
+| Isolation | Shared directory | Git worktrees |
+| Agents | 1 (Claude) | 6 (PM, Researcher, Artist, Coder, Reviewer, Lead) |
+| Communication | N/A | Inter-agent messaging in thread |
+| Memory | None | Per-agent, git flow, Lead-extracted |
 | Team support | Single user | Multi-user native |
-| Authentication | QR code + phone linking | Bot token (one-time setup) |
 | Code complexity | ~630 lines daemon.go | ~200 lines estimated |
