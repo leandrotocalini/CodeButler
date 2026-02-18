@@ -31,7 +31,7 @@ codebutler --role artist      # always running, listens for @codebutler.artist
 
 **Communication between agents is 100% via Slack messages.** No IPC, no RPC, no shared memory. When PM needs Coder, it posts `@codebutler.coder implement...` in the thread. The Coder process picks it up from its Slack listener. Same for all agent-to-agent communication.
 
-**Shared state:** all processes read/write the same SQLite DB (with busy timeout + WAL mode for concurrent access). Session IDs, messages, and ack state are shared.
+**No shared database.** The Slack thread IS the state. Each agent reads thread history via `conversations.replies` to get context. OpenRouter is stateless (full message history sent on every call, no session ID). On restart, agents read active threads from Slack and find unprocessed @mentions. No SQLite needed.
 
 Same agent loop in every process (system prompt → LLM call → tool use → execute → append → repeat), different parameters:
 - **System prompt** — from `<role>.md` + `global.md`. One file per agent that IS the system prompt and evolves with learnings
@@ -148,7 +148,6 @@ All LLM calls route through OpenRouter. Agents needing multiple models define th
 ```
 <repo>/.codebutler/
   config.json                    # Per-repo settings (committed)
-  store.db                       # SQLite: messages + sessions (gitignored)
   # Agent MDs — each is system prompt + project map + learnings
   pm.md                          # PM agent
   coder.md                       # Coder agent
@@ -162,12 +161,11 @@ All LLM calls route through OpenRouter. Agents needing multiple models define th
     assets/                      # Screenshots, mockups, visual references
   branches/                      # Git worktrees, 1 per active thread (gitignored)
   images/                        # Generated images (gitignored)
-  journals/                      # Thread narratives (gitignored)
 ```
 
-**Committed to git:** `config.json`, all `.md` files, `artist/assets/`. **Gitignored:** `store.db`, `branches/`, `images/`, `journals/`.
+**Committed to git:** `config.json`, all `.md` files, `artist/assets/`. **Gitignored:** `branches/`, `images/`.
 
-SQLite: `sessions` (thread_ts → session_id) and `messages` (thread_ts, from_user, content, acked).
+**No database.** The Slack thread is the source of truth. Each agent reads thread history from Slack API (`conversations.replies`). OpenRouter is stateless — full message history sent on every call. On restart, agents scan active threads for unprocessed @mentions.
 
 ---
 
@@ -195,7 +193,9 @@ SQLite: `sessions` (thread_ts → session_id) and `messages` (thread_ts, from_us
 - `internal/conflicts/` — tracker, notify
 - `internal/worktree/` — worktree, init (per-platform)
 
-**Modify:** `cmd/codebutler/main.go`, `internal/config/`, `internal/daemon/daemon.go`, `internal/store/`
+**Modify:** `cmd/codebutler/main.go`, `internal/config/`, `internal/daemon/daemon.go`
+
+**Delete:** `internal/store/` (SQLite no longer needed — Slack is the persistence layer)
 
 ---
 
@@ -324,7 +324,7 @@ Every agent process runs the same event loop:
 
 Each process has its own thread registry (`map[string]*ThreadWorker`). The PM process has goroutines for every active thread. The Coder process has goroutines only for threads where it's been @mentioned. And so on.
 
-**Thread goroutines are ephemeral** — die after 60s of inactivity (~2KB stack). Session ID persists in SQLite for resume. Panic recovery per goroutine.
+**Thread goroutines are ephemeral** — die after 60s of inactivity (~2KB stack). On next @mention, a new goroutine reads the thread from Slack to rebuild context. Panic recovery per goroutine.
 
 ### How a Task Flows Between Processes
 
@@ -358,9 +358,12 @@ Every step is a Slack message. Every process listens independently. No process o
 
 ### Durability
 
-All processes share one SQLite DB (WAL mode for concurrent access). Messages persisted before processing (acked=0). On process restart, unacked messages reprocessed. Session IDs in DB allow any agent to resume its context.
+**Slack is the persistence layer.** No local database. On process restart, each agent:
+1. Reads active threads from Slack (`conversations.history` for channel, `conversations.replies` for threads)
+2. Finds @mentions directed at it that it hasn't responded to
+3. Spawns goroutines to process them
 
-Graceful shutdown per process: close Slack connection → wait for active goroutines → cancel in-flight API calls → close DB handle.
+Graceful shutdown per process: close Slack connection → wait for active goroutines → cancel in-flight API calls.
 
 ---
 
@@ -567,13 +570,12 @@ Each process is independent — one crash doesn't affect others.
 
 | Failure | Recovery |
 |---------|----------|
-| Agent process crashes | Service restarts it. Unacked messages in SQLite reprocessed. Session ID preserved for resume |
+| Agent process crashes | Service restarts it. Reads active threads from Slack, processes unresponded @mentions |
 | Slack disconnect | Auto-reconnect per process (SDK handles) |
 | LLM call hangs | context.WithTimeout per goroutine → kill, reply error in thread |
 | LLM call fails | Error reply in thread, session preserved for retry |
-| SQLite contention | WAL mode + busy timeout + backoff (6 processes sharing one DB) |
-| Agent not running | @mention sits in thread. When agent starts, it processes pending messages |
-| Machine reboot | All 6 services restart, each reprocesses its unacked messages |
+| Agent not running | @mention sits in thread. When agent starts, it reads thread and processes |
+| Machine reboot | All 6 services restart, each reads active threads from Slack |
 
 ### Access Control
 Channel membership = access. Optional: allowed users, max concurrent threads, hourly/daily limits.
@@ -611,7 +613,8 @@ Integration: mock OpenRouter. E2E: real Slack (manual).
 
 - [x] **Separate OS processes** — one per agent, each with its own Slack listener, goroutines per thread
 - [x] **Communication 100% via Slack** — no IPC, no RPC. Tasks are @mentions in the thread
-- [x] **Shared SQLite (WAL mode)** — all processes read/write same DB for session/message state
+- [x] **No database** — Slack thread is the source of truth. No SQLite. OpenRouter is stateless
+- [x] **OpenAI-compatible tool calling** — OpenRouter normalizes all models to OpenAI tool calling format
 - [x] **Each agent executes tools locally** — no RPC to a central executor
 - [x] **All agents always running** — idle until @mentioned, pick up pending messages on restart
 - [x] Multi-agent architecture — one binary, parameterized by `--role`
