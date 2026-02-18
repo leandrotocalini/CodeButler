@@ -18,7 +18,7 @@ codebutler --role coder       # activates only when PM sends it a task
 codebutler --role reviewer    # activates after Coder finishes, reviews the diff
 codebutler --role researcher  # activates only when PM requests research
 codebutler --role lead        # activates at thread close
-codebutler --role artist      # activates only when image is requested
+codebutler --role artist      # activates for UI/UX design or image generation
 ```
 
 Same code, same agent loop (system prompt → LLM call → tool use → execute tool → append result → repeat), different parameters:
@@ -38,18 +38,18 @@ Same code, same agent loop (system prompt → LLM call → tool use → execute 
 |-------|-------------|-------|-------------|------|
 | **PM** | Plans, explores codebase, orchestrates, talks to user | Kimi / GPT-4o-mini / Claude (swappable via OpenRouter) | Never | ~$0.001/msg |
 | **Researcher** | Subagent: web research on demand (spawned, returns, dies) | Cheap model via OpenRouter (same tier as PM) | Never | ~$0.001/search |
-| **Artist** | Generates and edits images | OpenAI gpt-image-1 | Never | ~$0.02/img |
+| **Artist** | UI/UX designer: proposes layouts, component structure, UX flows, interaction patterns. Also generates and edits images | Claude Sonnet via OpenRouter (UX reasoning) + OpenAI gpt-image-1 (image gen) | Never | ~$0.02-0.10/task |
 | **Coder** | Writes code, runs tests, creates PRs | Claude Opus 4.6 via OpenRouter | Always | ~$0.30-2.00/task |
 | **Reviewer** | Code review: reads diff, checks quality/security/tests, sends feedback to Coder | Claude Sonnet via OpenRouter | Never | ~$0.02-0.10/review |
 | **Lead** | Thread retrospective: mediates discussion, evolves workflows | Claude Sonnet via OpenRouter | Never | ~$0.01-0.05/thread |
 
-All agents run the same Go code with the same tool set (Read, Write, Edit, Bash, Grep, Glob, WebSearch, WebFetch, etc.) — the restriction is behavioral via system prompts, not structural. The PM's prompt says "explore code, delegate web research," the Researcher's says "search the web, return structured findings," the Coder's says "do whatever it takes." Separation of powers: the PM explores code + orchestrates, the Researcher searches the web, the Coder writes code, the Lead reviews and mediates, only the user approves.
+All agents run the same Go code with the same tool set (Read, Write, Edit, Bash, Grep, Glob, WebSearch, WebFetch, etc.) — the restriction is behavioral via system prompts, not structural. The PM's prompt says "explore code, delegate web research," the Researcher's says "search the web, return structured findings," the Artist's says "design UI/UX, propose layouts and interaction patterns," the Coder's says "do whatever it takes." Separation of powers: the PM explores code + orchestrates, the Researcher searches the web, the Artist designs UI/UX, the Coder writes code, the Reviewer checks quality, the Lead reviews and mediates, only the user approves.
 
 ### 1.3 What Makes It a Multi-Agent System
 
 Agents are not isolated workers — they communicate. The PM sends a task to the Coder. The Coder asks the PM for missing context. The Lead talks to each agent about what to improve. They can discuss, disagree, and reach consensus — with the Lead mediating and the user having final say.
 
-CodeButler receives a message and then: the PM classifies intent, selects a workflow from `workflows.md`, follows the workflow steps (interviewing the user, exploring codebase, messaging the Researcher for web research), detects conflicts with other active threads, proposes a plan with file:line references, waits for user approval, creates an isolated git worktree, messages the Coder with plan + context, routes Coder questions back to the PM, detects PR creation, activates the Reviewer who reviews the diff and sends feedback to the Coder until satisfied, activates the Lead who leads a retrospective discussion with all agents (workflow evolution proposals — user approves), merges PR, cleans up worktree, closes thread. For discovery threads: PM interviews the user, then hands off to the Lead who produces a roadmap.
+CodeButler receives a message and then: the PM classifies intent, selects a workflow from `workflows.md`, follows the workflow steps (interviewing the user, exploring codebase, messaging the Researcher for web research), detects conflicts with other active threads, if the feature has a UI component sends requirements to the Artist for UI/UX design (layouts, component structure, UX flows), proposes a plan with file:line references + Artist design, waits for user approval, creates an isolated git worktree, messages the Coder with plan + Artist design as input, routes Coder questions back to the PM, detects PR creation, activates the Reviewer who reviews the diff and sends feedback to the Coder until satisfied, activates the Lead who leads a retrospective discussion with all agents (workflow evolution proposals — user approves), merges PR, cleans up worktree, closes thread. For discovery threads: PM interviews the user, Artist designs UX for visual features, then hands off to the Lead who produces a roadmap.
 
 ### 1.4 Architecture: OpenRouter + Native Tools (No CLI Dependencies)
 
@@ -60,7 +60,7 @@ CodeButler receives a message and then: the PM classifies intent, selects a work
 - **Coder agent**: Claude Opus 4.6 via OpenRouter API. Full tool set (Read, Write, Edit, Bash, Grep, Glob, etc.) implemented natively in Go. Can message the PM when it needs more context.
 - **Reviewer agent**: Claude Sonnet via OpenRouter. Activates after Coder finishes. Reads the diff, checks code quality/security/tests, sends feedback to Coder. Review loop until satisfied.
 - **Lead agent**: Claude Sonnet via OpenRouter. Runs at thread close. Messages other agents to discuss improvements, then presents proposals to user.
-- **Artist agent**: OpenAI gpt-image-1 API directly (not via OpenRouter).
+- **Artist agent**: Dual-model. Claude Sonnet via OpenRouter for UI/UX reasoning (layouts, component structure, UX flows, interaction patterns). OpenAI gpt-image-1 API directly for image generation/editing. Activates when PM sends it a feature to design or when images are needed. Its UI/UX output becomes part of the Coder's task prompt.
 
 This means CodeButler has **zero dependency on Claude Code CLI**. It IS its own Claude Code — with the same tools, same capabilities, plus Slack integration, inter-agent communication, memory, and multi-agent orchestration.
 
@@ -177,13 +177,17 @@ Two levels. Global holds secrets (tokens, API keys). Per-repo holds project-spec
     "researcher": { "model": "moonshotai/kimi-k2" },
     "coder": { "model": "anthropic/claude-opus-4-6" },
     "reviewer": { "model": "anthropic/claude-sonnet-4-5-20250929" },
-    "lead": { "model": "anthropic/claude-sonnet-4-5-20250929" }
+    "lead": { "model": "anthropic/claude-sonnet-4-5-20250929" },
+    "artist": {
+      "uxModel": "anthropic/claude-sonnet-4-5-20250929",
+      "imageModel": "openai/gpt-image-1"
+    }
   },
   "limits": { "maxConcurrentThreads": 3, "maxCallsPerHour": 100 }
 }
 ```
 
-All LLM calls (PM, Researcher, Coder, Lead) route through OpenRouter using the global API key. Model fields use OpenRouter model IDs. Artist uses OpenAI directly (image gen not available via OpenRouter). The PM has a model pool for hot swap (`/pm claude`, `/pm kimi`); other roles have a single model each.
+All LLM calls (PM, Researcher, Coder, Reviewer, Lead, Artist) route through OpenRouter using the global API key. Model fields use OpenRouter model IDs. Agents that need more than one model define them explicitly in config (e.g., Artist has `uxModel` for UI/UX reasoning via OpenRouter + `imageModel` for image generation via OpenAI directly). The PM has a model pool for hot swap (`/pm claude`, `/pm kimi`); other roles have a single model each (or multiple named models if needed).
 
 ---
 
@@ -247,7 +251,7 @@ CodeButler implements ALL the tools Claude Code has, natively in Go. **All roles
 
 **CodeButler-specific tools:** SlackNotify (post to thread), ReadMemory (access agent memory), ListThreads (see active threads), GenerateImage / EditImage (Artist-specific).
 
-Each agent's system prompt defines which tools to use and how. The PM uses Read, Grep, Glob, GitLog for codebase exploration and Research for web queries. The Researcher uses WebSearch + WebFetch exclusively. The Coder uses all tools freely to implement. The Artist adds image generation tools. But technically any agent could use any tool — the restriction is behavioral, not structural. This keeps the architecture simple (one tool executor, shared by all agents) and allows future flexibility.
+Each agent's system prompt defines which tools to use and how. The PM uses Read, Grep, Glob, GitLog for codebase exploration and Research for web queries. The Researcher uses WebSearch + WebFetch exclusively. The Coder uses all tools freely to implement. The Artist uses its UX model for design reasoning and its image model for generation. But technically any agent could use any tool — the restriction is behavioral, not structural. This keeps the architecture simple (one tool executor, shared by all agents) and allows future flexibility.
 
 ### Tool Execution Safety
 
@@ -307,6 +311,22 @@ If they can't agree, either one @mentions the Lead:
 @codebutler.lead: @codebutler.coder extend the existing table, PM agrees
 ```
 
+**PM → Artist** — PM sends the feature to the Artist for UI/UX design:
+
+```
+@codebutler.pm: @codebutler.artist feature: notification settings page.
+  requirements: user can toggle per-channel notifications, set quiet
+  hours, preview notification style. existing UI uses shadcn/ui + tailwind
+@codebutler.artist: @codebutler.pm here's my UX proposal:
+  - layout: settings page with tabbed sections (channels, schedule, preview)
+  - channel toggles: grouped by category with bulk on/off
+  - quiet hours: time range picker with timezone display
+  - preview: live notification mock that updates as user changes settings
+  - interaction: changes auto-save with subtle toast confirmation
+  - mobile: tabs collapse to accordion, time picker uses native input
+@codebutler.pm: (incorporates Artist's design into the plan for the Coder)
+```
+
 **Coder → Reviewer** — Coder initiates the review when it's done:
 
 ```
@@ -363,7 +383,7 @@ User (final authority)
         ├── Coder (builder)
         ├── Reviewer (quality gate)
         ├── Researcher (web knowledge)
-        └── Artist (images)
+        └── Artist (UI/UX design + images)
 ```
 
 If the user says "use REST, not GraphQL" mid-conversation between PM and Coder, both agents adapt immediately. No escalation needed — the user IS the escalation.
@@ -465,7 +485,7 @@ The Reviewer has its own memory file. The Lead updates it during retrospective b
 
 ## 13. Lead Architecture: Mediator + Retrospective
 
-The Lead is the team's mediator. It runs at thread close (after PR creation, before merge) with the **full thread transcript**: user messages, PM planning + tool calls, Coder tool calls + outputs, inter-agent messages, Artist requests + results, and the git diff. No other agent has this complete picture.
+The Lead is the team's mediator. It runs at thread close (after PR creation, before merge) with the **full thread transcript**: user messages, PM planning + tool calls, Artist UI/UX designs + image results, Coder tool calls + outputs, Reviewer feedback, inter-agent messages, and the git diff. No other agent has this complete picture.
 
 ### What the Lead Does
 
@@ -546,8 +566,8 @@ The daemon maintains a thread registry: `map[string]*ThreadWorker` mapping threa
 
 The phase depends on the workflow. Implementation threads go through all five phases. Discovery and question threads may only use `pm` and `lead`.
 
-- **`pm`** — PM talking to user, exploring codebase, planning. Also: PM interviewing for discovery, PM answering questions
-- **`coder`** — user approved plan, Coder working in worktree. PM stays available for Coder questions (inter-agent)
+- **`pm`** — PM talking to user, exploring codebase, planning. Also: PM interviewing for discovery, PM answering questions. If feature has UI → PM sends to Artist for UX design
+- **`coder`** — user approved plan, Coder working in worktree. Receives PM plan + Artist UI/UX design as input. PM stays available for Coder questions (inter-agent)
 - **`review`** — Coder finished, PR created. Reviewer reads diff, sends feedback, Coder fixes. Loop until approved
 - **`lead`** — thread closing, Lead runs retrospective. Discusses improvements with all agents. For discovery: Lead builds roadmap
 - **`closed`** — PR merged (or roadmap delivered), worktree cleaned, thread archived
@@ -591,7 +611,7 @@ Five memory files, all in `memory/`:
 | `pm.md` | Project knowledge, planning notes, inter-agent coordination tips | PM | Lead (via user approval) |
 | `reviewer.md` | Code review patterns, recurring issues, project-specific quality rules | Reviewer | Lead (via user approval) |
 | `lead.md` | Retrospective patterns, what makes threads efficient, mediation patterns | Lead | Lead (via user approval) |
-| `artist.md` | Style preferences, colors, icon conventions, dimension defaults | Artist | Lead (via user approval) |
+| `artist.md` | UI/UX patterns, component conventions, layout preferences, interaction patterns, style guide, colors, icon conventions, dimension defaults | Artist | Lead (via user approval) |
 
 The Coder and Researcher don't have memory files — the Coder's knowledge goes into `coder.md` (the system prompt) which users maintain, the Researcher is stateless. The Lead suggests `coder.md` additions during retrospective.
 
@@ -612,16 +632,21 @@ until fully defined, then Coder builds, Reviewer checks, Lead learns.
 3. PM: explore codebase — find integration points, existing patterns,
    related code (Read, Grep, Glob)
 4. PM: if unfamiliar tech/API → Researcher: docs, best practices, examples
-5. PM: propose plan — file:line references, acceptance criteria, estimated
-   scope. Post to thread for user review
-6. User: approve (or request changes → back to step 2)
-7. Coder: implement in worktree — write code, write tests, run test suite
-8. Coder: create PR
-9. Reviewer: review diff — code quality, security, tests, plan compliance
-10. Reviewer: if issues → send feedback to Coder → Coder fixes → re-review
-11. Reviewer: approved
-12. Lead: retrospective — discuss with agents, propose workflow/memory updates
-13. User: approve learnings, merge
+5. PM: if feature has UI/visual component → Artist: design UI/UX
+   (layouts, component structure, UX flows, interaction patterns).
+   Artist returns design proposal to PM
+6. PM: propose plan — file:line references, acceptance criteria, estimated
+   scope, Artist's UI/UX design (if applicable). Post to thread for
+   user review
+7. User: approve (or request changes → back to step 2)
+8. Coder: implement in worktree — receives PM plan + Artist design as
+   input prompt. Write code, write tests, run test suite
+9. Coder: create PR
+10. Reviewer: review diff — code quality, security, tests, plan compliance
+11. Reviewer: if issues → send feedback to Coder → Coder fixes → re-review
+12. Reviewer: approved
+13. Lead: retrospective — discuss with agents, propose workflow/memory updates
+14. User: approve learnings, merge
 
 ## discovery
 Multi-feature discussion. No code, no worktree, no PR. PM interviews the
@@ -632,19 +657,23 @@ user to define specs. Lead produces a roadmap with ordered tasks.
    user stories. Iterate until user says "that's all"
 3. PM: for each feature discussed, if needs external context →
    Researcher: market research, technical feasibility, API availability
-4. PM: produce structured proposals — numbered list, each with:
-   summary, user story, acceptance criteria, estimated complexity, dependencies
-5. PM: present proposals to user for review/refinement
-6. User: approve final set of proposals
-7. PM → Lead: hand off proposals
-8. Lead: create roadmap — order proposals by priority and dependencies,
+4. PM: for features with UI/visual component → Artist: propose
+   UX flows, layouts, interaction patterns. Artist output included
+   in the proposal
+5. PM: produce structured proposals — numbered list, each with:
+   summary, user story, acceptance criteria, Artist UI/UX design
+   (if applicable), estimated complexity, dependencies
+6. PM: present proposals to user for review/refinement
+7. User: approve final set of proposals
+8. PM → Lead: hand off proposals
+9. Lead: create roadmap — order proposals by priority and dependencies,
    group into milestones if applicable. Consider: what blocks what,
    what's highest value, what's quick wins vs big efforts
-9. Lead: present roadmap to user
-10. User: approve (or reorder/modify)
-11. Lead: create GitHub issues (one per task, labeled, ordered) or
+10. Lead: present roadmap to user
+11. User: approve (or reorder/modify)
+12. Lead: create GitHub issues (one per task, labeled, ordered) or
     commit roadmap document to repo — user decides format
-12. Lead: retrospective on discovery process — propose workflow improvements
+13. Lead: retrospective on discovery process — propose workflow improvements
 
 Each roadmap item becomes a future `implement` thread. Three ways to start:
 
@@ -712,7 +741,7 @@ After PR creation, the Lead analyzes the full thread transcript (user messages, 
 - Project knowledge, inter-agent coordination → `pm.md`
 - Code review patterns, recurring issues → `reviewer.md`
 - Retrospective patterns, mediation patterns → `lead.md`
-- Visual style, colors, icon conventions → `artist.md`
+- UI/UX patterns, component conventions, visual style, colors → `artist.md`
 - Coding conventions → suggested as tip for user to add to `coder.md`
 
 User controls what gets remembered: "yes" saves all, "remove 3" skips item 3, "add: ..." adds custom learning, "no" discards all.
@@ -799,7 +828,7 @@ All LLM calls go through OpenRouter. Single API key, multiple models.
 
 ### Cost Structure
 
-PM = brain (~$0.001/call), Researcher = web eyes (~$0.001/search), Coder = hands (~$0.10-1.00/call), Reviewer = quality gate (~$0.02-0.10/review), Lead = retrospective (~$0.01-0.05/thread), Artist = image eyes (~$0.02/image), Whisper = ears (~$0.006/min).
+PM = brain (~$0.001/call), Researcher = web eyes (~$0.001/search), Coder = hands (~$0.10-1.00/call), Reviewer = quality gate (~$0.02-0.10/review), Lead = retrospective (~$0.01-0.05/thread), Artist = UI/UX designer + image gen (~$0.02-0.10/task for UX reasoning via Sonnet, ~$0.02/image for gen via OpenAI), Whisper = ears (~$0.006/min).
 
 ### PM Model Pool + Hot Swap
 
@@ -962,6 +991,8 @@ Phase 6: Conflict detection + merge coordination
 - [x] **Agent-driven flow** — agents pass work to each other via @mentions, daemon only routes
 - [x] **User outranks everyone** — can jump into any agent conversation, override any decision
 - [x] **Escalation hierarchy** — user > Lead > individual agents
+- [x] **Artist as UI/UX designer** — dual-model (Sonnet for UX reasoning, OpenAI for images). Designs layouts, UX flows, interaction patterns before Coder implements. Artist output + PM plan = Coder input
+- [x] **Multi-model agents** — agents can define multiple models in config (e.g., Artist has uxModel + imageModel)
 - [x] **Inter-agent communication** — agents @mention each other in the thread via SendMessage
 - [x] **Lead as mediator** — arbitrates agent disagreements, focused on common good + workflow improvement
 - [x] **Researcher agent** for web research on PM demand (WebSearch/WebFetch)
@@ -998,7 +1029,7 @@ Phase 6: Conflict detection + merge coordination
 | Goroutines | 1 (poll loop, permanent) | N (ephemeral, one per active thread) |
 | Isolation | Shared directory | Git worktrees (1 per thread) |
 | Session key | Chat JID | thread_ts |
-| Agents | 1 (Claude) | 6 (PM, Researcher, Coder, Reviewer, Lead, Artist) — same binary, parameterized |
+| Agents | 1 (Claude) | 6 (PM, Researcher, Coder, Reviewer, Lead, Artist/Designer) — same binary, parameterized |
 | Communication | N/A (single model) | Inter-agent messaging (SendMessage) |
 | Config | Flat file, gitignored | Global (secrets) + per-repo (committed to git) |
 | Memory | None | Per-agent, git flow, Lead-extracted, user-approved |
