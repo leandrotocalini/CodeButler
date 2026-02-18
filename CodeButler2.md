@@ -15,6 +15,7 @@ CodeButler is a single Go binary. You run one instance per agent, each parameter
 ```bash
 codebutler --role pm          # always running, listens for Slack messages
 codebutler --role coder       # activates only when PM sends it a task
+codebutler --role reviewer    # activates after Coder finishes, reviews the diff
 codebutler --role researcher  # activates only when PM requests research
 codebutler --role lead        # activates at thread close
 codebutler --role artist      # activates only when image is requested
@@ -31,7 +32,7 @@ Same code, same agent loop (system prompt → LLM call → tool use → execute 
 
 **Mediation:** when agents disagree or hit a decision they can't make alone, they escalate to the Lead. The Lead is the arbiter — it decides based on the common good and workflow improvement. If neither can resolve it, the Lead asks the user.
 
-### 1.2 The Five Agents
+### 1.2 The Six Agents
 
 | Agent | What it does | Model | Writes code? | Cost |
 |-------|-------------|-------|-------------|------|
@@ -39,6 +40,7 @@ Same code, same agent loop (system prompt → LLM call → tool use → execute 
 | **Researcher** | Subagent: web research on demand (spawned, returns, dies) | Cheap model via OpenRouter (same tier as PM) | Never | ~$0.001/search |
 | **Artist** | Generates and edits images | OpenAI gpt-image-1 | Never | ~$0.02/img |
 | **Coder** | Writes code, runs tests, creates PRs | Claude Opus 4.6 via OpenRouter | Always | ~$0.30-2.00/task |
+| **Reviewer** | Code review: reads diff, checks quality/security/tests, sends feedback to Coder | Claude Sonnet via OpenRouter | Never | ~$0.02-0.10/review |
 | **Lead** | Thread retrospective: mediates discussion, evolves workflows | Claude Sonnet via OpenRouter | Never | ~$0.01-0.05/thread |
 
 All agents run the same Go code with the same tool set (Read, Write, Edit, Bash, Grep, Glob, WebSearch, WebFetch, etc.) — the restriction is behavioral via system prompts, not structural. The PM's prompt says "explore code, delegate web research," the Researcher's says "search the web, return structured findings," the Coder's says "do whatever it takes." Separation of powers: the PM explores code + orchestrates, the Researcher searches the web, the Coder writes code, the Lead reviews and mediates, only the user approves.
@@ -47,7 +49,7 @@ All agents run the same Go code with the same tool set (Read, Write, Edit, Bash,
 
 Agents are not isolated workers — they communicate. The PM sends a task to the Coder. The Coder asks the PM for missing context. The Lead talks to each agent about what to improve. They can discuss, disagree, and reach consensus — with the Lead mediating and the user having final say.
 
-CodeButler receives a message and then: the PM classifies intent, selects a workflow from `workflows.md`, follows the workflow steps (exploring codebase, messaging the Researcher for web research), detects conflicts with other active threads, proposes a plan with file:line references, waits for user approval, creates an isolated git worktree, messages the Coder with plan + context, routes Coder questions back to the PM, detects PR creation, activates the Lead who leads a retrospective discussion with the other agents (workflow evolution proposals — user approves), merges PR, cleans up worktree, closes thread.
+CodeButler receives a message and then: the PM classifies intent, selects a workflow from `workflows.md`, follows the workflow steps (interviewing the user, exploring codebase, messaging the Researcher for web research), detects conflicts with other active threads, proposes a plan with file:line references, waits for user approval, creates an isolated git worktree, messages the Coder with plan + context, routes Coder questions back to the PM, detects PR creation, activates the Reviewer who reviews the diff and sends feedback to the Coder until satisfied, activates the Lead who leads a retrospective discussion with all agents (workflow evolution proposals — user approves), merges PR, cleans up worktree, closes thread. For discovery threads: PM interviews the user, then hands off to the Lead who produces a roadmap.
 
 ### 1.4 Architecture: OpenRouter + Native Tools (No CLI Dependencies)
 
@@ -56,6 +58,7 @@ CodeButler receives a message and then: the PM classifies intent, selects a work
 - **PM agent**: Any model via OpenRouter (Kimi, GPT-4o-mini, Claude Sonnet, etc.). Read-only codebase tools. Stays alive during the thread.
 - **Researcher agent**: Any cheap model via OpenRouter. Spawned on demand — uses WebSearch + WebFetch, synthesizes findings, returns result, dies. Multiple can run in parallel.
 - **Coder agent**: Claude Opus 4.6 via OpenRouter API. Full tool set (Read, Write, Edit, Bash, Grep, Glob, etc.) implemented natively in Go. Can message the PM when it needs more context.
+- **Reviewer agent**: Claude Sonnet via OpenRouter. Activates after Coder finishes. Reads the diff, checks code quality/security/tests, sends feedback to Coder. Review loop until satisfied.
 - **Lead agent**: Claude Sonnet via OpenRouter. Runs at thread close. Messages other agents to discuss improvements, then presents proposals to user.
 - **Artist agent**: OpenAI gpt-image-1 API directly (not via OpenRouter).
 
@@ -65,13 +68,14 @@ This means CodeButler has **zero dependency on Claude Code CLI**. It IS its own 
 
 Each agent has its own MD file per repo that defines its system prompt, personality, and behavioral rules. Plus one shared MD for cross-agent knowledge and interaction patterns.
 
-Under `<repo>/.codebutler/`: `prompts/` has pm.md, researcher.md, coder.md, lead.md, artist.md, shared.md (system prompts per agent + shared knowledge). `memory/` has workflows.md (process playbook), pm.md, lead.md, and artist.md (evolving knowledge per agent). The Researcher and Coder don't have memory files — the Researcher is stateless (each search is self-contained), the Coder's knowledge goes into `coder.md`.
+Under `<repo>/.codebutler/`: `prompts/` has pm.md, researcher.md, coder.md, reviewer.md, lead.md, artist.md, shared.md (system prompts per agent + shared knowledge). `memory/` has workflows.md (process playbook), pm.md, reviewer.md, lead.md, and artist.md (evolving knowledge per agent). The Researcher and Coder don't have memory files — the Researcher is stateless (each search is self-contained), the Coder's knowledge goes into `coder.md`.
 
 **Why per-agent MDs instead of CLAUDE.md:**
 - Each agent has a different personality, different tools, different restrictions
 - The Coder's system prompt includes ALL tool definitions (Read, Write, Edit, Bash, Grep, Glob, etc.) — it's essentially a custom Claude Code system prompt
 - The PM's system prompt includes only read-only tools + exploration guidelines
 - The Researcher's system prompt defines web search strategies and structured output format
+- The Reviewer's system prompt defines code review checklist, security patterns, quality standards, and feedback format
 - The Lead's system prompt defines retrospective structure, memory extraction patterns, mediation rules, and cross-agent analysis
 - The shared.md contains project-wide knowledge that all agents need
 - Users can customize each agent independently per project
@@ -172,6 +176,7 @@ Two levels. Global holds secrets (tokens, API keys). Per-repo holds project-spec
     },
     "researcher": { "model": "moonshotai/kimi-k2" },
     "coder": { "model": "anthropic/claude-opus-4-6" },
+    "reviewer": { "model": "anthropic/claude-sonnet-4-5-20250929" },
     "lead": { "model": "anthropic/claude-sonnet-4-5-20250929" }
   },
   "limits": { "maxConcurrentThreads": 3, "maxCallsPerHour": 100 }
@@ -186,7 +191,7 @@ All LLM calls (PM, Researcher, Coder, Lead) route through OpenRouter using the g
 
 Global: `~/.codebutler/config.json`.
 
-Per-repo: `<repo>/.codebutler/` contains config.json, store.db (SQLite), `prompts/` (pm.md, researcher.md, coder.md, lead.md, artist.md, shared.md), `memory/` (workflows.md, pm.md, lead.md, artist.md), `branches/` (git worktrees, 1 per active thread), `images/` (generated), `journals/` (thread narratives).
+Per-repo: `<repo>/.codebutler/` contains config.json, store.db (SQLite), `prompts/` (pm.md, researcher.md, coder.md, reviewer.md, lead.md, artist.md, shared.md), `memory/` (workflows.md, pm.md, reviewer.md, lead.md, artist.md), `branches/` (git worktrees, 1 per active thread), `images/` (generated), `journals/` (thread narratives).
 
 **Committed to git:** `config.json`, `prompts/`, `memory/`. **Gitignored:** `store.db`, `branches/`, `images/`, `journals/`.
 
@@ -253,7 +258,7 @@ All tools execute in the worktree directory. Path validation ensures no escape. 
 Agents talk to each other via `SendMessage`. The daemon routes messages between agent instances. This is the core of the multi-agent system — not a special escalation tool, but a natural communication bus.
 
 **SendMessage(to, message, waitForReply):**
-- `to` — target agent: `"pm"`, `"coder"`, `"lead"`, `"researcher"`, `"artist"`
+- `to` — target agent: `"pm"`, `"coder"`, `"reviewer"`, `"lead"`, `"researcher"`, `"artist"`
 - `message` — free-form text (question, task, feedback, discussion point)
 - `waitForReply` — if true, calling agent pauses until reply arrives; if false, fire-and-forget
 
@@ -264,8 +269,11 @@ The daemon handles routing: if the target agent is already running, deliver to i
 - **PM → Coder** (task): `SendMessage("coder", "implement this plan: ...", false)` — PM sends the task and stays available for questions
 - **Coder → PM** (question): `SendMessage("pm", "what auth method does this project use?", true)` — Coder pauses, PM answers, Coder continues
 - **PM → Researcher** (research): equivalent to the `Research` tool — spawn, get result, continue
+- **Reviewer → Coder** (feedback): `SendMessage("coder", "3 issues found: [list]", true)` — Coder fixes, Reviewer re-reviews
+- **Reviewer → Lead** (approved): `SendMessage("lead", "review approved, 2 rounds, 1 security fix", false)` — triggers Lead retrospective
 - **Lead → PM** (feedback): `SendMessage("pm", "you missed checking migrations in refactor tasks", true)` — Lead discusses improvements with PM
 - **Lead → Coder** (feedback): `SendMessage("coder", "you spent 5 turns on type errors, should strict mode be in your prompt?", true)` — Lead discusses with Coder
+- **Lead → Reviewer** (feedback): `SendMessage("reviewer", "you missed the SQL injection the user found later — add parameterized query check", true)` — Lead helps Reviewer learn
 - **PM → Lead** (response): `SendMessage("lead", "I didn't have that info, add it to the workflow", true)` — agents discuss and reach consensus
 
 **Visibility:** All inter-agent messages are logged in the thread journal. The user sees a summary of behind-the-scenes communication in the usage report. Full transparency.
@@ -311,7 +319,61 @@ The Researcher is a **subagent** — spawned by the PM on demand, runs a short f
 
 ---
 
-## 12. Lead Architecture: Mediator + Retrospective
+## 12. Reviewer Architecture: Code Review Loop
+
+The Reviewer activates after the Coder finishes and the PR is created. Its job: read the diff, catch what the Coder missed. It does NOT write code — it sends feedback to the Coder, who fixes.
+
+### What the Reviewer Checks
+
+- **Code quality** — readability, naming, duplication, dead code, overly complex logic
+- **Security** — injection vectors, hardcoded secrets, unsafe patterns (OWASP top 10)
+- **Test coverage** — are the new paths tested? Are edge cases covered? Can it run the tests and see if they pass?
+- **Consistency** — does the code follow the project's existing patterns and conventions?
+- **Best practices** — error handling, resource cleanup, race conditions, performance pitfalls
+- **Plan compliance** — does the implementation match what the PM planned and the user approved?
+
+### The Review Loop
+
+```
+1. Coder finishes → PR created
+2. Reviewer activates → reads diff (git diff main...branch)
+3. Reviewer runs linters/tests if configured (Bash, read-only intent)
+4. If issues found → SendMessage("coder", "issues: [list]", true)
+5. Coder fixes → pushes
+6. Reviewer re-reviews the new diff
+7. Repeat until Reviewer approves
+8. Reviewer → "approved" → Lead activates for retrospective
+```
+
+The Reviewer is thorough but not adversarial. It's a safety net, not a gatekeeper. It catches the things that slip through when the Coder is focused on making things work — the forgotten null check, the SQL injection in a query builder, the test that only covers the happy path.
+
+### Review Feedback Format
+
+The Reviewer sends structured feedback to the Coder via `SendMessage`:
+
+```
+Issues found in PR:
+1. [security] internal/tools/executor.go:47 — command string is interpolated
+   without sanitization, allows injection via user-supplied path
+2. [test] internal/slack/handler_test.go — missing test for message with
+   empty thread_ts (edge case that causes nil pointer)
+3. [quality] internal/daemon/daemon.go:120 — duplicated error handling block,
+   extract to helper
+```
+
+The Coder receives this, fixes, and signals completion. Max review rounds configurable (default: 3) — if still issues after 3 rounds, Reviewer summarizes remaining concerns in the PR and the Lead decides during retrospective.
+
+### Reviewer Configuration
+
+Uses Claude Sonnet (same tier as Lead — smart enough to spot issues, cheaper than Opus). Its system prompt comes from `reviewer.md` + `shared.md` + `memory/reviewer.md`. Over time, the Reviewer learns project-specific patterns: "this project always forgets to handle context cancellation" or "SQL queries here always need parameterized inputs."
+
+### Reviewer Memory (`memory/reviewer.md`)
+
+The Reviewer has its own memory file. The Lead updates it during retrospective based on what the Reviewer caught (and what it missed). Patterns accumulate: recurring issues become checklist items, project-specific conventions become review rules.
+
+---
+
+## 13. Lead Architecture: Mediator + Retrospective
 
 The Lead is the team's mediator. It runs at thread close (after PR creation, before merge) with the **full thread transcript**: user messages, PM planning + tool calls, Coder tool calls + outputs, inter-agent messages, Artist requests + results, and the git diff. No other agent has this complete picture.
 
@@ -323,11 +385,14 @@ The Lead is the team's mediator. It runs at thread close (after PR creation, bef
 
 ```
 Lead → PM: "The Coder asked you 3 times about auth. Should we add an auth-check
-           step to the feature workflow?"
+           step to the implement workflow?"
 PM → Lead: "I didn't know this project uses JWT. Add it to my memory too."
 Lead → Coder: "You spent 5 turns debugging a type mismatch. Would stricter
               TypeScript config help?"
 Coder → Lead: "Yes, suggest enabling strict mode in coder.md."
+Lead → Reviewer: "You missed the unhandled error on line 47 that the user
+                  found manually. Add error-handling check to your patterns?"
+Reviewer → Lead: "Yes, add to reviewer.md: always check error returns in Go."
 Lead → User: "Here's what we learned: [proposals]"
 ```
 
@@ -338,7 +403,7 @@ The Lead mediates — its goal is the common good and continuous workflow improv
 ### What the Lead Produces
 
 - **Thread summary** → PR description via `gh pr edit`
-- **Memory updates** → proposes updates to workflows.md, pm.md, lead.md, artist.md, and suggests coder.md additions. All informed by the discussion with agents.
+- **Memory updates** → proposes updates to workflows.md, pm.md, reviewer.md, lead.md, artist.md, and suggests coder.md additions. All informed by the discussion with agents.
 - **Workflow evolution** → the Lead's most valuable output (see below)
 - **Thread usage report** → token/cost breakdown, tool call stats, behind-the-scenes (all inter-agent exchanges), tips for better prompting
 - **Journal finalization** → close entry + cost table, committed to PR branch
@@ -389,12 +454,13 @@ The daemon maintains a thread registry: `map[string]*ThreadWorker` mapping threa
 
 ### Thread Phases
 
-Every thread goes through: PM first (classify, explore, plan, get approval), then Coder (implement), then Lead (retrospective at close). Some threads never leave PM phase (questions, images). Four phases:
+The phase depends on the workflow. Implementation threads go through all five phases. Discovery and question threads may only use `pm` and `lead`.
 
-- **`pm`** — PM talking to user, exploring codebase, planning
-- **`coder`** — user approved, Coder working. PM stays available for Coder questions (inter-agent)
-- **`lead`** — thread closing, Lead runs retrospective. Discusses improvements with PM and Coder agents
-- **`closed`** — PR merged, worktree cleaned, thread archived
+- **`pm`** — PM talking to user, exploring codebase, planning. Also: PM interviewing for discovery, PM answering questions
+- **`coder`** — user approved plan, Coder working in worktree. PM stays available for Coder questions (inter-agent)
+- **`review`** — Coder finished, PR created. Reviewer reads diff, sends feedback, Coder fixes. Loop until approved
+- **`lead`** — thread closing, Lead runs retrospective. Discusses improvements with all agents. For discovery: Lead builds roadmap
+- **`closed`** — PR merged (or roadmap delivered), worktree cleaned, thread archived
 
 ### Graceful Shutdown
 
@@ -409,7 +475,7 @@ Messages are persisted to SQLite before processing (acked=0). On restart, unacke
 ## 14. Features that Change
 
 ### Agent Identity
-Slack identifies bots natively. Outgoing messages get agent prefix (`*PM:*`, `*Researcher:*`, `*Coder:*`, `*Artist:*`, `*Lead:*`) so users know which agent is talking.
+Slack identifies bots natively. Outgoing messages get agent prefix (`*PM:*`, `*Researcher:*`, `*Coder:*`, `*Reviewer:*`, `*Artist:*`, `*Lead:*`) so users know which agent is talking.
 
 ### Reactions as Feedback
 - 👀 when processing starts
@@ -427,13 +493,14 @@ Short code (<20 lines) inline as Slack code blocks. Long code (≥20 lines) uplo
 
 ### Files
 
-Four memory files, all in `memory/`:
+Five memory files, all in `memory/`:
 
 | File | What it holds | Who reads it | Who updates it |
 |------|--------------|-------------|---------------|
 | `workflows.md` | Process playbook: step-by-step workflows for each task type | PM (selects workflow), Lead (proposes changes) | Lead (via user approval) |
-| `pm.md` | Project knowledge, planning notes, inter-role coordination tips | PM | Lead (via user approval) |
-| `lead.md` | Retrospective patterns, what makes threads efficient, escalation patterns | Lead | Lead (via user approval) |
+| `pm.md` | Project knowledge, planning notes, inter-agent coordination tips | PM | Lead (via user approval) |
+| `reviewer.md` | Code review patterns, recurring issues, project-specific quality rules | Reviewer | Lead (via user approval) |
+| `lead.md` | Retrospective patterns, what makes threads efficient, mediation patterns | Lead | Lead (via user approval) |
 | `artist.md` | Style preferences, colors, icon conventions, dimension defaults | Artist | Lead (via user approval) |
 
 The Coder and Researcher don't have memory files — the Coder's knowledge goes into `coder.md` (the system prompt) which users maintain, the Researcher is stateless. The Lead suggests `coder.md` additions during retrospective.
@@ -445,32 +512,85 @@ Workflows are the team's learned process for each type of task. They live in the
 **Seeded on first run** with defaults:
 
 ```markdown
+## implement
+The standard workflow. User requests a feature or change. PM interviews
+until fully defined, then Coder builds, Reviewer checks, Lead learns.
+
+1. PM: read message, classify as implement
+2. PM: interview user — ask clarifying questions until requirements are
+   unambiguous (acceptance criteria, edge cases, constraints)
+3. PM: explore codebase — find integration points, existing patterns,
+   related code (Read, Grep, Glob)
+4. PM: if unfamiliar tech/API → Researcher: docs, best practices, examples
+5. PM: propose plan — file:line references, acceptance criteria, estimated
+   scope. Post to thread for user review
+6. User: approve (or request changes → back to step 2)
+7. Coder: implement in worktree — write code, write tests, run test suite
+8. Coder: create PR
+9. Reviewer: review diff — code quality, security, tests, plan compliance
+10. Reviewer: if issues → send feedback to Coder → Coder fixes → re-review
+11. Reviewer: approved
+12. Lead: retrospective — discuss with agents, propose workflow/memory updates
+13. User: approve learnings, merge
+
+## discovery
+Multi-feature discussion. No code, no worktree, no PR. PM interviews the
+user to define specs. Lead produces a roadmap with ordered tasks.
+
+1. PM: read message, classify as discovery
+2. PM: lead structured discussion — ask about goals, constraints, priorities,
+   user stories. Iterate until user says "that's all"
+3. PM: for each feature discussed, if needs external context →
+   Researcher: market research, technical feasibility, API availability
+4. PM: produce structured proposals — numbered list, each with:
+   summary, user story, acceptance criteria, estimated complexity, dependencies
+5. PM: present proposals to user for review/refinement
+6. User: approve final set of proposals
+7. PM → Lead: hand off proposals
+8. Lead: create roadmap — order proposals by priority and dependencies,
+   group into milestones if applicable. Consider: what blocks what,
+   what's highest value, what's quick wins vs big efforts
+9. Lead: present roadmap to user
+10. User: approve (or reorder/modify)
+11. Lead: create GitHub issues (one per task, labeled, ordered) or
+    commit roadmap document to repo — user decides format
+12. Lead: retrospective on discovery process — propose workflow improvements
+
+Each roadmap item becomes a future `implement` thread. When the user starts
+one ("implement task 3 from the notifications roadmap"), the PM reads the
+proposal/issue and uses it as the starting spec.
+
 ## bugfix
-1. PM: reproduce description, find relevant code (Read, Grep), identify root cause
+1. PM: reproduce description, find relevant code (Read, Grep), identify
+   root cause hypothesis
 2. PM: if external API involved → Researcher: check known issues/changelogs
 3. PM: propose fix plan with file:line references
 4. User: approve
-5. Coder: implement fix, add test for regression
-6. Coder: run existing tests
-
-## feature
-1. PM: clarify requirements with user, explore codebase for integration points
-2. PM: if unfamiliar tech → Researcher: API docs, best practices, examples
-3. PM: propose plan with file:line references and acceptance criteria
-4. User: approve
-5. Coder: implement, write tests
-6. Coder: run full test suite
+5. Coder: implement fix, add regression test, run test suite
+6. Coder: create PR
+7. Reviewer: review diff — verify fix is correct, no regressions introduced,
+   test covers the bug
+8. Reviewer: if issues → Coder fixes → re-review
+9. Lead: retrospective
 
 ## question
+No code, no worktree, no PR. PM answers directly.
+
 1. PM: explore codebase, answer directly
 2. PM: if needs external context → Researcher: search
-3. PM: respond to user (no Coder needed)
+3. PM: respond to user
+4. (No Coder, no Reviewer, no Lead — unless user says "actually implement that")
 
 ## refactor
-1. PM: analyze current code, identify scope
+1. PM: analyze current code, identify scope and risk
 2. PM: propose refactor plan with before/after structure
 3. User: approve
-4. Coder: refactor, ensure tests pass
+4. Coder: refactor, ensure all existing tests pass, add tests if needed
+5. Coder: create PR
+6. Reviewer: review diff — verify behavior preservation, no regressions,
+   improved structure
+7. Reviewer: if issues → Coder fixes → re-review
+8. Lead: retrospective
 ```
 
 **How the PM uses it:** When a message arrives, the PM classifies intent and selects the matching workflow. The workflow steps guide the PM's behavior — which tools to call, when to spawn the Researcher, what to include in the plan, what to tell the Coder. This is how the system gets more structured over time.
@@ -486,8 +606,9 @@ Memory files (including `workflows.md`) follow PR flow: after PR creation, the L
 After PR creation, the Lead analyzes the full thread transcript (user messages, PM planning, inter-agent messages, Coder tool calls, Artist outputs, git diff). It discusses improvements with each agent, then proposes updates routed to the right file:
 
 - Workflow refinements (new steps, new workflows, automations) → `workflows.md`
-- Project knowledge, inter-role coordination → `pm.md`
-- Retrospective patterns, escalation patterns → `lead.md`
+- Project knowledge, inter-agent coordination → `pm.md`
+- Code review patterns, recurring issues → `reviewer.md`
+- Retrospective patterns, mediation patterns → `lead.md`
 - Visual style, colors, icon conventions → `artist.md`
 - Coding conventions → suggested as tip for user to add to `coder.md`
 
@@ -509,13 +630,14 @@ Each memory file has a "Working with Other Roles" section. The PM learns what co
 
 ### The Rule: 1 Thread = 1 Branch = 1 PR
 
-Non-negotiable. States: `created → working → pr_opened → merged (closed)`. Only the user closes a thread ("merge"/"done"/"dale"). No timeouts, no automatic close.
+Non-negotiable. States: `created → working → pr_opened → reviewing → approved → merged (closed)`. Only the user closes a thread ("merge"/"done"/"dale"). No timeouts, no automatic close.
 
 ### After PR Creation
 - Add thread URL to PR body
 - Detect TODOs/FIXMEs in code, warn in thread
 - Journal: append "PR opened" entry
-- Lead retrospective: analyze full thread → propose memory updates + per-role improvements → user approves → commit to PR branch
+- Reviewer activates: review diff → feedback loop with Coder until approved
+- After Reviewer approves → Lead retrospective: analyze full thread → propose memory/workflow updates → user approves → commit to PR branch
 
 ### On User Close
 - Lead runs: generates PR summary → `gh pr edit`, finalizes journal, posts usage report with per-role improvement proposals
@@ -574,7 +696,7 @@ All LLM calls go through OpenRouter. Single API key, multiple models.
 
 ### Cost Structure
 
-PM = brain (~$0.001/call), Researcher = web eyes (~$0.001/search), Coder = hands (~$0.10-1.00/call), Lead = retrospective (~$0.01-0.05/thread), Artist = image eyes (~$0.02/image), Whisper = ears (~$0.006/min).
+PM = brain (~$0.001/call), Researcher = web eyes (~$0.001/search), Coder = hands (~$0.10-1.00/call), Reviewer = quality gate (~$0.02-0.10/review), Lead = retrospective (~$0.01-0.05/thread), Artist = image eyes (~$0.02/image), Whisper = ears (~$0.006/min).
 
 ### PM Model Pool + Hot Swap
 
@@ -729,7 +851,9 @@ Phase 6: Conflict detection + merge coordination
 - [x] **Per-role system prompt MDs** (pm.md, researcher.md, coder.md, lead.md, artist.md, shared.md per repo)
 - [x] **No CLAUDE.md dependency** — CodeButler manages its own prompts
 - [x] **Multi-agent architecture** — one daemon binary, one instance per agent, parameterized by role
-- [x] **PM always on, others on-demand** — Coder/Researcher/Artist/Lead activate only when called
+- [x] **PM always on, others on-demand** — Coder/Reviewer/Researcher/Artist/Lead activate only when called
+- [x] **Reviewer agent** — code review loop after Coder, before Lead. Catches security/quality/test issues
+- [x] **Discovery workflow** — PM interviews user → Lead builds roadmap → each item becomes future implement thread
 - [x] **Inter-agent communication** — agents message each other via SendMessage (sync or async)
 - [x] **Lead as mediator** — arbitrates agent disagreements, focused on common good + workflow improvement
 - [x] **Researcher agent** for web research on PM demand (WebSearch/WebFetch)
@@ -766,7 +890,7 @@ Phase 6: Conflict detection + merge coordination
 | Goroutines | 1 (poll loop, permanent) | N (ephemeral, one per active thread) |
 | Isolation | Shared directory | Git worktrees (1 per thread) |
 | Session key | Chat JID | thread_ts |
-| Agents | 1 (Claude) | 5 (PM, Researcher, Coder, Lead, Artist) — same binary, parameterized |
+| Agents | 1 (Claude) | 6 (PM, Researcher, Coder, Reviewer, Lead, Artist) — same binary, parameterized |
 | Communication | N/A (single model) | Inter-agent messaging (SendMessage) |
 | Config | Flat file, gitignored | Global (secrets) + per-repo (committed to git) |
 | Memory | None | Per-agent, git flow, Lead-extracted, user-approved |
