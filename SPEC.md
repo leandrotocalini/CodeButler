@@ -119,9 +119,9 @@ Bot token scopes: `channels:history`, `channels:read`, `chat:write`, `files:read
 go install github.com/leandrotocalini/codebutler/cmd/codebutler@latest
 ```
 
-### First Run — Automatic Wizard
+### `codebutler init`
 
-Run `codebutler --role <any>` in a git repo. The binary detects missing config and triggers the wizard automatically. No separate `init` command.
+Run `codebutler init` in a git repo. If the repo isn't configured, this is the only way to set it up — running `codebutler --role <any>` in an unconfigured repo tells you to run `init` first.
 
 **Step 1: Global tokens** (only once per machine — `~/.codebutler/config.json` doesn't exist):
 
@@ -137,21 +137,36 @@ Run `codebutler --role <any>` in a git repo. The binary detects missing config a
 3. **`.gitignore`** — adds `.codebutler/branches/`, `.codebutler/images/` if not present
 4. Saves channel to per-repo `config.json`
 
-**Step 3: Service install** (once per repo):
+**Step 3: Service install** (once per machine):
 
-1. Detects OS (macOS / Linux)
-2. Installs 6 services — one per agent, `WorkingDirectory=<repo>`, restart on failure:
-   - macOS: 6 LaunchAgent plists (`~/Library/LaunchAgents/codebutler.<repo>.<role>.plist`)
-   - Linux: 6 systemd user units (`~/.config/systemd/user/codebutler.<repo>.<role>.service`)
-3. Starts all 6 services
+1. Asks which agents to install on this machine (default: all 6). Different agents can run on different machines
+2. Detects OS (macOS / Linux)
+3. Installs selected services — one per agent, `WorkingDirectory=<repo>`, restart on failure:
+   - macOS: LaunchAgent plists (`~/Library/LaunchAgents/codebutler.<repo>.<role>.plist`)
+   - Linux: systemd user units (`~/.config/systemd/user/codebutler.<repo>.<role>.service`)
+4. Starts selected services
 
-**Subsequent repos:** Step 1 is skipped (tokens exist). Only steps 2-3 run. Same Slack app, different channel, 6 new services.
+**Subsequent repos:** Step 1 is skipped (tokens exist). Only steps 2-3 run. Same Slack app, different channel, new services.
+
+**Subsequent machines:** Step 2 is skipped (`.codebutler/` already exists in git). Only steps 1 + 3 run. Same repo, different machine, different agents.
+
+### `codebutler configure`
+
+For post-init changes. Run `codebutler configure` in a configured repo.
+
+- **Change Slack channel** — switch to a different channel
+- **Add agent** — install a new agent service on this machine (e.g., add Coder to a more powerful machine)
+- **Remove agent** — stop and uninstall an agent service from this machine
+- **Update tokens** — change API keys
+- **Show config** — display current config (machine + repo)
 
 ### Service Management
 
 ```bash
-codebutler start              # start all 6 agents for current repo
-codebutler stop               # stop all 6
+codebutler init               # first-time setup (tokens + repo + services)
+codebutler configure           # change config post-init
+codebutler start              # start all agents installed on this machine
+codebutler stop               # stop all agents on this machine
 codebutler status             # show running agents, active threads per agent
 codebutler --role <role>      # run single agent in foreground (dev mode)
 ```
@@ -559,9 +574,44 @@ Non-negotiable. Only the user closes a thread. No timeouts.
 
 ---
 
-## 13. Worktree Isolation
+## 13. Worktree Isolation & Git Sync
 
-Each thread gets a git worktree in `.codebutler/branches/<branchName>/`. **Created early by the PM** — as soon as the PM starts working on a thread, it creates the worktree and begins saving its conversation file there. This way every agent that touches the thread has a place to persist its model conversation from the start. Branch: `codebutler/<slug>`.
+Each thread gets a git worktree in `.codebutler/branches/<branchName>/`. **Created early by the PM** — as soon as the PM starts working on a thread, it creates the worktree, pushes the branch to remote, and begins saving its conversation file there. Branch: `codebutler/<slug>`.
+
+### Git Sync Protocol
+
+**Every change an agent makes to the worktree must be committed and pushed.** This is non-negotiable — it ensures all agents (whether on the same machine or different machines) see the latest state.
+
+1. **After any file change** (code, MDs, conversation files, research): `git add` + `git commit` + `git push`
+2. **Before reading shared state** (agent MDs, global.md, research/): `git pull` to get the latest
+3. **On branch creation** (PM starts a thread): create worktree, push branch to remote immediately
+4. **When an agent is @mentioned for a branch it doesn't have locally**: pull the branch, create local worktree, start working
+
+### Divergence Handling
+
+If two agents push to the same branch concurrently (e.g., Coder pushed code while Researcher pushed a research file):
+
+1. The second push fails (non-fast-forward)
+2. Agent pulls with rebase: `git pull --rebase`
+3. If conflicts: agent resolves automatically (each agent knows its own files — conversation files never conflict, agent MDs rarely conflict)
+4. If unresolvable: agent posts in thread asking for help, marks the issue
+
+In practice, conflicts are rare because agents work on different files: Coder writes code, Researcher writes to `research/`, Lead writes to MDs. The main risk is two agents editing the same MD — the Lead handles most MD writes, so this is serialized naturally.
+
+### Distributed Agents
+
+Agents can run on different machines. The default is all 6 on one machine, but the architecture supports distribution:
+
+- **Same machine (default):** all agents share the filesystem. Git sync still applies — agents commit and push after every change. This is the simplest setup and works for most cases
+- **Multiple machines:** each machine runs a subset of agents (e.g., Coder on a powerful GPU machine, PM on a cheap always-on server). Each machine has its own clone of the repo. Agents coordinate through git (code/files) and Slack (messages)
+
+**What changes with distribution:**
+- `codebutler init` on each machine — same repo, same Slack app, different agents installed as services
+- Each machine creates local worktrees for active branches on demand (pull from remote)
+- Conversation files are per-agent, so no conflicts — each agent owns its own `conversations/<role>.json`
+- The PM pushes the branch immediately after creation so other agents on other machines can pull it
+
+**What doesn't change:** Slack is still the communication bus. @mentions still drive the flow. The agent loop is the same. The only difference is that "read file" might require a `git pull` first.
 
 | Platform | Init | Build Isolation |
 |----------|------|-----------------|
@@ -807,7 +857,7 @@ This ensures the right people get notified even when they're not actively watchi
 - [x] PM model pool with hot swap
 - [x] `gh` CLI for GitHub operations
 - [x] Goroutine-per-thread, buffered channels, panic recovery
-- [x] **Automatic first-run wizard** — no separate `init` command. Detects missing config and guides token setup + repo seed + service install
+- [x] **`codebutler init` + `codebutler configure`** — explicit init command for first setup (tokens + repo + services). Configure for post-init changes (channel, add/remove agents, tokens)
 - [x] **OpenAI key mandatory** — required for image generation (Artist) and voice transcription (Whisper). OpenRouter can't generate images
 - [x] **OS services with auto-restart** — LaunchAgent (macOS) / systemd (Linux). 6 services per repo. Survive reboots, restart on crash
 - [x] **Multi-repo = same Slack app, different channels** — global tokens shared, per-repo config separate
@@ -818,6 +868,10 @@ This ensures the right people get notified even when they're not actively watchi
 - [x] **Unattended develop** — PM orchestrates all roadmap items, approves plans within roadmap scope, only escalates when genuinely blocked
 - [x] **Researcher open access** — any agent can @mention Researcher, not just PM. Research persisted in `.codebutler/research/`, committed to git, merges with PRs
 - [x] **User tagging** — when agents need input, tag all users who participated in the thread
+- [x] **Git sync protocol** — every file change is committed + pushed. Agents pull before reading shared state. Non-negotiable for distributed support
+- [x] **Distributed agents** — agents can run on different machines. Same repo, same Slack, different services. Git + Slack as coordination. Default is all on one machine
+- [x] **PM workflow menu** — when user intent is ambiguous, PM presents available workflows as options. Teaches new users what CodeButler can do
+- [x] **Research Index in global.md** — Researcher adds `@` references to persisted findings in global.md. All agents see what research exists via their system prompt
 
 ---
 
