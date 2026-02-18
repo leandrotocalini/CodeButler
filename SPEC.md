@@ -29,7 +29,9 @@ codebutler --role artist      # always running, listens for @codebutler.artist
 
 **Communication between agents is 100% via Slack messages.** No IPC, no RPC, no shared memory. When PM needs Coder, it posts `@codebutler.coder implement...` in the thread. The Coder process picks it up from its Slack listener. Same for all agent-to-agent communication.
 
-**No shared database.** The Slack thread IS the state. Each agent reads thread history via `conversations.replies` to get context. OpenRouter is stateless (full message history sent on every call, no session ID). On restart, agents read active threads from Slack and find unprocessed @mentions. No SQLite needed.
+**No shared database.** The Slack thread is the source of truth for inter-agent communication — what agents say to each other and the user. But each agent also maintains a **local conversation file** (`<thread-id>/<role>.json`) with its model. This file holds the full back-and-forth: system prompt, tool calls, tool results, intermediate reasoning — most of which never appears in Slack. The model returns many things (tool calls, partial thoughts, retries) that the agent processes internally; only the final curated output gets posted to the thread.
+
+On restart, agents read active threads from Slack to find unprocessed @mentions, and resume model conversations from their local JSON files. No SQLite needed.
 
 Same agent loop in every process (system prompt → LLM call → tool use → execute → append → repeat), different parameters:
 - **System prompt** — from `<role>.md` + `global.md`. One file per agent that IS the system prompt and evolves with learnings
@@ -207,12 +209,21 @@ All LLM calls route through OpenRouter. Agents needing multiple models define th
   artist/
     assets/                      # Screenshots, mockups, visual references
   branches/                      # Git worktrees, 1 per active thread (gitignored)
+    <branchName>/                # One worktree per thread
+      conversations/             # Agent↔model conversation files
+        pm.json                  # PM's full model conversation for this thread
+        coder.json               # Coder's full model conversation
+        reviewer.json            # ...etc
   images/                        # Generated images (gitignored)
 ```
 
-**Committed to git:** `config.json`, all `.md` files, `artist/assets/`. **Gitignored:** `branches/`, `images/`.
+**Committed to git:** `config.json`, all `.md` files, `artist/assets/`. **Gitignored:** `branches/` (including conversation files), `images/`.
 
-**No database.** The Slack thread is the source of truth. Each agent reads thread history from Slack API (`conversations.replies`). OpenRouter is stateless — full message history sent on every call. On restart, agents scan active threads for unprocessed @mentions.
+**Two layers of state:**
+1. **Slack thread** — inter-agent messages + user interaction. The public record. Source of truth for what was communicated.
+2. **Conversation files** (`conversations/<role>.json`) — agent↔model back-and-forth. Tool calls, results, reasoning, retries. Private to each agent. Lives in the worktree, dies with it.
+
+OpenRouter is stateless — full message history sent on every call from the conversation file. On restart, agents scan active threads for unprocessed @mentions and resume model conversations from their JSON files.
 
 ---
 
@@ -289,6 +300,29 @@ When two agents disagree → Lead decides. **The user outranks everyone** — ca
 ## 8. Agent Architectures
 
 Each agent is an independent OS process with its own Slack listener. All run the same binary. All execute tools locally. All communicate via Slack messages in the thread.
+
+### Agent-Model Conversation (the temp file)
+
+Each agent activation involves multiple round-trips with the model: tool calls, tool results, reasoning steps, retries. **Most of this never reaches Slack.** The full conversation lives in a JSON file per agent per thread:
+
+```
+.codebutler/branches/<branchName>/conversations/
+  pm.json
+  coder.json
+  reviewer.json
+  ...
+```
+
+**What's in the file:** system prompt, every user/assistant message, every tool call + result, every model response — the complete transcript of agent↔model interaction for that thread.
+
+**What goes to Slack:** only the agent's curated output — the plan summary, the question to the user, the "PR ready" message. The agent decides what to post; the model's raw responses are not forwarded verbatim.
+
+**Why this matters:**
+- The Coder might make 20 tool calls (read files, write code, run tests, fix errors, retry) before posting "PR ready" in Slack. Those 20 rounds live in `coder.json`, not in the thread.
+- On restart, the agent resumes from its conversation file — no context lost, no need to re-read the entire Slack thread.
+- The Lead reads Slack thread messages for retrospective (what agents *said*), but could also read conversation files for deeper analysis (what agents *did*).
+
+**Lifecycle:** created when the agent first processes a message in the thread. Lives in the worktree. Archived or deleted when the thread closes and worktree is cleaned up.
 
 ### PM — Always-Online Orchestrator
 
@@ -595,6 +629,7 @@ Channel membership = access. Optional: allowed users, max concurrent threads, ho
 - [x] **OpenAI key mandatory** — required for image generation (Artist) and voice transcription (Whisper). OpenRouter can't generate images
 - [x] **OS services with auto-restart** — LaunchAgent (macOS) / systemd (Linux). 6 services per repo. Survive reboots, restart on crash
 - [x] **Multi-repo = same Slack app, different channels** — global tokens shared, per-repo config separate
+- [x] **Agent↔model conversation files** — per-agent, per-thread JSON in worktree. Full model transcript (tool calls, reasoning, retries) separate from Slack messages. Agent decides what to post publicly
 
 ---
 

@@ -23,37 +23,47 @@ If a message doesn't match an agent's filter → no model call, zero tokens.
 
 Each agent manages its own conversation with the model. The daemon does NOT maintain one shared conversation — each agent has its own.
 
-Per-thread, per-agent conversation files:
+**Conversation files live in the thread's worktree:**
 
 ```
-.codebutler/conversations/
-  <thread-id>/
-    pm.json
-    coder.json
-    reviewer.json
-    lead.json
-    artist.json
-    researcher.json
+.codebutler/branches/<branchName>/conversations/
+  pm.json
+  coder.json
+  reviewer.json
+  lead.json
+  artist.json
+  researcher.json
 ```
 
-Each file stores the full message history (system prompt + user/assistant turns).
+Each file stores the **complete agent↔model transcript**: system prompt, user messages, assistant responses, tool calls, tool results, retries. This is NOT the same as what appears in Slack — most tool calls and intermediate reasoning stay private to the agent.
+
+### Two layers of state
+
+| Layer | What it holds | Who sees it | Lifetime |
+|-------|--------------|-------------|----------|
+| **Slack thread** | Curated agent outputs, user messages, inter-agent @mentions | Everyone (user + all agents) | Permanent (Slack retention) |
+| **Conversation file** | Full model transcript (tool calls, results, reasoning, retries) | Only the owning agent (+ Lead for deep analysis) | Worktree lifetime |
+
+The agent decides what to post to Slack. The model may return 20 tool-call rounds, but only the final "PR ready" or "here's the plan" goes to the thread.
 
 ### Processing a message
 
 When an agent processes a new message:
-1. Load `.codebutler/conversations/<thread-id>/<role>.json` (create if first message)
-2. Append the new user message to the conversation
+1. Load `conversations/<role>.json` from the worktree (create if first message)
+2. Append the new user/agent message to the conversation
 3. Call the model with the full conversation
-4. Append the assistant response
-5. Save back to the file
+4. Model responds — could be a tool call or a text response
+5. If tool call: execute tool, append result, go to 3 (agent loop)
+6. If text response: append to conversation, decide whether to post to Slack
+7. Save conversation file after each model round (crash-safe)
 
-### Daemon restart
+### Agent restart
 
-Conversation files are the source of truth. If the daemon restarts, agents resume from where they left off — no context is lost.
+Conversation files are the source of truth for model context. If an agent restarts mid-task, it loads the conversation file and resumes from the last saved round — no context lost, no need to replay from Slack.
 
 ### Thread lifecycle
 
-When a thread ends (Lead completes retrospective), conversation files can be archived or deleted.
+When a thread ends (Lead completes retrospective), the worktree is deleted — conversation files go with it. If deep analysis is needed later, the Lead can archive them before cleanup.
 
 ## Agent System Prompts
 
