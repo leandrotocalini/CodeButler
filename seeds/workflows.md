@@ -24,18 +24,23 @@ The standard workflow. User requests a feature or change. PM interviews until fu
 
 ## learn
 
-Onboarding workflow. Triggers automatically on first run (repo with existing code) or manually via "re-learn" / "refresh knowledge". All agents explore the codebase in parallel from their own perspective. No code changes, no PR.
+Onboarding workflow. Triggers automatically on first run (repo with existing code) or manually via "re-learn" / "refresh knowledge". Agents explore the codebase in phases — PM maps first, then the rest build on that foundation from their own perspective. No code changes, no PR.
+
+**Why phased, not parallel:** each agent builds a map of the project, but from a different perspective and with different depth. The PM maps the "what" (structure, features, domains). The Coder, Reviewer, and Artist read that map first, then go deeper into the "how" from their angle. This creates complementary knowledge, not redundant knowledge — and gives every agent a shared foundation for communication.
 
 1. PM: classify as learn (or auto-triggered on first run)
-2. All agents: explore codebase in parallel, each from their perspective
+2. **Phase 1 — PM maps first:**
    - PM: project structure, README, entry points, features, domains
-   - Coder: architecture, patterns, conventions, build system, test framework
-   - Reviewer: test coverage, CI config, linting, security patterns, quality hotspots
-   - Artist: UI components, design system, styles, screens, responsive patterns
-   - Lead: reads what all agents found, synthesizes shared knowledge
-3. Any agent: if needs external context → @codebutler.researcher (on demand, not automatic)
-4. Each agent: populates their project map section in their MD
-5. Lead: populates `global.md` (architecture, tech stack, conventions, key decisions)
+   - PM: populates Project Map in `pm.md`
+3. **Phase 2 — Technical agents in parallel, each reads PM's map first:**
+   - Coder: reads PM's map → architecture, patterns, conventions, build system, test framework
+   - Reviewer: reads PM's map → test coverage, CI config, linting, security patterns, quality hotspots
+   - Artist: reads PM's map → UI components, design system, styles, screens, responsive patterns
+   - Each agent: populates their Project Map in their MD
+4. Any agent (phase 1 or 2): if needs external context → @codebutler.researcher (on demand, not automatic)
+5. **Phase 3 — Lead synthesizes:**
+   - Lead: reads all agents' maps, synthesizes shared knowledge
+   - Lead: populates `global.md` (architecture, tech stack, conventions, key decisions)
 6. User: review and approve all MD changes
 
 **Re-learn** is the same workflow but agents compare with their existing knowledge and **compact**: remove outdated info, update what changed, add what's new. Result is cleaner, not just bigger.
