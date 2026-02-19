@@ -31,7 +31,7 @@ Onboarding workflow. Triggers automatically on first run or manually via "re-lea
 **Two variants, same phases:**
 
 - **Existing codebase:** PM explores code to build its map. Technical agents explore code with PM's map as foundation.
-- **New project:** PM interviews the user (what to build, goals, constraints) to build its map. Technical agents read PM's map and ask the user questions from their angle — Coder asks about tech choices, architecture, build system; Reviewer asks about quality expectations, CI, testing strategy.
+- **New project:** PM interviews the user (what to build, goals, constraints) to build its map. If unfamiliar tech or domain → PM asks Researcher before finishing Phase 1 so the map includes research context. Technical agents read PM's map (with research included) and ask the user questions from their angle — Coder asks about tech choices, architecture, build system; Reviewer asks about quality expectations, CI, testing strategy.
 
 ### Steps
 
@@ -39,14 +39,15 @@ Onboarding workflow. Triggers automatically on first run or manually via "re-lea
 2. **Phase 1 — PM maps first:**
    - Existing codebase: PM explores project structure, README, entry points, features, domains
    - New project: PM interviews user (what to build, goals, constraints, domain concepts)
-   - PM: populates Project Map in `pm.md`
+   - PM: if unfamiliar tech or domain → @codebutler.researcher before finishing phase 1
+   - PM: populates Project Map in `pm.md` (includes research references if applicable)
 3. **Phase 2 — Technical agents in parallel, each reads PM's map first:**
-   - Coder: reads PM's map → asks/explores architecture, patterns, conventions, build system, test framework
-   - Reviewer: reads PM's map → asks/explores test coverage, CI config, linting, security patterns, quality expectations
-   - Artist: reads PM's map → asks/explores UI components, design system, styles, screens, responsive patterns
+   - Coder: reads PM's map (+ research) → asks/explores architecture, patterns, conventions, build system, test framework
+   - Reviewer: reads PM's map (+ research) → asks/explores test coverage, CI config, linting, security patterns, quality expectations
+   - Artist: reads PM's map (+ research) → asks/explores UI components, design system, styles, screens, responsive patterns
+   - Each agent: if needs more external context → @codebutler.researcher (on demand)
    - Each agent: populates their Project Map in their MD
-4. Any agent (phase 1 or 2): if needs external context → @codebutler.researcher (on demand, not automatic)
-5. **Phase 3 — Lead synthesizes:**
+4. **Phase 3 — Lead synthesizes:**
    - Lead: reads all agents' maps, synthesizes shared knowledge
    - Lead: populates `global.md` (architecture, tech stack, conventions, key decisions)
 6. User: review and approve all MD changes
