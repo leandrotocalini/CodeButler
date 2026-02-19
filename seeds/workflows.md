@@ -24,18 +24,26 @@ The standard workflow. User requests a feature or change. PM interviews until fu
 
 ## learn
 
-Onboarding workflow. Triggers automatically on first run (repo with existing code) or manually via "re-learn" / "refresh knowledge". Agents explore the codebase in phases — PM maps first, then the rest build on that foundation from their own perspective. No code changes, no PR.
+Onboarding workflow. Triggers automatically on first run or manually via "re-learn" / "refresh knowledge". Works for both existing codebases and new projects. Agents build knowledge in phases — PM maps first, then the rest build on that foundation from their own perspective. No code changes, no PR.
 
 **Why phased, not parallel:** each agent builds a map of the project, but from a different perspective and with different depth. The PM maps the "what" (structure, features, domains). The Coder, Reviewer, and Artist read that map first, then go deeper into the "how" from their angle. This creates complementary knowledge, not redundant knowledge — and gives every agent a shared foundation for communication.
 
+**Two variants, same phases:**
+
+- **Existing codebase:** PM explores code to build its map. Technical agents explore code with PM's map as foundation.
+- **New project:** PM interviews the user (what to build, goals, constraints) to build its map. Technical agents read PM's map and ask the user questions from their angle — Coder asks about tech choices, architecture, build system; Reviewer asks about quality expectations, CI, testing strategy.
+
+### Steps
+
 1. PM: classify as learn (or auto-triggered on first run)
 2. **Phase 1 — PM maps first:**
-   - PM: project structure, README, entry points, features, domains
+   - Existing codebase: PM explores project structure, README, entry points, features, domains
+   - New project: PM interviews user (what to build, goals, constraints, domain concepts)
    - PM: populates Project Map in `pm.md`
 3. **Phase 2 — Technical agents in parallel, each reads PM's map first:**
-   - Coder: reads PM's map → architecture, patterns, conventions, build system, test framework
-   - Reviewer: reads PM's map → test coverage, CI config, linting, security patterns, quality hotspots
-   - Artist: reads PM's map → UI components, design system, styles, screens, responsive patterns
+   - Coder: reads PM's map → asks/explores architecture, patterns, conventions, build system, test framework
+   - Reviewer: reads PM's map → asks/explores test coverage, CI config, linting, security patterns, quality expectations
+   - Artist: reads PM's map → asks/explores UI components, design system, styles, screens, responsive patterns
    - Each agent: populates their Project Map in their MD
 4. Any agent (phase 1 or 2): if needs external context → @codebutler.researcher (on demand, not automatic)
 5. **Phase 3 — Lead synthesizes:**
