@@ -137,6 +137,119 @@ MCP lets agents use external tools beyond the built-in set. An MCP server is a c
 
 **What this does NOT replace:** native tools (Read, Write, Bash, Grep, etc.) stay native. MCP is for external integrations, not for reimplementing built-in capabilities.
 
+### 1.7 Skills — Custom Commands
+
+Skills are project-specific, reusable commands defined as markdown files. While workflows define multi-step processes (implement, bugfix, discover), skills are more atomic — focused actions that teams use repeatedly. Think of them as custom slash commands with full agent backing.
+
+**Where they live:** `.codebutler/skills/` — one `.md` file per skill, committed to git.
+
+**Example skill — `deploy.md`:**
+
+```markdown
+# deploy
+
+Deploy the project to an environment.
+
+## Trigger
+deploy, deploy to {environment}
+
+## Agent
+coder
+
+## Prompt
+Deploy the project to {{environment | default: "staging"}}.
+
+1. Run the test suite first. If tests fail, stop and report
+2. Run `./scripts/deploy.sh {{environment}}`
+3. Verify the deployment is healthy (curl the /health endpoint)
+4. Report: deployed version, URL, any warnings
+```
+
+**Example skill — `db-migrate.md`:**
+
+```markdown
+# db-migrate
+
+Run database migrations.
+
+## Trigger
+migrate, run migrations, db migrate
+
+## Agent
+coder
+
+## Prompt
+Run database migrations.
+
+1. Check for pending migrations: `npx prisma migrate status`
+2. If pending: run `npx prisma migrate deploy`
+3. If dev environment: run `npx prisma generate` to update client
+4. Report: migrations applied, current state
+```
+
+**Example skill — `changelog.md`:**
+
+```markdown
+# changelog
+
+Generate a changelog entry for the latest release.
+
+## Trigger
+changelog, what changed, release notes
+
+## Agent
+pm
+
+## Prompt
+Generate a changelog entry from recent git history.
+
+1. Read the latest tag: `git describe --tags --abbrev=0`
+2. List commits since that tag: `git log <tag>..HEAD --oneline`
+3. Group by type (features, fixes, refactors)
+4. Write a structured changelog entry in CHANGELOG.md
+5. Post the entry in the thread for review
+```
+
+**Skill file format:**
+
+| Section | Required | Description |
+|---------|----------|-------------|
+| `# name` | Yes | Skill name (matches filename) |
+| Description | Yes | One-line description (shown in help) |
+| `## Trigger` | Yes | Comma-separated trigger phrases. `{param}` captures variables |
+| `## Agent` | Yes | Which agent executes: `pm`, `coder`, `reviewer`, `researcher`, `artist`, `lead` |
+| `## Prompt` | Yes | The instructions sent to the agent. `{{param}}` resolves captured variables. `{{param \| default: "value"}}` for defaults |
+
+**How it works:**
+
+1. User posts in Slack: "deploy to production"
+2. PM classifies intent — checks workflows first, then scans skills (trigger match)
+3. PM resolves variables: `{environment}` → `"production"`
+4. PM routes to the skill's target agent with the resolved prompt
+5. Agent executes following the prompt instructions
+6. If the skill triggers code changes → normal flow continues (PR, Reviewer, Lead)
+7. If no code changes → agent reports result in the thread, done
+
+**Skills vs workflows:**
+
+| | Workflows | Skills |
+|---|-----------|--------|
+| Scope | Multi-agent, multi-step processes | Single-agent, focused actions |
+| Definition | `workflows.md` (one file, all workflows) | `skills/*.md` (one file per skill) |
+| Who creates | Seeded on init, evolved by Lead | Team members + Lead |
+| Parameters | None (PM interviews for context) | Captured from trigger phrases |
+| Examples | implement, bugfix, discover, refactor | deploy, migrate, lint, release, changelog |
+
+**PM intent classification order:**
+1. Exact workflow match → run workflow
+2. Skill trigger match → run skill
+3. Ambiguous → present options (workflows + skills) to user
+
+**Who creates skills:**
+- **Team members** — create `.md` files in `skills/` manually for project-specific operations
+- **Lead** — proposes new skills during retrospective when it spots recurring patterns ("you've asked for deploys 4 times — want me to create a deploy skill?")
+- **PM** — suggests skills when users repeatedly describe the same type of task
+
 ### 1.7 Why CodeButler Exists
 
 **vs. Claude Code:** Slack-native. PM planning 100x cheaper. Automated memory. N parallel threads. Audit trail.
@@ -279,6 +392,9 @@ All LLM calls route through OpenRouter. Agents needing multiple models define th
   workflows.md                   # Process playbook
   artist/
     assets/                      # Screenshots, mockups, visual references
+  skills/                        # Custom commands — one .md per skill (committed)
+    deploy.md                    # Example: deploy to environment
+    db-migrate.md                # Example: run database migrations
   research/                      # Researcher findings (committed, merged with PRs)
     stripe-api.md                # Example: Stripe best practices
     vite-plugins.md              # Example: Vite plugin system docs
@@ -292,7 +408,7 @@ All LLM calls route through OpenRouter. Agents needing multiple models define th
   images/                        # Generated images (gitignored)
 ```
 
-**Committed to git:** `config.json`, `mcp.json`, all `.md` files, `artist/assets/`, `research/`, `roadmap.md`. **Gitignored:** `branches/` (including conversation files), `images/`.
+**Committed to git:** `config.json`, `mcp.json`, all `.md` files, `skills/`, `artist/assets/`, `research/`, `roadmap.md`. **Gitignored:** `branches/` (including conversation files), `images/`.
 
 **Two layers of state:**
 1. **Slack thread** — inter-agent messages + user interaction. The public record. Source of truth for what was communicated.
@@ -417,7 +533,7 @@ Each agent activation involves multiple round-trips with the model: tool calls, 
 
 ### PM — Always-Online Orchestrator
 
-The entry point for all user messages. Talks to user, explores codebase, selects workflow, delegates to other agents via @mentions in the thread. Cheap model (Kimi by default). System prompt: `pm.md` + `global.md` + `workflows.md`. Capped at 15 tool-calling iterations per activation.
+The entry point for all user messages. Talks to user, explores codebase, selects workflow or skill, delegates to other agents via @mentions in the thread. Cheap model (Kimi by default). System prompt: `pm.md` + `global.md` + `workflows.md` + skill index from `skills/`. Capped at 15 tool-calling iterations per activation.
 
 The PM's goroutine for a thread stays alive while the Coder works — when the Coder @mentions PM with a question, the PM's Slack listener routes it to that thread's goroutine and responds.
 
@@ -927,6 +1043,7 @@ This ensures the right people get notified even when they're not actively watchi
 - [x] **PM workflow menu** — when user intent is ambiguous, PM presents available workflows as options. Teaches new users what CodeButler can do
 - [x] **Research Index in global.md** — Researcher adds `@` references to persisted findings in global.md. All agents see what research exists via their system prompt
 - [x] **MCP support with per-agent access** — `.codebutler/mcp.json` defines MCP servers + which roles can use them. Agent process only launches servers assigned to its role. MCP tools appear alongside native tools in the agent loop. Secrets via env vars, never in config
+- [x] **Skills — custom commands** — `.codebutler/skills/*.md` defines project-specific reusable commands. More atomic than workflows, single-agent focused. PM matches trigger phrases during intent classification. Variables captured from user message. Created by team, Lead proposes from retrospective patterns
 
 ---
 

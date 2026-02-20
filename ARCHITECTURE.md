@@ -71,8 +71,55 @@ Each agent's system prompt is built from:
 1. `seeds/<role>.md` — agent-specific identity, personality, tools, rules
 2. `seeds/global.md` — shared project knowledge (architecture, conventions, decisions)
 3. `seeds/workflows.md` — available workflows (PM only, or all agents if relevant)
+4. Skill index from `skills/` — PM only: skill names, triggers, descriptions (for intent classification)
 
 The seed files are read once at startup. If the Lead updates them (after user approval), the changes take effect on the next model call (the updated file is loaded into the conversation).
+
+## Skills
+
+Custom commands defined as markdown files in `.codebutler/skills/`. Parsed at startup, re-read when files change.
+
+### Skill Index (PM System Prompt)
+
+At startup, the PM process scans `skills/` and builds a skill index appended to its system prompt:
+
+```
+Available skills:
+- deploy: Deploy the project to an environment. Triggers: deploy, deploy to {environment}
+- db-migrate: Run database migrations. Triggers: migrate, run migrations, db migrate
+- changelog: Generate changelog entry. Triggers: changelog, what changed, release notes
+```
+
+The PM uses this index during intent classification — it's just text in the prompt, the model matches naturally.
+
+### Skill Execution
+
+```
+1. PM classifies user message:
+   a. Match workflows first (implement, bugfix, etc.)
+   b. If no workflow match → check skill triggers
+   c. If no skill match → ambiguous → present options
+2. PM reads the matched skill file (skills/<name>.md)
+3. PM extracts variables from user message using trigger pattern
+4. PM resolves {{variables}} in the skill's prompt
+5. PM @mentions the skill's target agent with the resolved prompt
+6. Target agent executes the prompt (standard agent loop)
+7. If code changes → Reviewer + Lead (standard flow)
+8. If no code changes → agent reports result, done
+```
+
+### Trigger Matching
+
+Trigger matching is done by the LLM (PM), not by regex. The skill index in the system prompt gives the PM enough context to match user intent to skills. The `{param}` syntax in triggers is a hint to the PM about what to extract — the PM resolves it naturally from the user's message.
+
+### Package
+
+```
+internal/
+  skills/
+    loader.go       # Scan skills/, parse markdown, build index
+    parser.go       # Parse skill file: name, triggers, agent, prompt, variables
+```
 
 ## Per-Process Event Loop
 
@@ -178,6 +225,7 @@ internal/
     openai/images.go             # Image gen/edit (Artist)
   tools/                         # Definition, executor (sandboxed), loop (provider-agnostic)
   mcp/                           # MCP server lifecycle, client, merged tool registry
+  skills/                        # Skill loader, parser, index builder
   router/router.go               # Message classifier (per-agent filter)
   conflicts/                     # Tracker, notify
   worktree/                      # Worktree create/init/remove (per-platform)
@@ -196,6 +244,7 @@ internal/
 | `internal/provider/openrouter/` | API client, error handling |
 | `internal/worktree/` | Create, init, remove, isolation |
 | `internal/mcp/` | Config parsing, role filtering, env resolution, tool routing, server lifecycle |
+| `internal/skills/` | Skill file parsing, index building, variable extraction |
 
 Integration: mock OpenRouter, mock MCP servers (stdio). E2E: real Slack (manual).
 
