@@ -91,6 +91,67 @@ Each process has its own thread registry (`map[string]*ThreadWorker`). The PM pr
 
 Thread goroutines are ephemeral — die after 60s of inactivity (~2KB stack). On next @mention, a new goroutine reads the thread from Slack to rebuild context. Panic recovery per goroutine.
 
+## MCP Server Management
+
+Each agent process manages its own MCP server child processes. No shared MCP state between agents.
+
+### Startup
+
+```
+1. Read .codebutler/mcp.json
+2. Filter servers by current agent's role
+3. For each matching server:
+   a. Resolve ${VAR} in env from os.Environ()
+   b. Spawn child process (command + args, stdio transport)
+   c. Initialize MCP connection (protocol handshake)
+   d. Call tools/list → get available tools with schemas
+   e. Add tools to agent's tool registry alongside native tools
+4. If a server fails to start → log warning, continue without it
+```
+
+### Tool Routing
+
+The agent's tool registry holds both native and MCP tools. When the LLM returns a tool call:
+
+```
+1. Look up tool name in registry
+2. If native tool → execute locally (existing path)
+3. If MCP tool → route to the owning MCP server process:
+   a. Send tools/call via stdio
+   b. Wait for response (with timeout)
+   c. Return result to LLM
+4. If unknown tool → return error to LLM
+```
+
+Tool names must be unique across all sources. If an MCP server exposes a tool with the same name as a native tool, the native tool wins and a warning is logged.
+
+### Shutdown
+
+When the agent process exits (graceful or crash):
+- Send SIGTERM to all MCP child processes
+- Wait up to 5s for each to exit
+- SIGKILL any that remain
+
+### Error Handling
+
+| Failure | Recovery |
+|---------|----------|
+| MCP server crashes mid-session | Log error, remove its tools from registry, continue without them. Post warning in thread if a tool call was in flight |
+| MCP server hangs on tool call | Timeout (30s default, configurable), return error to LLM, LLM retries or uses alternative |
+| MCP server fails to start | Log warning, agent starts without those tools. Not fatal |
+| Invalid mcp.json | Agent starts with zero MCP tools. Log error |
+
+### Package
+
+```
+internal/
+  mcp/
+    manager.go      # Lifecycle: start servers, stop, restart
+    client.go       # MCP protocol client (stdio transport, tools/list, tools/call)
+    registry.go     # Merged tool registry (native + MCP)
+    config.go       # Parse mcp.json, filter by role, resolve env vars
+```
+
 ## Agent Interface
 
 ```go
@@ -116,6 +177,7 @@ internal/
     openrouter/                  # Client, chat completions with tool-calling
     openai/images.go             # Image gen/edit (Artist)
   tools/                         # Definition, executor (sandboxed), loop (provider-agnostic)
+  mcp/                           # MCP server lifecycle, client, merged tool registry
   router/router.go               # Message classifier (per-agent filter)
   conflicts/                     # Tracker, notify
   worktree/                      # Worktree create/init/remove (per-platform)
@@ -133,8 +195,9 @@ internal/
 | `internal/github/github.go` | PR detection, merge polling |
 | `internal/provider/openrouter/` | API client, error handling |
 | `internal/worktree/` | Create, init, remove, isolation |
+| `internal/mcp/` | Config parsing, role filtering, env resolution, tool routing, server lifecycle |
 
-Integration: mock OpenRouter. E2E: real Slack (manual).
+Integration: mock OpenRouter, mock MCP servers (stdio). E2E: real Slack (manual).
 
 ## Error Recovery
 

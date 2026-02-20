@@ -82,7 +82,60 @@ Plus two shared files all agents read: `global.md` (shared project knowledge: ar
 
 ### 1.6 MCP — Model Context Protocol
 
-CodeButler implements the same tool-calling loop as Claude Code, so it can support MCP servers. Config from `.claude/mcp.json`. Lets agents connect to databases, APIs, Figma, Linear, Jira, Sentry, etc.
+MCP lets agents use external tools beyond the built-in set. An MCP server is a child process that exposes tools over stdio — database queries, API calls, file system extensions, whatever the server implements. CodeButler's agent loop already does tool-calling; MCP tools appear alongside native tools in the same loop.
+
+**Config:** `.codebutler/mcp.json` (per-repo, committed to git). Defines available servers and which agents can use them.
+
+```json
+{
+  "servers": {
+    "postgres": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-postgres"],
+      "env": { "DATABASE_URL": "${DATABASE_URL}" },
+      "roles": ["coder", "reviewer"]
+    },
+    "linear": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-linear"],
+      "env": { "LINEAR_API_KEY": "${LINEAR_API_KEY}" },
+      "roles": ["pm", "lead"]
+    },
+    "figma": {
+      "command": "npx",
+      "args": ["-y", "@anthropic/mcp-server-figma"],
+      "env": { "FIGMA_TOKEN": "${FIGMA_TOKEN}" },
+      "roles": ["artist"]
+    },
+    "sentry": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-sentry"],
+      "env": { "SENTRY_AUTH_TOKEN": "${SENTRY_AUTH_TOKEN}" },
+      "roles": ["coder", "reviewer", "pm"]
+    }
+  }
+}
+```
+
+**Per-agent access (`roles` field):** each server lists which agents can use it. When an agent process starts, it only launches the MCP servers assigned to its role. The Coder gets database access; the PM doesn't. The Artist gets Figma; the Coder doesn't. If `roles` is omitted, all agents get access.
+
+**Environment variables:** MCP server configs can reference env vars with `${VAR}` syntax. Secrets come from the environment (set in the service unit or shell), never stored in the committed config file.
+
+**Lifecycle:**
+1. Agent process starts → reads `mcp.json` → filters servers by its role → launches each as a child process (stdio transport)
+2. Agent discovers tools from each server (MCP `tools/list`)
+3. MCP tools are added to the tool list sent to the LLM alongside native tools
+4. When the LLM calls an MCP tool → agent routes the call to the right server process → returns result to LLM
+5. Agent process stops → all child MCP server processes are killed
+
+**What this enables:**
+- **Databases:** Coder queries schemas, checks data, runs migrations
+- **Project management:** PM reads/updates Linear or Jira tickets, Lead creates issues from retrospectives
+- **Design:** Artist pulls components and styles from Figma
+- **Monitoring:** Coder and Reviewer check Sentry for error context when debugging
+- **Custom servers:** any stdio MCP server works — teams can build project-specific servers
+
+**What this does NOT replace:** native tools (Read, Write, Bash, Grep, etc.) stay native. MCP is for external integrations, not for reimplementing built-in capabilities.
 
 ### 1.7 Why CodeButler Exists
 
@@ -214,6 +267,7 @@ All LLM calls route through OpenRouter. Agents needing multiple models define th
 ```
 <repo>/.codebutler/
   config.json                    # Per-repo settings (committed)
+  mcp.json                       # MCP server config — servers + per-agent access (committed)
   # Agent MDs — each is system prompt + project map + learnings
   pm.md                          # PM agent
   coder.md                       # Coder agent
@@ -238,7 +292,7 @@ All LLM calls route through OpenRouter. Agents needing multiple models define th
   images/                        # Generated images (gitignored)
 ```
 
-**Committed to git:** `config.json`, all `.md` files, `artist/assets/`, `research/`, `roadmap.md`. **Gitignored:** `branches/` (including conversation files), `images/`.
+**Committed to git:** `config.json`, `mcp.json`, all `.md` files, `artist/assets/`, `research/`, `roadmap.md`. **Gitignored:** `branches/` (including conversation files), `images/`.
 
 **Two layers of state:**
 1. **Slack thread** — inter-agent messages + user interaction. The public record. Source of truth for what was communicated.
@@ -872,6 +926,7 @@ This ensures the right people get notified even when they're not actively watchi
 - [x] **Distributed agents** — agents can run on different machines. Same repo, same Slack, different services. Git + Slack as coordination. Default is all on one machine
 - [x] **PM workflow menu** — when user intent is ambiguous, PM presents available workflows as options. Teaches new users what CodeButler can do
 - [x] **Research Index in global.md** — Researcher adds `@` references to persisted findings in global.md. All agents see what research exists via their system prompt
+- [x] **MCP support with per-agent access** — `.codebutler/mcp.json` defines MCP servers + which roles can use them. Agent process only launches servers assigned to its role. MCP tools appear alongside native tools in the agent loop. Secrets via env vars, never in config
 
 ---
 
