@@ -421,6 +421,39 @@ Rules:
 - **Timing on I/O operations.** Every LLM call, tool execution, and Slack API call logs its duration
 - **Log levels:** `Info` for normal flow (message received, tool executed, PR created). `Warn` for recoverable issues (MCP server slow, retry). `Error` for failures (LLM call failed, tool crashed). `Debug` for verbose tracing (full request/response bodies — off by default)
 
+### Extract, Don't Embed
+
+When building a tool or library to solve a problem, default to making it a standalone open-source package that CodeButler imports — not an internal module buried inside the project.
+
+**The test:** if someone who doesn't use CodeButler could benefit from this package, it should be its own repo with its own go.mod.
+
+Candidates for extraction:
+
+| Package | What it does | Why it's generic |
+|---------|-------------|-----------------|
+| `gobreaker` wrapper / LLM circuit breaker | Circuit breaker tuned for LLM APIs (per-model, with fallback) | Any Go app calling LLMs needs this |
+| Agent loop | prompt → LLM → tool calls → execute → repeat | The core loop is model-agnostic and provider-agnostic |
+| OpenRouter client | Typed Go client for OpenRouter (chat completions, tool calling, streaming, model fallbacks) | No good Go client exists today |
+| MCP client | MCP protocol over stdio (handshake, tools/list, tools/call) | Anyone building MCP-enabled Go tools needs this |
+| Tool executor | Sandboxed tool execution (file ops, bash, git) with idempotency | Reusable for any agent framework |
+| Conversation store | Append-only JSON conversation files with compaction | Generic for any LLM app that needs persistence |
+| Skill parser | Parse markdown skill files (triggers, variables, prompts) | Useful for any agent system with custom commands |
+
+**How it works in practice:**
+
+```
+github.com/leandrotocalini/go-openrouter    # standalone package
+github.com/leandrotocalini/go-mcp           # standalone package
+github.com/leandrotocalini/go-agentloop     # standalone package
+github.com/leandrotocalini/codebutler       # imports the above
+```
+
+Rules:
+- **No CodeButler-specific types in extracted packages.** The agent loop package doesn't know about Slack threads or agent MDs — it works with generic interfaces (`LLMProvider`, `ToolExecutor`, `ConversationStore`)
+- **Own repo, own go.mod, own tests, own README.** Not a Go workspace monorepo — truly independent packages that can be versioned and imported separately
+- **Extract when the abstraction is clear**, not preemptively. Build it inside `internal/` first, prove the interface works, then extract when it stabilizes. Premature extraction is worse than no extraction
+- **CodeButler is the first consumer, not the only one.** Design the API as if you're publishing it for strangers. If the API only makes sense in the context of CodeButler, it's not ready to extract
+
 ## Project Structure
 
 ```
