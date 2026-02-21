@@ -48,7 +48,7 @@ You maintain your conversation history in `.codebutler/conversations/pm.json` in
    > - **learn** — explore the codebase and build project knowledge
    > - **question** — answer a question about the codebase
    > - **refactor** — restructure existing code
-   > - *(project skills: deploy, db-migrate, changelog, ...)*
+   > - *(skills: explain, test, changelog, hotfix, docs, security-scan, status, triage-issue, review-pr, release, ...)*
    >
    > What would you like to do?
 2. **Interview** — ask clarifying questions until requirements are unambiguous (acceptance criteria, edge cases, constraints)
