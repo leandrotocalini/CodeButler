@@ -89,6 +89,12 @@ MCP lets agents use external tools beyond the built-in set. An MCP server is a c
 ```json
 {
   "servers": {
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}" },
+      "roles": ["pm", "coder", "reviewer", "lead"]
+    },
     "postgres": {
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-postgres"],
@@ -129,6 +135,7 @@ MCP lets agents use external tools beyond the built-in set. An MCP server is a c
 5. Agent process stops → all child MCP server processes are killed
 
 **What this enables:**
+- **GitHub:** PM triages issues, Reviewer posts inline PR comments, Lead links retrospective findings to issues — all via GitHub API, not just `gh` CLI
 - **Databases:** Coder queries schemas, checks data, runs migrations
 - **Project management:** PM reads/updates Linear or Jira tickets, Lead creates issues from retrospectives
 - **Design:** Artist pulls components and styles from Figma
@@ -257,11 +264,16 @@ Generate a changelog entry from recent git history.
 | `security-scan` | Reviewer | Run a security audit (OWASP Top 10 + project-specific risks) |
 | `self-document` | Lead | Document recent work in JOURNEY.md |
 | `status` | PM | Report project status (roadmap, active PRs, recent activity) |
+| `triage-issue` | PM | Triage a GitHub issue: analyze, label, prioritize, route (GitHub MCP) |
+| `review-pr` | Reviewer | Review a PR with inline comments on GitHub (GitHub MCP) |
+| `release` | PM | Create a GitHub release with auto-generated notes (GitHub MCP) |
 
 These live in `seeds/skills/` and are copied to `.codebutler/skills/` on init. Teams can modify, delete, or add new ones.
 
+Skills marked **(GitHub MCP)** require the GitHub MCP server configured in `mcp.json`. They use GitHub API tools (`get_issue`, `create_pull_request_review`, `create_release`, etc.) for richer interaction than `gh` CLI alone — inline PR comments, issue labeling, release publishing.
+
 **Who creates skills:**
-- **Seeded** — 8 default skills cover common development tasks (explain, test, hotfix, docs, etc.)
+- **Seeded** — 11 default skills cover common development tasks and GitHub workflows
 - **Team members** — create `.md` files in `skills/` manually for project-specific operations
 - **Lead** — proposes new skills during retrospective when it spots recurring patterns ("you've asked for deploys 4 times — want me to create a deploy skill?")
 - **PM** — suggests skills when users repeatedly describe the same type of task
@@ -314,7 +326,7 @@ Run `codebutler init` in a git repo. If the repo isn't configured, this is the o
 
 **Step 2: Repo setup** (once per repo — `<repo>/.codebutler/` doesn't exist):
 
-1. **Seed `.codebutler/`** — creates folder, copies seed MDs (`pm.md`, `coder.md`, `reviewer.md`, `lead.md`, `artist.md`, `researcher.md`, `global.md`, `workflows.md`), copies seed skills (`skills/explain.md`, `test.md`, `changelog.md`, `hotfix.md`, `docs.md`, `security-scan.md`, `self-document.md`, `status.md`), creates `config.json` with default models, creates `artist/assets/`, `branches/`, `images/`
+1. **Seed `.codebutler/`** — creates folder, copies seed MDs (`pm.md`, `coder.md`, `reviewer.md`, `lead.md`, `artist.md`, `researcher.md`, `global.md`, `workflows.md`), copies seed skills (`skills/explain.md`, `test.md`, `changelog.md`, `hotfix.md`, `docs.md`, `security-scan.md`, `self-document.md`, `status.md`, `triage-issue.md`, `review-pr.md`, `release.md`), seeds `mcp.json` with GitHub MCP server (other servers commented as examples), creates `config.json` with default models, creates `artist/assets/`, `branches/`, `images/`
 2. **Channel selection** — recommends creating `codebutler-<reponame>`. User can pick an existing channel or accept the recommendation
 3. **`.gitignore`** — adds `.codebutler/branches/`, `.codebutler/images/` if not present
 4. Saves channel to per-repo `config.json`
@@ -417,6 +429,9 @@ All LLM calls route through OpenRouter. Agents needing multiple models define th
     security-scan.md             # Seeded: security audit (Reviewer)
     self-document.md             # Seeded: document work in JOURNEY.md (Lead)
     status.md                    # Seeded: project status report (PM)
+    triage-issue.md              # Seeded: triage GitHub issues (PM, GitHub MCP)
+    review-pr.md                 # Seeded: review PRs with inline comments (Reviewer, GitHub MCP)
+    release.md                   # Seeded: create GitHub releases (PM, GitHub MCP)
   research/                      # Researcher findings (committed, merged with PRs)
     stripe-api.md                # Example: Stripe best practices
     vite-plugins.md              # Example: Vite plugin system docs

@@ -33,6 +33,9 @@ seeds/
     security-scan.md  # Security audit (Reviewer)
     self-document.md  # Document work in JOURNEY.md (Lead)
     status.md    # Project status report (PM)
+    triage-issue.md   # Triage GitHub issues (PM, GitHub MCP)
+    review-pr.md      # Review PRs with inline comments (Reviewer, GitHub MCP)
+    release.md        # Create GitHub releases (PM, GitHub MCP)
 ```
 
 ## Key Concepts
