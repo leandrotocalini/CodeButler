@@ -24,6 +24,15 @@ seeds/
   lead.md        # Lead: mediator, retrospectives, team improvement
   global.md      # Shared project knowledge (all agents read this)
   workflows.md   # Available workflows (PM uses these to classify intent)
+  skills/        # Seeded skills (copied to .codebutler/skills/ on init)
+    explain.md   # Explain code (PM)
+    test.md      # Write tests (Coder)
+    changelog.md # Generate changelog (PM)
+    hotfix.md    # Quick bug fix (PM → Coder)
+    docs.md      # Generate docs (Coder)
+    security-scan.md  # Security audit (Reviewer)
+    self-document.md  # Document work in JOURNEY.md (Lead)
+    status.md    # Project status report (PM)
 ```
 
 ## Key Concepts

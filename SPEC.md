@@ -236,16 +236,32 @@ Generate a changelog entry from recent git history.
 |---|-----------|--------|
 | Scope | Multi-agent, multi-step processes | Single-agent, focused actions |
 | Definition | `workflows.md` (one file, all workflows) | `skills/*.md` (one file per skill) |
-| Who creates | Seeded on init, evolved by Lead | Team members + Lead |
+| Who creates | Seeded on init, evolved by Lead | Seeded on init + team members + Lead |
 | Parameters | None (PM interviews for context) | Captured from trigger phrases |
-| Examples | implement, bugfix, discover, refactor | deploy, migrate, lint, release, changelog |
+| Examples | implement, bugfix, discover, refactor | explain, test, hotfix, changelog, docs, security-scan, status |
 
 **PM intent classification order:**
 1. Exact workflow match → run workflow
 2. Skill trigger match → run skill
 3. Ambiguous → present options (workflows + skills) to user
 
+**Seeded skills** (included on `codebutler init`):
+
+| Skill | Agent | What it does |
+|-------|-------|-------------|
+| `explain` | PM | Explain how a part of the codebase works |
+| `test` | Coder | Write tests for a specific file, function, or module |
+| `changelog` | PM | Generate a changelog entry from recent git history |
+| `hotfix` | PM | Investigate and quick-fix a bug (PM finds root cause, then sends to Coder) |
+| `docs` | Coder | Generate or update documentation for a part of the codebase |
+| `security-scan` | Reviewer | Run a security audit (OWASP Top 10 + project-specific risks) |
+| `self-document` | Lead | Document recent work in JOURNEY.md |
+| `status` | PM | Report project status (roadmap, active PRs, recent activity) |
+
+These live in `seeds/skills/` and are copied to `.codebutler/skills/` on init. Teams can modify, delete, or add new ones.
+
 **Who creates skills:**
+- **Seeded** — 8 default skills cover common development tasks (explain, test, hotfix, docs, etc.)
 - **Team members** — create `.md` files in `skills/` manually for project-specific operations
 - **Lead** — proposes new skills during retrospective when it spots recurring patterns ("you've asked for deploys 4 times — want me to create a deploy skill?")
 - **PM** — suggests skills when users repeatedly describe the same type of task
@@ -298,7 +314,7 @@ Run `codebutler init` in a git repo. If the repo isn't configured, this is the o
 
 **Step 2: Repo setup** (once per repo — `<repo>/.codebutler/` doesn't exist):
 
-1. **Seed `.codebutler/`** — creates folder, copies seed MDs (`pm.md`, `coder.md`, `reviewer.md`, `lead.md`, `artist.md`, `researcher.md`, `global.md`, `workflows.md`), creates `config.json` with default models, creates `artist/assets/`, `branches/`, `images/`
+1. **Seed `.codebutler/`** — creates folder, copies seed MDs (`pm.md`, `coder.md`, `reviewer.md`, `lead.md`, `artist.md`, `researcher.md`, `global.md`, `workflows.md`), copies seed skills (`skills/explain.md`, `test.md`, `changelog.md`, `hotfix.md`, `docs.md`, `security-scan.md`, `self-document.md`, `status.md`), creates `config.json` with default models, creates `artist/assets/`, `branches/`, `images/`
 2. **Channel selection** — recommends creating `codebutler-<reponame>`. User can pick an existing channel or accept the recommendation
 3. **`.gitignore`** — adds `.codebutler/branches/`, `.codebutler/images/` if not present
 4. Saves channel to per-repo `config.json`
@@ -393,8 +409,14 @@ All LLM calls route through OpenRouter. Agents needing multiple models define th
   artist/
     assets/                      # Screenshots, mockups, visual references
   skills/                        # Custom commands — one .md per skill (committed)
-    deploy.md                    # Example: deploy to environment
-    db-migrate.md                # Example: run database migrations
+    explain.md                   # Seeded: explain how code works (PM)
+    test.md                      # Seeded: write tests (Coder)
+    changelog.md                 # Seeded: generate changelog from git (PM)
+    hotfix.md                    # Seeded: investigate + quick-fix a bug (PM → Coder)
+    docs.md                      # Seeded: generate/update documentation (Coder)
+    security-scan.md             # Seeded: security audit (Reviewer)
+    self-document.md             # Seeded: document work in JOURNEY.md (Lead)
+    status.md                    # Seeded: project status report (PM)
   research/                      # Researcher findings (committed, merged with PRs)
     stripe-api.md                # Example: Stripe best practices
     vite-plugins.md              # Example: Vite plugin system docs
