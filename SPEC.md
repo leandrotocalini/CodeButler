@@ -1081,6 +1081,7 @@ This ensures the right people get notified even when they're not actively watchi
 - [x] **Research Index in global.md** — Researcher adds `@` references to persisted findings in global.md. All agents see what research exists via their system prompt
 - [x] **MCP support with per-agent access** — `.codebutler/mcp.json` defines MCP servers + which roles can use them. Agent process only launches servers assigned to its role. MCP tools appear alongside native tools in the agent loop. Secrets via env vars, never in config
 - [x] **Skills — custom commands** — `.codebutler/skills/*.md` defines project-specific reusable commands. More atomic than workflows, single-agent focused. PM matches trigger phrases during intent classification. Variables captured from user message. Created by team, Lead proposes from retrospective patterns
+- [x] **No vector DB for memory** — MD-based memory with Lead curation, git versioning, and full-context loading is sufficient. Agent MDs are small enough to load entirely into context (100% recall, no retrieval errors). Vector DB adds infrastructure, latency, embedding costs, and breaks distributed agents (which coordinate via git + Slack only). Revisit if MDs grow beyond ~50K tokens or cross-project knowledge transfer is needed
 
 ---
 
