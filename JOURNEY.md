@@ -4,6 +4,110 @@ Detailed record of architecture decisions and features implemented.
 
 ---
 
+## 2026-02-22 — Vector DB evaluation for agent memory
+
+### The question
+
+Should CodeButler use a vector database for agent memory? The idea is natural —
+agents accumulate knowledge over time, vector DBs enable semantic search over
+that knowledge, and RAG (retrieval-augmented generation) is the standard pattern
+for LLM memory systems. But the standard pattern isn't always the right one.
+
+### Why the current design doesn't need it
+
+The memory system is built around a specific principle: **the agent MD IS the
+memory.** Each agent's `.md` file is loaded entirely into the system prompt on
+every LLM call. This means 100% recall — the model sees every learning, every
+project map entry, every convention, on every activation. There's no retrieval
+step, and therefore no retrieval error.
+
+A vector DB introduces a retrieval step. You embed a query, search for the top-K
+most similar chunks, and hope the relevant knowledge is in those chunks. This
+works well when you have millions of documents and can't fit them all in context.
+But CodeButler's memory is intentionally small and curated — one MD per agent,
+one global.md, a handful of research files. The entire memory fits comfortably
+in a fraction of the context window.
+
+### Five reasons against
+
+**1. Breaks the "no database" decision.** The spec explicitly says: "No shared
+database. The Slack thread is the source of truth." A vector DB (Qdrant,
+ChromaDB, pgvector, even embedded options like sqlite-vss) adds infrastructure
+that needs installation, configuration, backups, and maintenance. CodeButler
+is one Go binary — a vector DB contradicts this.
+
+**2. Distributed agents break.** The architecture supports agents on different
+machines, coordinating only via git and Slack. A vector DB would need to be
+either centralized (adding a network dependency and single point of failure) or
+replicated across machines (consistency problems). Git already handles knowledge
+distribution — MDs are committed, pushed, and pulled. No extra coordination.
+
+**3. The Lead already curates knowledge.** The re-learn workflow is explicitly
+designed as "knowledge garbage collection." The Lead compacts, removes outdated
+info, and keeps MDs clean. This is better than accumulating everything in a
+vector store, because a curated MD is always relevant. A vector DB grows
+monotonically unless you build a separate garbage collection process — which is
+exactly what the Lead already does, but for markdown files with git versioning.
+
+**4. Embeddings cost money and add latency.** Every write to memory needs an
+embedding API call. Every agent activation needs a vector search query before
+the LLM call. That's latency and cost on every single interaction, in a system
+designed to be cost-conscious (the PM uses cheap models specifically to minimize
+cost per message).
+
+**5. Git gives versioning for free.** You can `git blame` to see when a learning
+was added, `git log` to trace its evolution, `git revert` to undo a bad one,
+and review all changes in PRs before they land on main. Vector DBs have no
+native equivalent. You'd need to build a versioning layer on top.
+
+### The Research Index pattern already works
+
+For accumulated research findings (which is the closest thing to "lots of
+documents that need retrieval"), the spec uses a simple pattern: the Researcher
+adds one-line entries to a `## Research Index` section in `global.md`, with
+references to individual files in `research/`. All agents see the index via
+their system prompt. When they need depth, they read the full file.
+
+This is effectively manual RAG without the overhead: the index is the "search
+results," the full files are the "retrieved documents," and the agent's judgment
+replaces the embedding similarity score. It works because the number of research
+files is small enough for a linear index. If it grew to hundreds, this pattern
+would need to evolve — but that's a problem for later, not now.
+
+### When it might actually be needed
+
+The right time to revisit this decision is when:
+
+1. **Agent MDs grow beyond ~50K tokens** — a single project with 100+
+   retrospectives, each adding learnings, could push MDs past the point where
+   full-context loading is wasteful. Not there yet.
+2. **Cross-project knowledge transfer** — if the same team runs CodeButler on
+   multiple repos and wants learnings from one project to inform another, a shared
+   knowledge base with semantic search could help. Not a current requirement.
+3. **Historical conversation queries** — "what did we decide about auth 3 months
+   ago?" requires searching across closed threads whose conversation files have
+   been deleted. A vector DB of conversation summaries could serve this.
+4. **Research accumulation** — if `research/` grows to 50+ files, the linear
+   index in global.md becomes unwieldy.
+
+### The progression if scaling becomes a problem
+
+1. **More aggressive compaction by the Lead** — already designed (re-learn
+   workflow). First lever to pull.
+2. **BM25 / keyword search over MDs** — no embeddings, no infrastructure. Just
+   `strings.Contains` or a lightweight Go search library. Handles the "find
+   relevant learning" case without vector overhead.
+3. **Embedded vector store** — only as a last resort, local-only (no external
+   service), as an optional feature. Maybe sqlite-vss or a pure Go option.
+
+### Decision
+
+**No vector DB.** The MD-based memory with Lead curation, git versioning, and
+full-context loading is the right design for CodeButler's scale and architecture.
+Revisit when there's evidence of actual memory scaling problems, not before.
+
+---
+
 ## 2026-02-11 — TUI local input and intelligent session management
 
 ### TUI: Local terminal input
