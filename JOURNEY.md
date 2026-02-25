@@ -762,3 +762,104 @@ gobreaker is battle-tested, has a clean generic API (Go 1.18+ type parameters),
 and does exactly one thing well. The generics-based `CircuitBreaker[*ChatResponse]`
 means Execute returns a typed response without casting — a nice improvement over the
 pre-generics version that returned `interface{}`.
+
+---
+
+## 2026-02-25 — M4: Every tool is a sandbox escape waiting to happen
+
+### The problem: agents that can do anything will eventually do the wrong thing
+
+An LLM with full filesystem access is a liability. When the Coder agent gets a
+task like "refactor the auth module," it needs Write, Edit, and Bash. But the PM
+agent — which only plans and delegates — should never touch a file. The Reviewer
+reads diffs and comments; if it could also edit files, a hallucinated "quick fix"
+could land in the codebase. And any agent running `rm -rf /` in a bash tool call
+(which models do occasionally hallucinate) would be catastrophic.
+
+The tool system needed three layers of defense: what a tool *is* (interface and
+registry), who can *use* it (role restrictions), and where it can *act* (sandbox).
+
+### Risk tiers: not all side effects are equal
+
+The spec defines four risk tiers, and the interesting design question was where to
+draw the lines. `Read`, `Grep`, and `Glob` are pure reads — no side effects, no
+approval needed. `Write` and `Edit` change files but only in the worktree, which
+is a disposable git branch — everything is reversible with `git checkout`. `Bash`
+is the tricky one: `go test` is safe, `rm -rf` is destructive, and `npm install`
+falls somewhere in between.
+
+The classifier uses two lists: a safe list (test runners, linters, build tools,
+read-only commands like `ls` and `cat`) and a dangerous pattern list (`rm -rf`,
+`sudo`, `docker`, `DROP TABLE`, piping to `sh`). Everything not on either list
+defaults to `WRITE_LOCAL` — conservative but not blocking. The alternative was
+defaulting unknowns to `DESTRUCTIVE` and requiring approval for every unfamiliar
+command, but that would make the Coder agent unusable for any project with custom
+scripts.
+
+One subtle case: `curl https://example.com | sh`. The original dangerous patterns
+included `"curl | sh"` as a literal substring, which doesn't match when there's a
+URL between `curl` and the pipe. The fix was simpler: match `"| sh"` and `"| bash"`
+as standalone patterns. Piping *anything* to a shell interpreter is dangerous,
+regardless of what's producing the output.
+
+### Role restrictions: structural, not behavioral
+
+The spec is explicit: role restrictions are *structural*, enforced at the executor
+level, not just in the system prompt. A prompt saying "you should not write files"
+is a suggestion. The executor checking `roleRestrictions[role][toolName]` and
+returning an error is a wall.
+
+The restriction map follows the spec table exactly: PM can't Write, Edit, or do
+git operations (PM never writes code). Researcher can't Write, Edit, Bash, or
+push (reads web, writes to research/ via a dedicated tool in a future milestone).
+Reviewer can't Write, Edit, or Bash (reads and comments only). Lead can't Bash
+(writes to MDs but never runs commands). Artist can't Bash or push (produces
+designs, not code). Coder has no restrictions — full access within the sandbox.
+
+### Sandbox: the path is a lie
+
+File paths from an LLM can't be trusted. The model might return `../../etc/passwd`,
+a symlink that resolves outside the worktree, or an absolute path to a sensitive
+location. The sandbox validates every path before any tool touches the filesystem.
+
+The validation resolves the path to an absolute form, then checks it starts with
+the sandbox root. But `filepath.Clean` alone isn't enough — a symlink inside the
+worktree could point to `/etc/`. So the sandbox calls `filepath.EvalSymlinks` to
+resolve the actual target. If the resolved path escapes the root, the operation
+is rejected.
+
+There's a wrinkle for new files: `EvalSymlinks` fails if the file doesn't exist
+yet (which is the normal case for Write). The fallback is to resolve the parent
+directory instead — if the parent is inside the sandbox, the new file will be too.
+
+### Idempotency: crash recovery without double execution
+
+When an agent crashes and restarts, it resumes from the last saved conversation.
+The last tool call might execute twice. For Read and Grep, that's harmless. For
+Write, re-execution produces the same file (atomic write: temp file + rename).
+For Edit, the tool checks whether `old_string` still exists — if it doesn't but
+`new_string` is present, the edit was already applied.
+
+But the general case is handled at the registry level: every tool call has an ID
+(from the LLM response), and the registry caches results keyed by that ID. On
+replay, the cached result is returned without re-executing the tool. This means
+even Bash commands — which are inherently non-idempotent — won't run twice after
+a crash recovery.
+
+### Atomic writes: the temp-file-rename dance
+
+Both Write and Edit use the same pattern: write to a temp file in the same
+directory, then `os.Rename` to the target path. This guarantees that the file is
+either fully written or not written at all — no partial writes if the process
+crashes mid-operation. The temp file is created with `os.CreateTemp` in the same
+directory as the target to ensure the rename is an atomic filesystem operation
+(same filesystem, no cross-device rename).
+
+### What's next
+
+M4 unblocks M5 (Agent Loop), which is the core prompt → LLM → tool-call →
+execute → repeat cycle. With the tool system in place, the agent runner can
+dispatch tool calls to actual executors instead of mocks. The registry's
+`Execute` method is already shaped to match the `ToolExecutor` interface defined
+in `ARCHITECTURE.md` — the agent loop will accept it directly via dependency
+injection.
