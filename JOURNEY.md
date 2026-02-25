@@ -863,3 +863,117 @@ dispatch tool calls to actual executors instead of mocks. The registry's
 `Execute` method is already shaped to match the `ToolExecutor` interface defined
 in `ARCHITECTURE.md` — the agent loop will accept it directly via dependency
 injection.
+
+---
+
+## 2026-02-25 — M6: What happens when an agent dies mid-thought
+
+### The problem: agents are mortal, conversations are not
+
+The Coder agent is 50 tool calls into a complex refactoring. It's read files,
+written code, run tests, fixed errors, and is about to make the final commit.
+Then the process crashes — OOM, deployment restart, machine reboot. All 50
+rounds of context live in a Go slice that just vanished from memory. When the
+agent restarts, it has no idea what it was doing. It starts fresh, re-reads
+the same files, re-writes the same code, burns the same tokens.
+
+The agent loop (M5) was designed to be stateless — given a system prompt and
+some messages, it runs until completion. That's clean for the loop itself, but
+it means everything above the loop needs to handle the messy reality that
+processes die. M6 adds the persistence layer: after every model round, the
+full conversation is written to disk. On restart, the agent loads it and
+continues from where it left off.
+
+### Two layers of state, and why only one needs persistence
+
+The architecture has a deliberate separation. Slack threads hold the curated,
+public communication — what agents *said* to each other and to the user.
+Conversation files hold the private, full transcript — every tool call, every
+tool result, every intermediate reasoning step. The Coder might make 20 tool
+calls before posting "PR ready" in Slack. Those 20 rounds live in the
+conversation file, not in the thread.
+
+This matters for crash recovery. You don't need to replay the Slack thread
+to rebuild the model's context. The conversation file has everything: the
+system prompt, the user's request, every assistant response, every tool
+invocation and its result. Load the file, feed it to the model, and the
+agent picks up exactly where it left off.
+
+### Crash-safe writes: the rename trick
+
+The write protocol is simple: serialize to a temp file, then rename. On POSIX
+systems, `rename(2)` is atomic within a filesystem — it either completes fully
+or not at all. If the process crashes while writing the temp file, the original
+conversation file is untouched. If it crashes between writing and renaming,
+you have a stale `.tmp` file that gets overwritten on the next save. The
+conversation file is never in a half-written state.
+
+This is the same pattern used by the tool system's Write and Edit tools (M4),
+which makes sense — it's the standard approach for crash-safe file updates.
+The alternative was append-only JSONL (one line per message), which would be
+more efficient for incremental writes but harder to load and replay. Since
+the full conversation needs to be sent to the model on every LLM call anyway,
+writing the complete array each time is the natural choice.
+
+### Where the store lives in the architecture
+
+The `ConversationStore` interface lives in the agent package alongside
+`LLMProvider`, `ToolExecutor`, and `MessageSender` — consumer-defined
+interfaces that the runner depends on without knowing the implementation:
+
+```go
+type ConversationStore interface {
+    Load(ctx context.Context) ([]Message, error)
+    Save(ctx context.Context, messages []Message) error
+}
+```
+
+The `FileStore` implementation lives in a separate `conversation` package.
+This follows the "extract, don't embed" principle from the architecture doc:
+the conversation store is generic enough to be useful outside CodeButler
+(any LLM app that needs persistent conversations), so it's designed with
+clean boundaries from the start. The `conversation` package imports
+`agent.Message` but nothing else from the project.
+
+The store is injected into the runner as an optional dependency via
+`WithConversationStore()`. When not set, the runner behaves exactly as
+before — pure in-memory conversation, no persistence. This keeps all
+existing tests passing without modification.
+
+### Resume logic: counting where you left off
+
+The tricky part of resume isn't loading the messages — it's figuring out how
+many turns were already completed. The runner needs to know because the
+`MaxTurns` budget applies to the entire conversation, not just one
+activation. If the Coder's limit is 100 turns and it crashed at turn 50, it
+should have 50 turns remaining, not start over with 100.
+
+The solution: count assistant messages in the loaded conversation. Each
+assistant message corresponds to exactly one LLM call. If the loaded
+conversation has 50 assistant messages, set `startTurn = 50` and begin the
+loop from there. The remaining budget is `MaxTurns - startTurn`.
+
+One edge case needs special handling: if the last message in the loaded
+conversation is an assistant text response (no tool calls), the conversation
+already completed. The runner returns immediately without making another LLM
+call. Without this check, loading a completed conversation would send it to
+the model again, which would produce a confused response to an already-finished
+task.
+
+### Save errors don't stop the loop
+
+A deliberate decision: if `Save()` fails (disk full, permissions, I/O error),
+the error is logged but the agent loop continues. The alternative — failing the
+entire run on a save error — would mean a transient disk issue kills a
+30-minute coding session. The agent can still complete its task; it just loses
+crash recovery for that round. If the disk stays broken, every round will log
+an error, giving the operator visibility without blocking progress.
+
+### What's next
+
+M6 provides the persistence layer that M7 (Agent Loop Safety) and M8 (Slack
+Client) will build on. M7 needs conversation state for stuck detection (same
+tool call 3 times = loop), and context compaction (when conversations grow too
+long, summarize old messages). M8 needs it to reconcile Slack thread state with
+agent state on restart — loading the conversation file tells the agent which
+messages it already processed.

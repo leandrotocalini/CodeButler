@@ -19,3 +19,17 @@ type ToolExecutor interface {
 type MessageSender interface {
 	SendMessage(ctx context.Context, channel, thread, text string) error
 }
+
+// ConversationStore persists agent conversations for crash recovery.
+// Each agent maintains its own conversation per thread, stored as a JSON
+// array of messages. The conversation package provides a file-based
+// implementation with crash-safe writes (write temp + rename).
+type ConversationStore interface {
+	// Load reads the persisted conversation. Returns nil, nil if no
+	// conversation exists yet (first activation).
+	Load(ctx context.Context) ([]Message, error)
+
+	// Save writes the full conversation to persistent storage. Must be
+	// crash-safe: write to a temp file, then rename.
+	Save(ctx context.Context, messages []Message) error
+}
