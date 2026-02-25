@@ -15,7 +15,7 @@ Each milestone has acceptance criteria and a clear dependency chain.
 - Phases are sequential (1→12), milestones within a phase may parallelize.
 - Each milestone has a status: `pending` | `in_progress` | `done`.
 - The critical path to a first working flow is: M1→M2→M3→M4→M5→M6→M7→M8→M9→M16→M17→M18.
-- Use `/implement-next` to pick up the next pending milestone and start implementing it.
+- Use `/implement-next` (Claude Code command) to pick up the next pending milestone and implement it.
 
 ## Design Documents
 
@@ -50,7 +50,6 @@ seeds/
     release.md        # Create GitHub releases (PM, GitHub MCP)
     behavior-report.md # Aggregate agent behavior analysis (Lead)
     brainstorm.md # Multi-model brainstorming with dynamic Thinker agents (PM)
-    implement-next.md # Pick up next roadmap milestone and implement it (Coder)
 ```
 
 ## Key Concepts
