@@ -468,6 +468,7 @@ internal/
   tools/                         # Definition, executor (sandboxed), loop (provider-agnostic)
   mcp/                           # MCP server lifecycle, client, merged tool registry
   skills/                        # Skill loader, parser, index builder
+  brainstorm/                    # Thinker fan-out, result collection, cost estimation
   router/router.go               # Message classifier (per-agent filter)
   conflicts/                     # Tracker, notify
   worktree/                      # Worktree create/init/remove (per-platform)
@@ -487,8 +488,126 @@ internal/
 | `internal/worktree/` | Create, init, remove, isolation |
 | `internal/mcp/` | Config parsing, role filtering, env resolution, tool routing, server lifecycle |
 | `internal/skills/` | Skill file parsing, index building, variable extraction |
+| `internal/brainstorm/` | Fan-out execution, result aggregation, cost estimation, error isolation |
 
 Integration: mock OpenRouter, mock MCP servers (stdio). E2E: real Slack (manual).
+
+## Brainstorm — Multi-Model Fan-Out
+
+The `brainstorm` workflow introduces a PM-exclusive tool: `BrainstormFanOut`. It makes parallel single-shot LLM calls to different models via OpenRouter, each with a PM-designed system prompt.
+
+### BrainstormFanOut Tool
+
+Available only to the PM agent. Not a standalone process — runs inside the PM's tool executor.
+
+```go
+// Tool definition (appears in PM's tool list)
+{
+    Name: "BrainstormFanOut",
+    Description: "Run parallel single-shot LLM calls to multiple models, each with a custom system prompt. Used for multi-perspective brainstorming.",
+    Parameters: {
+        "thinkers": [
+            {
+                "name": "string — display name for this Thinker (e.g., 'Security Specialist')",
+                "systemPrompt": "string — PM-crafted system prompt for this Thinker",
+                "model": "string — OpenRouter model ID from brainstorm.models pool"
+            }
+        ],
+        "userPrompt": "string — the question/context all Thinkers receive"
+    }
+}
+```
+
+### Execution
+
+```
+1. PM calls BrainstormFanOut with N thinker configs + shared user prompt
+2. Tool validates: all models are in brainstorm.models pool, N <= maxThinkers, no duplicate models (each Thinker MUST use a different model — model diversity is the whole point)
+3. Tool estimates cost (model pricing × estimated prompt tokens) — if exceeds maxCostPerRound, returns warning to PM (PM decides whether to proceed or ask user)
+4. Tool launches N goroutines via errgroup, each making a ChatCompletion call to OpenRouter:
+   - Messages: [system: thinker.systemPrompt, user: userPrompt]
+   - No tools enabled (single-shot, no agent loop)
+   - Timeout: 120s per call (reasoning models can be slow)
+5. Each goroutine captures: response text, token usage, duration, model used, errors
+6. errgroup.Wait() — all calls complete (or timeout)
+7. Tool returns aggregated results to PM as structured JSON
+8. PM processes results in its next turn (synthesis, posting to thread)
+```
+
+### Error Isolation
+
+Each Thinker is independent. If one model fails (429, timeout, content filter), the others continue.
+
+```go
+// Inside each goroutine — errors don't propagate
+resp, err := provider.ChatCompletion(ctx, req)
+if err != nil {
+    results[i] = ThinkerResult{
+        Name:  t.Name,
+        Model: t.Model,
+        Error: err.Error(),
+    }
+    return nil // don't cancel errgroup
+}
+```
+
+The PM receives all results including failures. It's the PM's job to note which Thinkers failed in its synthesis ("3 of 4 Thinkers responded — Gemini timed out").
+
+### Circuit Breaker Integration
+
+Brainstorm calls go through the same per-model circuit breakers as regular agent calls. If a brainstorm model's circuit is open, the Thinker returns immediately with an error — no wasted time waiting for a known-bad model. The PM can adapt: "DeepSeek circuit is open, using Gemini instead."
+
+Brainstorm failures do NOT open circuits for the agents' primary models. They're separate models in the pool.
+
+### Cost Tracking
+
+Each Thinker's token usage is tracked and added to the thread's `ThreadCost`:
+
+```go
+type ThinkerCost struct {
+    Name         string
+    Model        string
+    InputTokens  int64
+    OutputTokens int64
+    EstimatedUSD float64
+    Duration     time.Duration
+}
+```
+
+The PM's `ThreadCost.BrainstormRounds` field accumulates across rounds. The Lead includes brainstorm costs in the thread report — useful for understanding whether multi-model brainstorming pays for itself in better plans.
+
+### Package
+
+```
+internal/
+  brainstorm/
+    fanout.go       # BrainstormFanOut tool: parallel execution, result collection
+    cost.go         # Cost estimation from model pricing tables
+    types.go        # ThinkerConfig, ThinkerResult, ThinkerCost
+```
+
+The brainstorm package depends on `LLMProvider` interface (same as all agents) — no direct OpenRouter dependency. Testable with mock providers.
+
+```go
+func TestFanOut_PartialFailure(t *testing.T) {
+    provider := &mockMultiModelProvider{
+        responses: map[string]ChatResponse{
+            "anthropic/claude-opus-4-6": {Content: "idea A"},
+            "google/gemini-2.5-pro":     {Content: "idea B"},
+        },
+        errors: map[string]error{
+            "openai/o3": fmt.Errorf("rate limited"),
+        },
+    }
+
+    results := brainstorm.FanOut(ctx, provider, thinkers, "what should we build?")
+
+    assert.Equal(t, 3, len(results))
+    assert.Empty(t, results[0].Error) // Claude succeeded
+    assert.Empty(t, results[1].Error) // Gemini succeeded
+    assert.Contains(t, results[2].Error, "rate limited") // o3 failed gracefully
+}
+```
 
 ## Error Recovery
 

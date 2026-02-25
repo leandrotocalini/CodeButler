@@ -37,6 +37,7 @@ seeds/
     review-pr.md      # Review PRs with inline comments (Reviewer, GitHub MCP)
     release.md        # Create GitHub releases (PM, GitHub MCP)
     behavior-report.md # Aggregate agent behavior analysis (Lead)
+    brainstorm.md # Multi-model brainstorming with dynamic Thinker agents (PM)
 ```
 
 ## Key Concepts
@@ -44,6 +45,7 @@ seeds/
 - **Message routing**: each agent only processes messages with its `@codebutler.<role>` mention. PM also gets messages with no mention. Filtering happens in code before any model call.
 - **Conversation persistence**: per-thread, per-agent JSON files in `.codebutler/conversations/<thread-id>/`.
 - **Same binary, different roles**: `codebutler --role pm`, `codebutler --role coder`, etc.
+- **Brainstorm workflow**: PM dynamically creates Thinker sub-agents (each with a unique system prompt + different LLM model), fans out in parallel via OpenRouter, synthesizes results. Thinkers are ephemeral goroutines inside PM, not separate processes. See `workflows.md` brainstorm section and SPEC §14.
 
 ## Development
 
