@@ -19,6 +19,24 @@ Filter rules (string match, no model involved):
 
 If a message doesn't match an agent's filter → no model call, zero tokens.
 
+### Event Deduplication
+
+Slack Socket Mode can deliver the same event more than once (network retries, reconnects, server-side replays). Each agent process maintains an in-memory set of recently processed `event_id`s (bounded, last 10,000 entries, ~5 minutes TTL). Before processing any event:
+
+1. Extract `event_id` from the Slack envelope
+2. Check the dedup set — if present, drop silently
+3. If new, add to set, then proceed with routing
+
+This is a simple `map[string]time.Time` with periodic eviction of expired entries. No persistence needed — on restart the agent reads unprocessed @mentions from the Slack thread history, which provides its own natural dedup (the agent checks the conversation file to see which messages it already processed).
+
+**What this prevents:** duplicate tool executions, double-posted Slack messages, redundant LLM calls — all of which burn tokens and confuse the thread.
+
+```
+internal/
+  slack/
+    dedup.go        # Bounded set with TTL, thread-safe (sync.Map or mutex)
+```
+
 ## Conversation Persistence
 
 Each agent manages its own conversation with the model. The daemon does NOT maintain one shared conversation — each agent has its own.
@@ -762,6 +780,57 @@ When an agent crashes and restarts, it resumes from the last saved conversation 
 
 **Implementation:** each tool's `Execute` method checks for prior execution before performing the action. The tool-call ID (from the LLM response) is passed to every tool and stored with the result in the conversation file. On replay, the executor checks: "did I already execute tool-call-{id}?" → if yes, return the cached result.
 
+## Worktree Garbage Collection
+
+Worktrees accumulate. Normal cleanup happens when the user closes a thread (Lead deletes worktree + remote branch). But if the PM crashes before cleanup, a thread is abandoned, or the Lead's close sequence fails, orphan worktrees remain — consuming disk space and leaving stale branches on the remote.
+
+### GC Trigger
+
+The PM runs GC on startup and then periodically (every 6 hours, configurable). No separate daemon — the PM is always running and already manages worktree creation.
+
+### Detection
+
+A worktree is considered orphaned when **all** of the following are true:
+
+1. No agent has posted in the thread for > 48 hours (configurable `gc.inactivityTimeout`)
+2. The thread phase is not `coder` (don't GC while code is being written)
+3. No open PR exists for the branch
+
+The PM checks these conditions by:
+- Reading Slack thread history (last message timestamp)
+- Checking PR status via `gh pr list --head <branch>`
+- Reading the thread's conversation files for last activity
+
+### GC Actions
+
+When an orphan is detected:
+
+1. **Warn first** — PM posts in the thread: "This thread has been inactive for 48h. Reply to keep it open, or I'll clean up in 24h." Tag all thread participants
+2. **Wait 24h** — if someone replies, reset the inactivity timer. If not, proceed
+3. **Archive** — copy thread report + decision log to `.codebutler/reports/` on main (if not already there)
+4. **Clean** — remove local worktree (`git worktree remove`), delete remote branch (`git push origin --delete`), close PR if still open
+
+### Naming Convention
+
+Worktree branches use deterministic names: `codebutler/<slug>` where `<slug>` is derived from the thread's first user message (PM generates it). This makes it easy to identify what a worktree is for without cross-referencing thread IDs.
+
+### Recovery on Restart
+
+When any agent process starts:
+1. List all local worktrees (`git worktree list`)
+2. For each worktree, check if the corresponding Slack thread still exists and has unprocessed @mentions
+3. If the thread is gone (deleted, archived) → clean up the worktree immediately
+4. If the thread exists but no pending work → leave it (GC will handle it if inactive)
+
+### Package
+
+```
+internal/
+  worktree/
+    gc.go           # Orphan detection, warn/wait/clean cycle
+    recovery.go     # Startup recovery: reconcile worktrees with Slack threads
+```
+
 ## Token Budget & Cost Tracking
 
 Every LLM call returns `usage.prompt_tokens`, `usage.completion_tokens`, and the actual model used (which may differ from requested if OpenRouter fell back). Track these and enforce limits.
@@ -896,3 +965,73 @@ Runtime metrics are injected into the report template automatically before the L
 ### Aggregate Analysis
 
 The `/behavior-report` skill reads all report files and produces cross-thread insights. See `seeds/skills/behavior-report.md`.
+
+## Decision Log
+
+Thread reports are post-hoc — they summarize what happened after the thread closes. The decision log captures **why** things happened in real-time. Every significant decision an agent makes is recorded as a structured entry, enabling debugging ("why did the PM pick this workflow?"), retrospective analysis by the Lead, and future heuristic training.
+
+### Log File
+
+`.codebutler/branches/<branchName>/decisions.jsonl` — one JSON line per decision, append-only. Lives in the worktree alongside conversation files. The Lead reads it during retrospective for evidence-based analysis.
+
+### Entry Structure
+
+```json
+{
+  "ts": "2026-02-25T14:30:12Z",
+  "agent": "pm",
+  "type": "workflow_selected",
+  "input": "user said: add dark mode toggle",
+  "state": {"thread_phase": "pm", "turns_used": 2},
+  "decision": "implement",
+  "alternatives": ["bugfix", "refactor"],
+  "evidence": "user said 'add', no existing dark mode code found",
+  "outcome": null
+}
+```
+
+### Decision Types
+
+| Type | Agent | What it captures |
+|------|-------|-----------------|
+| `workflow_selected` | PM | Why this workflow over others |
+| `skill_matched` | PM | Why this skill, what variables were extracted |
+| `agent_delegated` | PM | Why this agent was @mentioned with this task |
+| `model_selected` | Any | Why this model was chosen (see Dynamic Model Routing) |
+| `tool_chosen` | Any | Why this tool for this step (when alternatives exist) |
+| `stuck_detected` | Any | What signal triggered stuck detection, which escape strategy |
+| `escalated` | Any | Why the agent escalated (to Lead, to PM, to user) |
+| `plan_deviated` | Coder | Why the implementation diverged from the PM's plan |
+| `review_issue` | Reviewer | What was found, severity, evidence |
+| `learning_proposed` | Lead | What learning, why, which agent, what evidence from thread |
+| `compaction_triggered` | Any | Token count before/after, what was summarized |
+| `circuit_breaker` | Any | State change (closed→open, open→half-open, etc.), model, failure count |
+
+### Implementation
+
+Each agent has a `DecisionLogger` that writes to the JSONL file. The logger is injected into the agent runner — same pattern as other dependencies. Writing is synchronous (append to file) and cheap.
+
+```go
+type Decision struct {
+    Timestamp    time.Time      `json:"ts"`
+    Agent        string         `json:"agent"`
+    Type         string         `json:"type"`
+    Input        string         `json:"input"`
+    State        map[string]any `json:"state"`
+    Decision     string         `json:"decision"`
+    Alternatives []string       `json:"alternatives,omitempty"`
+    Evidence     string         `json:"evidence"`
+    Outcome      *string        `json:"outcome"` // filled later if known
+}
+```
+
+**Not every tool call is a decision.** A decision is a point where the agent chose between alternatives. Reading a file is not a decision. Choosing which file to read first (when multiple candidates exist) is. The agent's seed instructs it when to log decisions — same as reasoning-in-thread, but structured and machine-readable.
+
+### Package
+
+```
+internal/
+  decisions/
+    logger.go       # Append-only JSONL writer, thread-safe
+    types.go        # Decision struct + decision type constants
+```
