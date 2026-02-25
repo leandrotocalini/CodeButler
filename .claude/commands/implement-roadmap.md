@@ -25,7 +25,9 @@ respecting the dependency graph.
       - Update `ROADMAP.md`: change status to `done`, check all `[x]` items
       - Commit with message: `M<number>: <milestone title>`
    j. Use `/self-document` to add a JOURNEY.md entry about what was built
-   k. **Continue to the next milestone** — go back to step 4a
+   k. Commit the JOURNEY.md update: `M<number>: document <milestone title> in JOURNEY.md`
+   l. Push all commits to the remote branch: `git push`
+   m. **Continue to the next milestone** — go back to step 4a
 5. When all milestones are done (or all remaining are blocked), print a final summary:
    - Total milestones completed in this session
    - Any milestones still blocked (with reasons)
