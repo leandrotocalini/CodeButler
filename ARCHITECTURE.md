@@ -633,51 +633,6 @@ When an agent crashes and restarts, it resumes from the last saved conversation 
 
 **Implementation:** each tool's `Execute` method checks for prior execution before performing the action. The tool-call ID (from the LLM response) is passed to every tool and stored with the result in the conversation file. On replay, the executor checks: "did I already execute tool-call-{id}?" → if yes, return the cached result.
 
-## Cross-Agent Tracing
-
-Six independent processes. One user request flows through PM → Coder → Reviewer → Lead. To debug the full flow, you need traces that span all agents.
-
-### Trace Propagation via Slack
-
-Slack messages are the wire protocol between agents. Embed trace context in every agent-to-agent message as a hidden metadata block:
-
-```
-@codebutler.coder implement: [plan details]
-<!-- trace:abc123/span:def456 -->
-```
-
-The receiving agent extracts the trace/span IDs and creates a child span linked to the sender's trace. This produces end-to-end traces across the entire thread lifecycle:
-
-```
-Trace: thread-{threadTS}
-  └─ PM: plan (3.2s)
-       ├─ llm-call (2.1s, 1.2k tokens)
-       ├─ tool:Glob (0.05s)
-       └─ tool:Read x4 (0.3s)
-  └─ Coder: implement (45s)
-       ├─ llm-call (8.2s, 15k tokens)
-       ├─ tool:Write x6 (0.1s)
-       ├─ tool:Bash/test (12s)
-       ├─ llm-call (5.1s, 8k tokens)  ← fix failing test
-       └─ tool:GitCommit (0.3s)
-  └─ Reviewer: review (6s)
-  └─ Lead: retrospective (4s)
-```
-
-### What to Trace
-
-Every span carries structured attributes:
-
-| Span type | Key attributes |
-|-----------|---------------|
-| `agent-activation` | agent, thread, trigger_message_id |
-| `llm-call` | model, input_tokens, output_tokens, cost, cache_hit |
-| `tool-call` | tool_name, duration, success, args_hash |
-| `slack-post` | channel, thread, message_length |
-| `agent-loop` | turns_used, max_turns, compaction_triggered |
-
-Use OpenTelemetry (`go.opentelemetry.io/otel`) with a local exporter (OTLP to a local collector or simple file export). No external tracing infrastructure required by default — a JSON file per thread with all spans is enough for debugging. Teams can plug in Jaeger, Datadog, etc. via the standard OTLP exporter.
-
 ## Token Budget & Cost Tracking
 
 Every LLM call returns `usage.prompt_tokens`, `usage.completion_tokens`, and the actual model used (which may differ from requested if OpenRouter fell back). Track these and enforce limits.
@@ -716,3 +671,99 @@ The PM uses cost awareness in planning:
 - Large tasks get a cost estimate in the plan ("estimated: ~$2.00 for Coder, ~$0.15 for Reviewer")
 - The user sees the estimate before approving
 - During `develop` (unattended), the PM monitors cumulative cost and pauses if the total exceeds the per-thread budget × number of active threads
+
+## Thread Reports
+
+After every retrospective, the Lead generates a structured report file. Reports accumulate over time and form the dataset for analyzing agent behavior across threads and projects.
+
+### Report File
+
+`.codebutler/reports/<thread-ts>.json` — one file per completed thread, committed to git. Survives worktree cleanup (Lead copies to main before delete).
+
+### Structure
+
+```json
+{
+  "thread_id": "1709312345.123456",
+  "project": "my-app",
+  "workflow": "implement",
+  "timestamp": "2026-02-25T14:30:00Z",
+  "duration_minutes": 45,
+  "outcome": "pr_merged",
+  "agents": {
+    "pm": {
+      "turns_used": 8,
+      "max_turns": 15,
+      "reasoning_messages": 4,
+      "exploration_files_read": 6,
+      "delegations": 1,
+      "loops_detected": 0,
+      "escalations": 0
+    },
+    "coder": {
+      "turns_used": 34,
+      "max_turns": 100,
+      "reasoning_messages": 3,
+      "plan_deviations": 1,
+      "test_cycles": 2,
+      "tool_failures": 0,
+      "loops_detected": 0,
+      "escalations": 0
+    },
+    "reviewer": {
+      "turns_used": 5,
+      "max_turns": 20,
+      "review_rounds": 1,
+      "issues_found": {"security": 1, "test": 1, "quality": 1}
+    },
+    "lead": {
+      "turns_used": 12,
+      "max_turns": 30,
+      "learnings_proposed": 2,
+      "learnings_approved": 2
+    }
+  },
+  "cost": {
+    "total_usd": 2.45,
+    "by_agent": {"pm": 0.01, "coder": 2.20, "reviewer": 0.15, "lead": 0.09}
+  },
+  "patterns": [
+    {
+      "type": "exploration_gap",
+      "agent": "pm",
+      "description": "PM didn't discover test helper at testutil/, causing 4 extra Coder turns"
+    },
+    {
+      "type": "plan_deviation",
+      "agent": "coder",
+      "description": "router.go was refactored since plan was made — stale file:line reference"
+    }
+  ]
+}
+```
+
+### Two Data Sources
+
+| Source | What it provides | Accuracy |
+|--------|-----------------|----------|
+| **Runtime metrics** | `turns_used`, `max_turns`, `tool_failures`, `loops_detected`, `escalations`, `cost`, `duration` | Exact — code-generated from `ThreadCost` and loop detector counters |
+| **Lead analysis** | `reasoning_messages`, `plan_deviations`, `exploration_files_read`, `patterns`, `outcome` | Interpreted — the Lead reads the Slack thread and classifies |
+
+Runtime metrics are injected into the report template automatically before the Lead starts its retrospective. The Lead fills in the qualitative fields during analysis. This separation means the ground-truth numbers are always accurate even if the Lead's interpretation is off.
+
+### What Each Metric Tells You About CodeButler
+
+| Metric | High value means | CodeButler improvement |
+|--------|-----------------|----------------------|
+| `turns_used / max_turns` | Agent hits budget frequently | Increase budget or optimize agent efficiency |
+| `loops_detected` | Stuck detection fires often | Improve seed instructions or escape strategies |
+| `reasoning_messages` (low) | Agent not following reasoning-in-thread | Strengthen seed instructions, check model compliance |
+| `plan_deviations` | PM plans don't match reality | PM needs deeper exploration or stale-reference detection |
+| `review_rounds` (high) | Coder output needs many fixes | Add Reviewer patterns to Coder seed or PM plan |
+| `issues_found` by type | Same issue type repeats across threads | Add preventive check to PM exploration or Coder rules |
+| `cost.by_agent` | One agent dominates cost | Optimize model choice or reduce unnecessary turns |
+| Same `pattern.type` across reports | Systemic issue | Fix in CodeButler code, not just seeds |
+
+### Aggregate Analysis
+
+The `/behavior-report` skill reads all report files and produces cross-thread insights. See `seeds/skills/behavior-report.md`.

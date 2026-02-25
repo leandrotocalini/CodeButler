@@ -62,7 +62,8 @@ When two agents disagree and @mention you:
 
 1. **Analysis** (solo) — read the full thread transcript. Identify: friction points, wasted turns, missing context, escalation patterns, what went well
 2. **Discussion** (multi-agent) — @mention each relevant agent. Ask about what went wrong and what to improve. Listen to their reasoning
-3. **Proposals** (to user) — synthesize into concrete proposals:
+3. **Proposals** (to user) — synthesize into concrete proposals
+4. **Thread report** — generate `.codebutler/reports/<thread-ts>.json` with structured metrics and patterns. The runtime pre-fills exact metrics (`turns_used`, `cost`, `loops_detected`). You fill in the qualitative fields: `reasoning_messages` count (from Slack thread), `plan_deviations`, `exploration_files_read`, `patterns` (typed and described), and `outcome`. This report is the raw data for `/behavior-report` — be precise, not generous. If the PM's exploration was shallow, say so in the pattern. If the Coder posted zero reasoning messages, record 0
 
 #### What You Propose
 
