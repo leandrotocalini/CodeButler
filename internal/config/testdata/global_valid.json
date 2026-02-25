@@ -1,0 +1,5 @@
+{
+  "slack": { "botToken": "xoxb-test-bot-token", "appToken": "xapp-test-app-token" },
+  "openrouter": { "apiKey": "sk-or-test-key" },
+  "openai": { "apiKey": "sk-test-openai-key" }
+}

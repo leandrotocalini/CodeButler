@@ -1,0 +1,25 @@
+{
+  "slack": { "channelID": "C0123456789", "channelName": "codebutler-myproject" },
+  "models": {
+    "pm": {
+      "default": "moonshotai/kimi-k2",
+      "pool": { "kimi": "moonshotai/kimi-k2", "claude": "anthropic/claude-sonnet-4-5-20250929" }
+    },
+    "coder": { "model": "anthropic/claude-opus-4-6" },
+    "reviewer": { "model": "anthropic/claude-sonnet-4-5-20250929" },
+    "researcher": { "model": "moonshotai/kimi-k2" },
+    "lead": { "model": "anthropic/claude-sonnet-4-5-20250929" },
+    "artist": { "uxModel": "anthropic/claude-sonnet-4-5-20250929", "imageModel": "openai/gpt-image-1" }
+  },
+  "multiModel": {
+    "models": [
+      "anthropic/claude-opus-4-6",
+      "google/gemini-2.5-pro",
+      "openai/o3",
+      "deepseek/deepseek-r1"
+    ],
+    "maxAgentsPerRound": 6,
+    "maxCostPerRound": 1.00
+  },
+  "limits": { "maxConcurrentThreads": 3, "maxCallsPerHour": 100 }
+}

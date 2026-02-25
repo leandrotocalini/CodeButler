@@ -1,0 +1,5 @@
+{
+  "slack": { "botToken": "${SLACK_BOT_TOKEN}", "appToken": "${SLACK_APP_TOKEN}" },
+  "openrouter": { "apiKey": "${OPENROUTER_API_KEY}" },
+  "openai": { "apiKey": "${OPENAI_API_KEY}" }
+}
