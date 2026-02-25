@@ -56,19 +56,19 @@ This is the only LLM interface — all agents use it.
 **Acceptance:** client can make a chat completion call to OpenRouter, parse a
 tool-calling response, retry on 429, and trip the circuit breaker on 3 failures.
 
-### M4 — Tool System `pending`
+### M4 — Tool System `done`
 
 Native tool definitions, sandboxed executor, and risk tier classification.
 
-- [ ] Tool interface: `Execute(ctx, ToolCall) (ToolResult, error)`
-- [ ] Tool registry: name → executor mapping
-- [ ] Implement native tools: Read, Write, Edit, Bash, Grep, Glob
-- [ ] Tool risk tiers: READ, WRITE_LOCAL, WRITE_VISIBLE, DESTRUCTIVE
-- [ ] Bash command classifier (safe list vs dangerous patterns)
-- [ ] Per-role tool restrictions (PM can't Write, Reviewer can't Edit, etc.)
-- [ ] Path validation (sandbox to worktree)
-- [ ] Idempotency: tool-call ID tracking, skip if already executed
-- [ ] Unit tests per tool + risk classifier
+- [x] Tool interface: `Execute(ctx, ToolCall) (ToolResult, error)`
+- [x] Tool registry: name → executor mapping
+- [x] Implement native tools: Read, Write, Edit, Bash, Grep, Glob
+- [x] Tool risk tiers: READ, WRITE_LOCAL, WRITE_VISIBLE, DESTRUCTIVE
+- [x] Bash command classifier (safe list vs dangerous patterns)
+- [x] Per-role tool restrictions (PM can't Write, Reviewer can't Edit, etc.)
+- [x] Path validation (sandbox to worktree)
+- [x] Idempotency: tool-call ID tracking, skip if already executed
+- [x] Unit tests per tool + risk classifier
 
 **Acceptance:** tools execute in sandbox, risk tiers enforced, role restrictions
 block disallowed tools, idempotent re-execution returns cached results.
