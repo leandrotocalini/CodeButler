@@ -668,3 +668,97 @@ The `globalDir` parameter on `Load` exists specifically for testing. In producti
 it's empty and defaults to `~/.codebutler/`. In tests it points to a temp directory.
 This avoids the need to mock `os.UserHomeDir` or pollute the real home directory
 during tests.
+
+---
+
+## 2026-02-25 — M3: Not all errors deserve a retry
+
+### The problem with "just retry on failure"
+
+CodeButler runs six agent processes, all hitting the same OpenRouter account. When
+you naively retry on any error, six processes backing off at the same rate create
+a thundering herd — they all retry at the same moment, get rate-limited together,
+back off the same duration, and slam the API again in sync. Worse, retrying errors
+that will *never* succeed (bad API key, content policy violation) burns money and
+delays the real error message.
+
+The OpenRouter client needed to treat different errors differently. Not as an
+afterthought, but as the core design decision.
+
+### Eight error types, eight strategies
+
+The classifier examines HTTP status codes and response bodies to sort every failure
+into one of eight categories. Each has its own retry policy:
+
+**Retry aggressively:** rate limits (429) and provider overloads (502/503) get up
+to 5 retries with exponential backoff. Rate limits respect the `Retry-After` header
+when present — the server is telling you exactly when to come back.
+
+**Retry cautiously:** context length exceeded gets exactly 1 retry (the caller can
+compact the conversation and try again), malformed JSON responses get 3 retries
+(the model might produce valid JSON on the next attempt), and timeouts get 1 retry.
+
+**Never retry:** auth errors (wrong API key), content filter violations, and unknown
+errors fail immediately. No amount of retrying will fix a bad API key. Failing fast
+means the agent can post a useful error message to the Slack thread instead of
+silently burning through retry budgets.
+
+The interesting case is 400 errors. OpenRouter returns 400 for at least three
+different situations — context too long, content filtered, and generic bad request.
+The classifier examines the error body's `code`, `type`, and `message` fields with
+substring matching across all three (lowercased), because different upstream
+providers format these fields inconsistently. A Claude error might put
+`context_length_exceeded` in the `code` field; an OpenAI model might say "too many
+tokens" in the `message`. The classifier catches both.
+
+### Jitter: the anti-thundering-herd weapon
+
+Every retry delay gets multiplied by `0.5 + rand.Float64()`, producing a value
+between 50% and 150% of the calculated delay. This is mandatory, not optional.
+Six agent processes sharing one API key will naturally synchronize their retry
+cadences without jitter — they hit the same rate limit at the same time, wait the
+same duration, and collide again. Jitter breaks the synchronization.
+
+### Per-model circuit breakers
+
+The circuit breaker wraps the entire retry loop. If a model fails 3 consecutive
+times (after retries), the breaker opens and every subsequent call returns
+immediately with an error — no HTTP request made. After 30 seconds, it allows
+one probe request. If that succeeds, normal operation resumes.
+
+The key design decision: **breakers are per-model, not per-client.** If the Coder's
+Claude Opus model is down but the PM's cheaper model is fine, only the Coder's
+circuit opens. The PM continues working. This required a `map[string]*CircuitBreaker`
+keyed by model name, lazily created on first use, protected by a mutex.
+
+Another subtlety: not all errors should trip the breaker. Auth errors and content
+filter violations are client-side problems, not provider outages. The `IsSuccessful`
+callback tells gobreaker to treat these as "successful" from a circuit-breaking
+perspective — the provider responded correctly, the request was just invalid. Without
+this, a bad API key would trip the breaker and block all requests for 30 seconds,
+when the real fix is to update the config.
+
+### Testing retry logic without waiting
+
+The first test run took over 2 minutes. The circuit breaker test alone was 99 seconds
+— it needed to exhaust 5 retries × 3 calls before the breaker tripped, with real
+exponential backoff delays reaching 16+ seconds each.
+
+The fix was an injectable sleep function. The client accepts a `WithSleepFunc` option
+that replaces `time.Sleep` with any function matching `func(context.Context,
+time.Duration)`. Tests pass `noSleep` (an immediate return), bringing the entire
+suite from 2+ minutes to 60ms. The production default is a proper context-aware
+sleep using `select` on both `ctx.Done()` and `time.After`.
+
+This pattern — making time-dependent behavior injectable rather than mockable — is
+cleaner than mocking `time.After` globally. The sleep function is part of the client's
+configuration, not a test hack.
+
+### The sole external dependency
+
+`sony/gobreaker` is CodeButler's first external dependency beyond the standard
+library. The alternative was implementing a circuit breaker from scratch, but
+gobreaker is battle-tested, has a clean generic API (Go 1.18+ type parameters),
+and does exactly one thing well. The generics-based `CircuitBreaker[*ChatResponse]`
+means Execute returns a typed response without casting — a nice improvement over the
+pre-generics version that returned `interface{}`.
