@@ -135,7 +135,7 @@ Multi-model diverge-converge workflow. User describes a topic, problem, or featu
 
 This is the key difference from static agents: the PM is the creative director. It decides "for this crypto trading bot question, I need a quantitative analyst, a risk manager, a market microstructure expert, and a systems architect" — and creates those personas dynamically. For a different topic, it would create entirely different Thinkers.
 
-**One model per Thinker, no duplicates.** Each Thinker in a round MUST use a different LLM model. Running the same model twice with different prompts is redundant — the value comes from how different models reason differently about the same problem. The number of Thinkers per round is capped by the number of models in the `brainstorm.models` pool.
+**One model per Thinker, no duplicates.** Each Thinker in a round MUST use a different LLM model. Running the same model twice with different prompts is redundant — the value comes from how different models reason differently about the same problem. The number of Thinkers per round is capped by the number of models in the `multiModel.models` pool.
 
 **Thinkers are lightweight.** They're goroutines inside the PM process, not separate OS processes. No Slack presence, no conversation persistence, no tool use. They receive a system prompt + user prompt, return a response, and die. The PM owns the entire lifecycle.
 
@@ -148,9 +148,9 @@ This is the key difference from static agents: the PM is the creative director. 
 5. PM: **design the panel** — based on the topic, decide:
    - How many Thinkers (2–6, based on topic complexity)
    - What perspective each Thinker should have (PM writes a custom system prompt for each)
-   - Which model each Thinker uses (assigned from `brainstorm.models` pool — **each Thinker MUST use a different model**, no duplicates in a single round)
+   - Which model each Thinker uses (assigned from `multiModel.models` pool — **each Thinker MUST use a different model**, no duplicates in a single round)
 6. PM: post the panel design in the thread ("Spinning up 4 Thinkers: Pragmatic Engineer on Gemini, Security Specialist on Claude, DeFi Protocol Expert on DeepSeek, Systems Architect on GPT")
-7. PM: call `BrainstormFanOut` tool with the context block + per-Thinker system prompts + model assignments. Tool executes all calls in parallel via OpenRouter
+7. PM: call `MultiModelFanOut` tool with the context block + per-Thinker system prompts + model assignments. Tool executes all calls in parallel via OpenRouter
 8. PM: receive all Thinker responses. Post each in the thread (attributed to model + perspective) so the user can see raw outputs
 9. PM: synthesize — identify:
    - **Common themes** (ideas that multiple Thinkers converge on → high confidence)

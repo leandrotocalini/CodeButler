@@ -397,14 +397,14 @@ On machine reboot, all services restart automatically. If an agent crashes, the 
     "lead": { "model": "anthropic/claude-sonnet-4-5-20250929" },
     "artist": { "uxModel": "anthropic/claude-sonnet-4-5-20250929", "imageModel": "openai/gpt-image-1" }
   },
-  "brainstorm": {
+  "multiModel": {
     "models": [
       "anthropic/claude-opus-4-6",
       "google/gemini-2.5-pro",
       "openai/o3",
       "deepseek/deepseek-r1"
     ],
-    "maxThinkers": 6,
+    "maxAgentsPerRound": 6,
     "maxCostPerRound": 1.00
   },
   "limits": { "maxConcurrentThreads": 3, "maxCallsPerHour": 100 }
@@ -413,7 +413,9 @@ On machine reboot, all services restart automatically. If an agent crashes, the 
 
 All LLM calls route through OpenRouter. Agents needing multiple models define them explicitly (e.g., Artist has `uxModel` + `imageModel`). PM has a model pool for hot swap (`/pm claude`, `/pm kimi`).
 
-**Brainstorm config:** `brainstorm.models` is the pool of models available for Thinker agents. The PM picks from this pool when designing a brainstorm panel — it can use all of them or a subset. `maxThinkers` caps how many parallel calls per round (default 6). `maxCostPerRound` is a soft limit — PM estimates cost before fan-out and warns the user if it'll exceed. No fixed perspectives in config — the PM generates system prompts dynamically for each brainstorm based on the topic.
+**Multi-model config:** `multiModel.models` is the pool of models available for `MultiModelFanOut`. Any agent can use this pool — PM for brainstorming, Reviewer for multi-model code review, Coder when stuck, etc. `maxAgentsPerRound` caps how many parallel calls per round (default 6). `maxCostPerRound` is a soft limit — the calling agent estimates cost before fan-out and warns the user if it'll exceed.
+
+**Default behavior if `multiModel` is not configured:** the pool auto-populates from all unique models already configured in `models.*`. If PM uses Kimi, Coder uses Opus, Reviewer uses Sonnet, and Artist uses Sonnet — the default pool is `[kimi, opus, sonnet]` (deduplicated). This means multi-model fan-out works out of the box without extra config — the user only needs to define `multiModel.models` explicitly if they want models in the pool that no agent uses as primary (e.g., Gemini, DeepSeek, o3).
 
 ### Storage — `.codebutler/` Folder
 
@@ -854,7 +856,7 @@ The `brainstorm` workflow introduces a new pattern: the PM dynamically creates l
 - Goroutines inside the PM process, not separate OS processes
 - Single-shot OpenRouter calls — no tools, no agent loop, no conversation persistence
 - Each gets a custom system prompt crafted by the PM for that specific brainstorm
-- Each uses a different model from the `brainstorm.models` pool
+- Each uses a different model from the `multiModel.models` pool
 - They respond, the PM collects, they die
 
 **What Thinkers are NOT:**
@@ -868,7 +870,7 @@ The `brainstorm` workflow introduces a new pattern: the PM dynamically creates l
 type ThinkerConfig struct {
     Name         string // e.g., "Quantitative Analyst"
     SystemPrompt string // PM-generated, unique per Thinker
-    Model        string // OpenRouter model ID from brainstorm.models
+    Model        string // OpenRouter model ID from multiModel.models
 }
 
 type ThinkerResult struct {
@@ -880,7 +882,7 @@ type ThinkerResult struct {
 }
 
 // PM calls this tool during brainstorm workflow
-func (pm *PM) BrainstormFanOut(ctx context.Context, thinkers []ThinkerConfig, userPrompt string) []ThinkerResult {
+func (pm *PM) MultiModelFanOut(ctx context.Context, thinkers []ThinkerConfig, userPrompt string) []ThinkerResult {
     results := make([]ThinkerResult, len(thinkers))
     g, ctx := errgroup.WithContext(ctx)
     for i, t := range thinkers {
@@ -919,7 +921,7 @@ func (pm *PM) BrainstormFanOut(ctx context.Context, thinkers []ThinkerConfig, us
 - Assigns models strategically — reasoning models (o3, DeepSeek-R1) for architectural questions, creative models (Claude, Gemini) for product ideation. **Each Thinker MUST use a different model** — no duplicates in a single round. Model diversity is the core value proposition; same model twice with different prompts is redundant. The number of Thinkers is capped by the number of available models in the pool
 - After collecting responses, synthesizes across all Thinkers — finding patterns, conflicts, and unique insights
 
-**Cost awareness.** Each brainstorm round costs N × single-shot calls. The PM estimates cost before fan-out (model pricing × estimated tokens) and posts it in the thread. If it exceeds `brainstorm.maxCostPerRound`, the PM asks the user before proceeding. Thinker costs are tracked in `ThreadCost` and appear in the Lead's usage report.
+**Cost awareness.** Each brainstorm round costs N × single-shot calls. The PM estimates cost before fan-out (model pricing × estimated tokens) and posts it in the thread. If it exceeds `multiModel.maxCostPerRound`, the PM asks the user before proceeding. Thinker costs are tracked in `ThreadCost` and appear in the Lead's usage report.
 
 **Error handling.** If a Thinker's model fails (rate limit, timeout, content filter), the other Thinkers continue — one failure doesn't cancel the round. The PM notes the failure in the synthesis ("DeepSeek-R1 was unavailable this round — 3 of 4 Thinkers responded"). The circuit breaker is per-model, so a failing brainstorm model doesn't affect the agents' primary models.
 

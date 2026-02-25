@@ -468,7 +468,7 @@ internal/
   tools/                         # Definition, executor (sandboxed), loop (provider-agnostic)
   mcp/                           # MCP server lifecycle, client, merged tool registry
   skills/                        # Skill loader, parser, index builder
-  brainstorm/                    # Thinker fan-out, result collection, cost estimation
+  multimodel/                    # Multi-model fan-out, result collection, cost estimation
   router/router.go               # Message classifier (per-agent filter)
   conflicts/                     # Tracker, notify
   worktree/                      # Worktree create/init/remove (per-platform)
@@ -488,32 +488,42 @@ internal/
 | `internal/worktree/` | Create, init, remove, isolation |
 | `internal/mcp/` | Config parsing, role filtering, env resolution, tool routing, server lifecycle |
 | `internal/skills/` | Skill file parsing, index building, variable extraction |
-| `internal/brainstorm/` | Fan-out execution, result aggregation, cost estimation, error isolation |
+| `internal/multimodel/` | Fan-out execution, result aggregation, cost estimation, error isolation |
 
 Integration: mock OpenRouter, mock MCP servers (stdio). E2E: real Slack (manual).
 
-## Brainstorm — Multi-Model Fan-Out
+## Multi-Model Fan-Out
 
-The `brainstorm` workflow introduces a PM-exclusive tool: `BrainstormFanOut`. It makes parallel single-shot LLM calls to different models via OpenRouter, each with a PM-designed system prompt.
+The `MultiModelFanOut` tool makes parallel single-shot LLM calls to different models via OpenRouter, each with a custom system prompt. Available to **all agents** — not just the PM. The brainstorm workflow is the primary consumer, but any agent can use it when multiple model perspectives would improve their output.
 
-### BrainstormFanOut Tool
+### Per-Agent Use Cases
 
-Available only to the PM agent. Not a standalone process — runs inside the PM's tool executor.
+| Agent | When to use | What it does |
+|-------|------------|--------------|
+| **PM** | `brainstorm` workflow | Creates dynamic Thinker personas, fans out a question, synthesizes ideas |
+| **Reviewer** | Complex or security-critical PRs | Fans out the same diff to multiple models, each reviewing from a different angle (security, performance, logic, test coverage). Synthesizes into a single review with higher coverage than any one model |
+| **Coder** | Stuck on implementation or choosing between approaches | Fans out "how would you implement X?" to multiple models, compares approaches, picks the best one. Like pair programming with 3 different senior devs |
+| **Lead** | Retrospective analysis | Fans out the same thread summary to multiple models, each analyzing from a different angle. Surfaces patterns one model alone might miss |
+| **Researcher** | Broad research questions | Fans out the same question to multiple models with different knowledge cutoffs and training data emphasis. Gets more comprehensive results |
+
+**When NOT to use it:** routine operations, simple tasks, when the agent's primary model is sufficient. Multi-model fan-out costs N× a single call — agents should use it judiciously.
+
+### MultiModelFanOut Tool
 
 ```go
-// Tool definition (appears in PM's tool list)
+// Tool definition (appears in every agent's tool list)
 {
-    Name: "BrainstormFanOut",
-    Description: "Run parallel single-shot LLM calls to multiple models, each with a custom system prompt. Used for multi-perspective brainstorming.",
+    Name: "MultiModelFanOut",
+    Description: "Run parallel single-shot LLM calls to multiple models, each with a custom system prompt. Each call uses a different model — no duplicates. Returns all responses for the calling agent to synthesize.",
     Parameters: {
-        "thinkers": [
+        "agents": [
             {
-                "name": "string — display name for this Thinker (e.g., 'Security Specialist')",
-                "systemPrompt": "string — PM-crafted system prompt for this Thinker",
-                "model": "string — OpenRouter model ID from brainstorm.models pool"
+                "name": "string — display name (e.g., 'Security Reviewer', 'DeFi Expert')",
+                "systemPrompt": "string — custom system prompt for this sub-agent",
+                "model": "string — OpenRouter model ID from multiModel.models pool"
             }
         ],
-        "userPrompt": "string — the question/context all Thinkers receive"
+        "userPrompt": "string — the question/context all sub-agents receive"
     }
 }
 ```
@@ -521,50 +531,50 @@ Available only to the PM agent. Not a standalone process — runs inside the PM'
 ### Execution
 
 ```
-1. PM calls BrainstormFanOut with N thinker configs + shared user prompt
-2. Tool validates: all models are in brainstorm.models pool, N <= maxThinkers, no duplicate models (each Thinker MUST use a different model — model diversity is the whole point)
-3. Tool estimates cost (model pricing × estimated prompt tokens) — if exceeds maxCostPerRound, returns warning to PM (PM decides whether to proceed or ask user)
+1. Agent calls MultiModelFanOut with N sub-agent configs + shared user prompt
+2. Tool validates: all models are in multiModel.models pool, N <= maxAgents, no duplicate models (each sub-agent MUST use a different model — model diversity is the whole point)
+3. Tool estimates cost (model pricing × estimated prompt tokens) — if exceeds maxCostPerRound, returns warning to the calling agent (agent decides whether to proceed or ask user)
 4. Tool launches N goroutines via errgroup, each making a ChatCompletion call to OpenRouter:
-   - Messages: [system: thinker.systemPrompt, user: userPrompt]
+   - Messages: [system: agent.systemPrompt, user: userPrompt]
    - No tools enabled (single-shot, no agent loop)
    - Timeout: 120s per call (reasoning models can be slow)
 5. Each goroutine captures: response text, token usage, duration, model used, errors
 6. errgroup.Wait() — all calls complete (or timeout)
-7. Tool returns aggregated results to PM as structured JSON
-8. PM processes results in its next turn (synthesis, posting to thread)
+7. Tool returns aggregated results to the calling agent as structured JSON
+8. Agent processes results in its next turn (synthesis, posting to thread)
 ```
 
 ### Error Isolation
 
-Each Thinker is independent. If one model fails (429, timeout, content filter), the others continue.
+Each sub-agent is independent. If one model fails (429, timeout, content filter), the others continue.
 
 ```go
 // Inside each goroutine — errors don't propagate
 resp, err := provider.ChatCompletion(ctx, req)
 if err != nil {
-    results[i] = ThinkerResult{
-        Name:  t.Name,
-        Model: t.Model,
+    results[i] = FanOutResult{
+        Name:  a.Name,
+        Model: a.Model,
         Error: err.Error(),
     }
     return nil // don't cancel errgroup
 }
 ```
 
-The PM receives all results including failures. It's the PM's job to note which Thinkers failed in its synthesis ("3 of 4 Thinkers responded — Gemini timed out").
+The calling agent receives all results including failures. It's responsible for noting which sub-agents failed ("3 of 4 models responded — Gemini timed out").
 
 ### Circuit Breaker Integration
 
-Brainstorm calls go through the same per-model circuit breakers as regular agent calls. If a brainstorm model's circuit is open, the Thinker returns immediately with an error — no wasted time waiting for a known-bad model. The PM can adapt: "DeepSeek circuit is open, using Gemini instead."
+Fan-out calls go through the same per-model circuit breakers as regular agent calls. If a model's circuit is open, the sub-agent returns immediately with an error — no wasted time waiting for a known-bad model. The calling agent can adapt or proceed with fewer results.
 
-Brainstorm failures do NOT open circuits for the agents' primary models. They're separate models in the pool.
+Fan-out failures do NOT open circuits for the agents' primary models. They're separate models in the pool.
 
 ### Cost Tracking
 
-Each Thinker's token usage is tracked and added to the thread's `ThreadCost`:
+Each sub-agent's token usage is tracked and added to the thread's `ThreadCost`:
 
 ```go
-type ThinkerCost struct {
+type FanOutCost struct {
     Name         string
     Model        string
     InputTokens  int64
@@ -574,19 +584,19 @@ type ThinkerCost struct {
 }
 ```
 
-The PM's `ThreadCost.BrainstormRounds` field accumulates across rounds. The Lead includes brainstorm costs in the thread report — useful for understanding whether multi-model brainstorming pays for itself in better plans.
+The `ThreadCost.FanOutRounds` field accumulates across rounds for any agent that uses fan-out. The Lead includes these costs in the thread report — useful for understanding whether multi-model consultation pays for itself.
 
 ### Package
 
 ```
 internal/
-  brainstorm/
-    fanout.go       # BrainstormFanOut tool: parallel execution, result collection
+  multimodel/
+    fanout.go       # MultiModelFanOut tool: parallel execution, result collection
     cost.go         # Cost estimation from model pricing tables
-    types.go        # ThinkerConfig, ThinkerResult, ThinkerCost
+    types.go        # FanOutConfig, FanOutResult, FanOutCost
 ```
 
-The brainstorm package depends on `LLMProvider` interface (same as all agents) — no direct OpenRouter dependency. Testable with mock providers.
+The multimodel package depends on `LLMProvider` interface (same as all agents) — no direct OpenRouter dependency. Testable with mock providers.
 
 ```go
 func TestFanOut_PartialFailure(t *testing.T) {
@@ -600,7 +610,7 @@ func TestFanOut_PartialFailure(t *testing.T) {
         },
     }
 
-    results := brainstorm.FanOut(ctx, provider, thinkers, "what should we build?")
+    results := multimodel.FanOut(ctx, provider, agents, "what should we build?")
 
     assert.Equal(t, 3, len(results))
     assert.Empty(t, results[0].Error) // Claude succeeded
