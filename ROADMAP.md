@@ -38,20 +38,20 @@ Load global (`~/.codebutler/config.json`) and per-repo
 
 **Acceptance:** `config.Load()` returns typed config from fixture files.
 
-### M3 — OpenRouter Client `pending`
+### M3 — OpenRouter Client `done`
 
 HTTP client for OpenRouter chat completions with tool-calling support.
 This is the only LLM interface — all agents use it.
 
-- [ ] Types: `ChatRequest`, `ChatResponse`, `Message`, `ToolCall`, `ToolResult`, `TokenUsage`
-- [ ] `ChatCompletion(ctx, req) (resp, error)` — single-shot call
-- [ ] Tool-calling wire format (OpenAI-compatible function calling)
-- [ ] Response parsing: text response vs tool calls
-- [ ] Token usage extraction from response metadata
-- [ ] Error classification (429, 502/503, context_length_exceeded, content_filter, auth, malformed, timeout, unknown) — see ARCHITECTURE.md
-- [ ] Retry logic: exponential backoff + jitter per error type
-- [ ] Circuit breaker: per-model, using `sony/gobreaker`
-- [ ] Unit tests with HTTP test server
+- [x] Types: `ChatRequest`, `ChatResponse`, `Message`, `ToolCall`, `ToolResult`, `TokenUsage`
+- [x] `ChatCompletion(ctx, req) (resp, error)` — single-shot call
+- [x] Tool-calling wire format (OpenAI-compatible function calling)
+- [x] Response parsing: text response vs tool calls
+- [x] Token usage extraction from response metadata
+- [x] Error classification (429, 502/503, context_length_exceeded, content_filter, auth, malformed, timeout, unknown) — see ARCHITECTURE.md
+- [x] Retry logic: exponential backoff + jitter per error type
+- [x] Circuit breaker: per-model, using `sony/gobreaker`
+- [x] Unit tests with HTTP test server
 
 **Acceptance:** client can make a chat completion call to OpenRouter, parse a
 tool-calling response, retry on 429, and trip the circuit breaker on 3 failures.
