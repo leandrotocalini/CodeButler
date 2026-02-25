@@ -409,11 +409,25 @@ On machine reboot, all services restart automatically. If an agent crashes, the 
     "lead": { "model": "anthropic/claude-sonnet-4-5-20250929" },
     "artist": { "uxModel": "anthropic/claude-sonnet-4-5-20250929", "imageModel": "openai/gpt-image-1" }
   },
+  "multiModel": {
+    "models": [
+      "anthropic/claude-opus-4-6",
+      "google/gemini-2.5-pro",
+      "openai/o3",
+      "deepseek/deepseek-r1"
+    ],
+    "maxAgentsPerRound": 6,
+    "maxCostPerRound": 1.00
+  },
   "limits": { "maxConcurrentThreads": 3, "maxCallsPerHour": 100 }
 }
 ```
 
 All LLM calls route through OpenRouter. Agents needing multiple models define them explicitly (e.g., Artist has `uxModel` + `imageModel`). PM has a model pool for hot swap (`/pm claude`, `/pm kimi`).
+
+**Multi-model config:** `multiModel.models` is the pool of models available for `MultiModelFanOut`. Any agent can use this pool — PM for brainstorming, Reviewer for multi-model code review, Coder when stuck, etc. `maxAgentsPerRound` caps how many parallel calls per round (default 6). `maxCostPerRound` is a soft limit — the calling agent estimates cost before fan-out and warns the user if it'll exceed.
+
+**Default behavior if `multiModel` is not configured:** the pool auto-populates from all unique models already configured in `models.*`. If PM uses Kimi, Coder uses Opus, Reviewer uses Sonnet, and Artist uses Sonnet — the default pool is `[kimi, opus, sonnet]` (deduplicated). This means multi-model fan-out works out of the box without extra config — the user only needs to define `multiModel.models` explicitly if they want models in the pool that no agent uses as primary (e.g., Gemini, DeepSeek, o3).
 
 ### Storage — `.codebutler/` Folder
 
@@ -964,6 +978,83 @@ Normal cleanup happens when the user closes a thread (Lead deletes worktree + re
 ## 14. Multi-Model Orchestration
 
 All via OpenRouter. PM has model pool with hot swap. Cost controls: per-thread cap, per-day cap, per-user hourly limit. Circuit breaker: 3x PM failure → fallback for 5 minutes.
+
+### Brainstorm: Dynamic Thinker Agents
+
+The `brainstorm` workflow introduces a new pattern: the PM dynamically creates lightweight "Thinker" agents — ephemeral single-shot LLM calls that run in parallel inside the PM process.
+
+**What Thinkers are:**
+- Goroutines inside the PM process, not separate OS processes
+- Single-shot OpenRouter calls — no tools, no agent loop, no conversation persistence
+- Each gets a custom system prompt crafted by the PM for that specific brainstorm
+- Each uses a different model from the `multiModel.models` pool
+- They respond, the PM collects, they die
+
+**What Thinkers are NOT:**
+- Not CodeButler agents (no Slack presence, no @mention, no conversation file)
+- Not pre-configured personas (PM creates them dynamically per topic)
+- Not interactive (one prompt in, one response out — no follow-ups)
+
+**How it works at the code level:**
+
+```go
+type ThinkerConfig struct {
+    Name         string // e.g., "Quantitative Analyst"
+    SystemPrompt string // PM-generated, unique per Thinker
+    Model        string // OpenRouter model ID from multiModel.models
+}
+
+type ThinkerResult struct {
+    Name     string
+    Model    string
+    Response string
+    Tokens   TokenUsage
+    Duration time.Duration
+}
+
+// PM calls this tool during brainstorm workflow
+func (pm *PM) MultiModelFanOut(ctx context.Context, thinkers []ThinkerConfig, userPrompt string) []ThinkerResult {
+    results := make([]ThinkerResult, len(thinkers))
+    g, ctx := errgroup.WithContext(ctx)
+    for i, t := range thinkers {
+        g.Go(func() error {
+            resp, err := pm.provider.ChatCompletion(ctx, ChatRequest{
+                Model: t.Model,
+                Messages: []Message{
+                    {Role: "system", Content: t.SystemPrompt},
+                    {Role: "user", Content: userPrompt},
+                },
+            })
+            if err != nil {
+                results[i] = ThinkerResult{Name: t.Name, Model: t.Model, Response: "Error: " + err.Error()}
+                return nil // don't fail the group — other Thinkers continue
+            }
+            results[i] = ThinkerResult{
+                Name:     t.Name,
+                Model:    t.Model,
+                Response: resp.Content,
+                Tokens:   resp.Usage,
+                Duration: resp.Duration,
+            }
+            return nil
+        })
+    }
+    g.Wait()
+    return results
+}
+```
+
+**PM as creative director.** The PM's intelligence is what makes this work. It doesn't just forward a prompt to N models — it designs each Thinker's persona to maximize diversity of thought:
+
+- Analyzes the topic and identifies what expert perspectives would be most valuable
+- Crafts genuinely different system prompts (not variations of "be a senior engineer")
+- Includes domain-specific context in each prompt (codebase state, constraints, research)
+- Assigns models strategically — reasoning models (o3, DeepSeek-R1) for architectural questions, creative models (Claude, Gemini) for product ideation. **Each Thinker MUST use a different model** — no duplicates in a single round. Model diversity is the core value proposition; same model twice with different prompts is redundant. The number of Thinkers is capped by the number of available models in the pool
+- After collecting responses, synthesizes across all Thinkers — finding patterns, conflicts, and unique insights
+
+**Cost awareness.** Each brainstorm round costs N × single-shot calls. The PM estimates cost before fan-out (model pricing × estimated tokens) and posts it in the thread. If it exceeds `multiModel.maxCostPerRound`, the PM asks the user before proceeding. Thinker costs are tracked in `ThreadCost` and appear in the Lead's usage report.
+
+**Error handling.** If a Thinker's model fails (rate limit, timeout, content filter), the other Thinkers continue — one failure doesn't cancel the round. The PM notes the failure in the synthesis ("DeepSeek-R1 was unavailable this round — 3 of 4 Thinkers responded"). The circuit breaker is per-model, so a failing brainstorm model doesn't affect the agents' primary models.
 
 ### Dynamic Model Routing
 

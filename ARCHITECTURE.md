@@ -486,6 +486,7 @@ internal/
   tools/                         # Definition, executor (sandboxed), loop (provider-agnostic)
   mcp/                           # MCP server lifecycle, client, merged tool registry
   skills/                        # Skill loader, parser, index builder
+  multimodel/                    # Multi-model fan-out, result collection, cost estimation
   router/router.go               # Message classifier (per-agent filter)
   conflicts/                     # Tracker, notify
   worktree/                      # Worktree create/init/remove (per-platform)
@@ -505,8 +506,136 @@ internal/
 | `internal/worktree/` | Create, init, remove, isolation |
 | `internal/mcp/` | Config parsing, role filtering, env resolution, tool routing, server lifecycle |
 | `internal/skills/` | Skill file parsing, index building, variable extraction |
+| `internal/multimodel/` | Fan-out execution, result aggregation, cost estimation, error isolation |
 
 Integration: mock OpenRouter, mock MCP servers (stdio). E2E: real Slack (manual).
+
+## Multi-Model Fan-Out
+
+The `MultiModelFanOut` tool makes parallel single-shot LLM calls to different models via OpenRouter, each with a custom system prompt. Available to **all agents** — not just the PM. The brainstorm workflow is the primary consumer, but any agent can use it when multiple model perspectives would improve their output.
+
+### Per-Agent Use Cases
+
+| Agent | When to use | What it does |
+|-------|------------|--------------|
+| **PM** | `brainstorm` workflow | Creates dynamic Thinker personas, fans out a question, synthesizes ideas |
+| **Reviewer** | Complex or security-critical PRs | Fans out the same diff to multiple models, each reviewing from a different angle (security, performance, logic, test coverage). Synthesizes into a single review with higher coverage than any one model |
+| **Coder** | Stuck on implementation or choosing between approaches | Fans out "how would you implement X?" to multiple models, compares approaches, picks the best one. Like pair programming with 3 different senior devs |
+| **Lead** | Retrospective analysis | Fans out the same thread summary to multiple models, each analyzing from a different angle. Surfaces patterns one model alone might miss |
+| **Researcher** | Broad research questions | Fans out the same question to multiple models with different knowledge cutoffs and training data emphasis. Gets more comprehensive results |
+
+**When NOT to use it:** routine operations, simple tasks, when the agent's primary model is sufficient. Multi-model fan-out costs N× a single call — agents should use it judiciously.
+
+### MultiModelFanOut Tool
+
+```go
+// Tool definition (appears in every agent's tool list)
+{
+    Name: "MultiModelFanOut",
+    Description: "Run parallel single-shot LLM calls to multiple models, each with a custom system prompt. Each call uses a different model — no duplicates. Returns all responses for the calling agent to synthesize.",
+    Parameters: {
+        "agents": [
+            {
+                "name": "string — display name (e.g., 'Security Reviewer', 'DeFi Expert')",
+                "systemPrompt": "string — custom system prompt for this sub-agent",
+                "model": "string — OpenRouter model ID from multiModel.models pool"
+            }
+        ],
+        "userPrompt": "string — the question/context all sub-agents receive"
+    }
+}
+```
+
+### Execution
+
+```
+1. Agent calls MultiModelFanOut with N sub-agent configs + shared user prompt
+2. Tool validates: all models are in multiModel.models pool, N <= maxAgents, no duplicate models (each sub-agent MUST use a different model — model diversity is the whole point)
+3. Tool estimates cost (model pricing × estimated prompt tokens) — if exceeds maxCostPerRound, returns warning to the calling agent (agent decides whether to proceed or ask user)
+4. Tool launches N goroutines via errgroup, each making a ChatCompletion call to OpenRouter:
+   - Messages: [system: agent.systemPrompt, user: userPrompt]
+   - No tools enabled (single-shot, no agent loop)
+   - Timeout: 120s per call (reasoning models can be slow)
+5. Each goroutine captures: response text, token usage, duration, model used, errors
+6. errgroup.Wait() — all calls complete (or timeout)
+7. Tool returns aggregated results to the calling agent as structured JSON
+8. Agent processes results in its next turn (synthesis, posting to thread)
+```
+
+### Error Isolation
+
+Each sub-agent is independent. If one model fails (429, timeout, content filter), the others continue.
+
+```go
+// Inside each goroutine — errors don't propagate
+resp, err := provider.ChatCompletion(ctx, req)
+if err != nil {
+    results[i] = FanOutResult{
+        Name:  a.Name,
+        Model: a.Model,
+        Error: err.Error(),
+    }
+    return nil // don't cancel errgroup
+}
+```
+
+The calling agent receives all results including failures. It's responsible for noting which sub-agents failed ("3 of 4 models responded — Gemini timed out").
+
+### Circuit Breaker Integration
+
+Fan-out calls go through the same per-model circuit breakers as regular agent calls. If a model's circuit is open, the sub-agent returns immediately with an error — no wasted time waiting for a known-bad model. The calling agent can adapt or proceed with fewer results.
+
+Fan-out failures do NOT open circuits for the agents' primary models. They're separate models in the pool.
+
+### Cost Tracking
+
+Each sub-agent's token usage is tracked and added to the thread's `ThreadCost`:
+
+```go
+type FanOutCost struct {
+    Name         string
+    Model        string
+    InputTokens  int64
+    OutputTokens int64
+    EstimatedUSD float64
+    Duration     time.Duration
+}
+```
+
+The `ThreadCost.FanOutRounds` field accumulates across rounds for any agent that uses fan-out. The Lead includes these costs in the thread report — useful for understanding whether multi-model consultation pays for itself.
+
+### Package
+
+```
+internal/
+  multimodel/
+    fanout.go       # MultiModelFanOut tool: parallel execution, result collection
+    cost.go         # Cost estimation from model pricing tables
+    types.go        # FanOutConfig, FanOutResult, FanOutCost
+```
+
+The multimodel package depends on `LLMProvider` interface (same as all agents) — no direct OpenRouter dependency. Testable with mock providers.
+
+```go
+func TestFanOut_PartialFailure(t *testing.T) {
+    provider := &mockMultiModelProvider{
+        responses: map[string]ChatResponse{
+            "anthropic/claude-opus-4-6": {Content: "idea A"},
+            "google/gemini-2.5-pro":     {Content: "idea B"},
+        },
+        errors: map[string]error{
+            "openai/o3": fmt.Errorf("rate limited"),
+        },
+    }
+
+    results := multimodel.FanOut(ctx, provider, agents, "what should we build?")
+
+    assert.Equal(t, 3, len(results))
+    assert.Empty(t, results[0].Error) // Claude succeeded
+    assert.Empty(t, results[1].Error) // Gemini succeeded
+    assert.Contains(t, results[2].Error, "rate limited") // o3 failed gracefully
+}
+```
 
 ## Error Recovery
 
