@@ -863,3 +863,132 @@ dispatch tool calls to actual executors instead of mocks. The registry's
 `Execute` method is already shaped to match the `ToolExecutor` interface defined
 in `ARCHITECTURE.md` — the agent loop will accept it directly via dependency
 injection.
+
+---
+
+## 2026-02-25 — M5: One loop to run them all
+
+### The problem: six agents, one behavior
+
+CodeButler has six agents — PM, Coder, Reviewer, Researcher, Artist, Lead —
+each with different models, different tool permissions, and different system
+prompts. But they all do the same thing at the core: receive messages, call
+an LLM, execute any tool calls the LLM requests, feed results back, and
+repeat until the LLM produces a final text response. Writing six different
+loops would be six bugs waiting to diverge. The goal was a single `AgentRunner`
+struct that all six agents share, differentiated only by configuration.
+
+### Why the agent package defines its own types
+
+The OpenRouter client (M3) already has `Message`, `ToolCall`, `ChatRequest`,
+`ChatResponse`. The tool system (M4) has its own `ToolCall` and `ToolResult`.
+The obvious approach was to reuse one of these type sets. But the architecture
+document is clear: "The agent loop package doesn't know about Slack threads or
+agent MDs — it works with generic interfaces." If the agent loop imports
+`openrouter.Message`, it's permanently coupled to that provider. If it imports
+`tools.ToolCall`, it can't be extracted into a standalone package later.
+
+So the agent package defines its own `Message`, `ToolCall`, `ToolResult`,
+`ChatRequest`, and `ChatResponse` — structurally identical to the OpenRouter
+types but owned by the agent package. When wiring things up in `main.go`, thin
+adapters will translate between the two. This is a small amount of boilerplate
+now that buys real independence later. The architecture calls this "extract,
+don't embed" — build inside `internal/` first, keep the boundaries clean, and
+extract when the interface stabilizes.
+
+### The loop: deceptively simple, carefully ordered
+
+The core loop is a `for` over `MaxTurns`:
+
+1. Check context (cancelled? stop)
+2. Call the LLM with the full conversation
+3. Append the response to the conversation
+4. If the response has no tool calls → return the text response
+5. Execute tool calls → append results → go to 1
+
+The ordering matters more than it looks. The turn counter is checked *before*
+each LLM call, never after. This is an explicit design choice from the
+architecture doc: if you check after, the agent can overshoot its turn limit
+by one — it makes an LLM call, gets a tool call response, executes the tool,
+and only then discovers it's over budget. Checking before means the agent
+stops cleanly at the limit. The Coder's 100-turn budget is actually 100 LLM
+calls, not "somewhere between 100 and 101."
+
+When MaxTurns is reached without a text response, the runner returns a result
+with an empty `Response` field. It doesn't try to summarize or clean up — that's
+the caller's responsibility. The runner is deliberately dumb: loop, dispatch,
+accumulate, stop.
+
+### Parallel tool execution: goroutines with indexed results
+
+When the LLM returns multiple tool calls in a single response (e.g., "read
+three files"), they're independent and can run simultaneously. The runner
+checks: if there's one tool call, execute it directly. If there are multiple,
+spawn goroutines.
+
+The parallel path uses a pre-allocated results slice indexed by position, not
+channels. Each goroutine writes to `results[i]`, so the order is preserved
+regardless of completion order. This matters because the LLM expects tool
+results in the same order it requested them — shuffling results would confuse
+the model about which result corresponds to which call.
+
+The single-call fast path avoids goroutine overhead for the common case. Most
+LLM turns produce one tool call; parallel fan-out is the exception (typically
+during codebase exploration, where the model reads several files at once).
+
+### Error handling: errors are results, not crashes
+
+When a tool executor returns an error — say the sandbox blocks a path escape
+or Bash rejects a destructive command — the runner doesn't fail the entire
+loop. Instead, it wraps the error into a `ToolResult` with `IsError: true`
+and sends it back to the LLM as a tool response. The model sees `"error:
+command blocked: destructive operation"` and can decide what to do: try a
+different approach, ask for help, or report the failure.
+
+This is crucial for robustness. An agent hitting one bad tool call shouldn't
+abort a 50-turn implementation. The LLM is surprisingly good at recovering
+from tool errors when it gets clear error messages.
+
+LLM-level errors (network failures, rate limits, provider outages) *do* stop
+the loop — these are returned as Go errors. The distinction: tool errors are
+content (the model should see them), LLM errors are infrastructure (the
+caller should handle them).
+
+### Three interfaces, no imports
+
+The runner depends on three interfaces, all defined in the agent package:
+
+- `LLMProvider` — one method: `ChatCompletion(ctx, req) (*resp, error)`
+- `ToolExecutor` — two methods: `Execute(ctx, call) (result, error)` and `ListTools() []ToolDefinition`
+- `MessageSender` — one method: `SendMessage(ctx, channel, thread, text) error`
+
+The architecture doc says "interfaces are defined by the consumer, not the
+implementer." The agent package doesn't import `openrouter` or `tools` or
+`slack`. It defines what it needs, and the wiring code provides implementations.
+This makes testing trivial: each test creates a mock struct with the exact
+behavior it wants to verify.
+
+The `MessageSender` is accepted but not yet used by the loop itself — it's
+there for future milestones where agents post intermediate updates to Slack
+threads during execution. The runner currently returns the final text; posting
+it is the caller's job.
+
+### System prompt building: concatenation with a PM exception
+
+`BuildSystemPrompt` joins the seed MD, global.md, and (for PM only)
+workflows.md with double newlines. The PM gets workflows because it needs to
+classify user intent against available workflow definitions. Other agents
+don't need this — they receive tasks from the PM, not raw user messages.
+
+This is a pure function — no file I/O, no side effects. The caller reads the
+files and passes strings. This keeps the agent package independent of the
+filesystem and makes testing a one-liner: pass strings, check the output.
+
+### What's next
+
+M5 is the center of the dependency graph. It unblocks M6 (Conversation
+Persistence — saving the conversation after each model round for crash
+recovery), M7 (Agent Loop Safety — MaxTurns enforcement is done, but stuck
+detection and context compaction are M7 territory), and eventually M9 (Message
+Routing, which spawns thread goroutines that each run this loop). The critical
+path to a first working flow continues through M6→M7→M8→M9.
