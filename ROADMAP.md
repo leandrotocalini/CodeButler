@@ -24,17 +24,17 @@ ARCHITECTURE.md.
 
 **Acceptance:** `go build ./cmd/codebutler && ./codebutler --role pm` prints role.
 
-### M2 — Config System `pending`
+### M2 — Config System `done`
 
 Load global (`~/.codebutler/config.json`) and per-repo
 (`.codebutler/config.json`) configuration.
 
-- [ ] Define Go structs for global config (Slack tokens, OpenRouter key, OpenAI key)
-- [ ] Define Go structs for per-repo config (channel, models, multiModel, limits)
-- [ ] Config loader: find repo root (walk up for `.codebutler/`), load both files
-- [ ] Environment variable resolution (`${VAR}` syntax for MCP config)
-- [ ] Validation: fail fast on missing required fields
-- [ ] Unit tests with `testdata/` fixtures
+- [x] Define Go structs for global config (Slack tokens, OpenRouter key, OpenAI key)
+- [x] Define Go structs for per-repo config (channel, models, multiModel, limits)
+- [x] Config loader: find repo root (walk up for `.codebutler/`), load both files
+- [x] Environment variable resolution (`${VAR}` syntax for MCP config)
+- [x] Validation: fail fast on missing required fields
+- [x] Unit tests with `testdata/` fixtures
 
 **Acceptance:** `config.Load()` returns typed config from fixture files.
 
