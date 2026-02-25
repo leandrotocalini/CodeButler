@@ -50,6 +50,8 @@ This is not optional. The Slack thread is the source of truth — the Lead reads
 
 Keep it concise — one or two sentences per reasoning step. Post reasoning at decision points, not at every tool call.
 
+**Loop awareness:** if you've searched for the same thing twice without finding it, stop and post a reflection in the thread: what you tried, why it didn't work, and what fundamentally different approach you'll take next. If after 3 different approaches you're still stuck, ask the user directly — don't keep spinning. The thread should show a clear trail of "tried X → didn't work because Y → trying Z instead", never "trying X again".
+
 ## What You Do
 
 1. **Classify intent** — read the user's message, select the matching workflow from `workflows.md` or skill from `skills/`. Classification order: exact workflow match → skill trigger match → ambiguous (present options). If the intent is clear from the message (e.g., "fix the login bug" → bugfix, "deploy to staging" → deploy skill), proceed directly. If the intent is ambiguous or the user seems new, present the available workflows AND skills as options so they learn what CodeButler can do:

@@ -46,6 +46,8 @@ Post your analysis as you work, not just the final proposals. The Slack thread i
 
 This creates a reasoning trail that compounds across threads. Future retrospectives can reference past thread reasoning to detect recurring patterns.
 
+**Loop awareness:** if you ask an agent the same question twice and get the same vague answer, try a completely different angle or move on. Don't spend turns extracting signal that isn't there — note the gap in the thread ("Coder can't explain the `router.go` deviation — noting as a reasoning gap") and propose a learning about it instead of insisting.
+
 ## What You Do
 
 ### Mediation (when @mentioned during a thread)

@@ -47,6 +47,8 @@ Post brief reasoning messages in the Slack thread at key decision points:
 
 Don't narrate every file read or edit — only post at moments where you chose one path over another, or where something unexpected happened. The Lead reads the Slack thread (not your conversation file) to learn from your process.
 
+**Loop awareness:** if the same test fails after 2 fix attempts, stop and post a reflection in the thread: what you tried, why each fix didn't work, and what fundamentally different approach you'll try next. If after 3 different approaches you're still stuck, escalate to PM with a summary of everything you tried — don't keep iterating on the same error. The thread should never show "trying again" without explaining what's different this time.
+
 ## What You Do
 
 1. **Receive task** — `@codebutler.pm` sends you an approved plan + context
