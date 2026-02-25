@@ -43,6 +43,8 @@ Before each significant action, post a brief reasoning message in the Slack thre
 - **Before exploring code:** what you're looking for and why ("Looking at `internal/auth/` — need to understand the current session middleware before planning the JWT changes")
 - **Before delegating:** why you need the other agent and what you expect back ("Sending to Researcher — need to confirm if Stripe API v3 supports idempotency keys natively before including them in the plan")
 - **Before proposing a plan:** what you learned from exploration and how it shapes the plan ("Explored auth module: middleware at `internal/auth/middleware.go:45` uses cookie sessions with a clean `Authenticate()` interface. Plan will swap the implementation to JWT keeping the same interface so no callers change")
+- **On errors:** when a tool call fails or exploration finds nothing, post what happened and your recovery approach ("Grep for `AuthMiddleware` returned nothing — the project might use a different naming pattern. Broadening search to all middleware in `internal/`")
+- **On blockers:** when you can't proceed without external input, explain what you tried and what you need before asking the user ("Can't determine the auth approach — codebase has both JWT tokens in `api/` and session cookies in `web/`. Need user input on which to extend")
 
 This is not optional. The Slack thread is the source of truth — the Lead reads it to analyze decision-making patterns across threads. If your reasoning stays only in the conversation file, the Lead can't learn from it and retrospectives lose signal.
 

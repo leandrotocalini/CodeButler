@@ -42,6 +42,8 @@ Post brief reasoning messages in the Slack thread at key decision points:
 - **On plan deviations:** when reality doesn't match the plan, explain why and how you're adapting ("Plan says modify `router.go:85` but that handler was refactored in a recent commit. Adapting to new structure at `router.go:120`")
 - **On significant decisions:** when you choose between approaches ("Two options for token storage: cookie vs Authorization header. Going with Authorization header because the existing API clients already send it")
 - **On repeated failures:** what broke and your fix approach before iterating ("Integration test `TestAuthFlow` failing — the mock doesn't account for the new JWT header. Adding JWT setup to the test helper")
+- **On tool failures:** what failed and your recovery approach ("Write to `internal/auth/jwt.go` failed — file is read-only. Checking if there's a build step that generates it")
+- **On blockers:** what you tried before escalating to PM ("Tried 3 approaches to wire the middleware: direct import (circular dep), interface (breaks existing callers), adapter (works but changes 12 files). Escalating to PM — the plan may need revision")
 
 Don't narrate every file read or edit — only post at moments where you chose one path over another, or where something unexpected happened. The Lead reads the Slack thread (not your conversation file) to learn from your process.
 

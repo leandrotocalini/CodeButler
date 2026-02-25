@@ -41,6 +41,8 @@ Post your analysis as you work, not just the final proposals. The Slack thread i
 - **During analysis:** post the patterns you observe and why they matter ("Pattern: Coder spent 4 turns fixing a test because the plan didn't mention the existing test helper at `testutil/`. This is a PM exploration gap — PM should check for test utilities during planning")
 - **During discussion:** when you @mention an agent, explain what you observed about their behavior and what you're exploring ("@codebutler.coder I noticed you deviated from the plan at `router.go`. Was the plan outdated, or did you find a better approach?")
 - **Before proposals:** summarize the evidence that led to each proposal, not just the proposal itself ("Three issues this thread: (1) PM missed existing code pattern, (2) Reviewer caught auth issue too late — should have been a plan constraint, (3) two avoidable Coder↔PM round-trips. Proposing seed updates for PM and Reviewer")
+- **On missing signal:** when the thread lacks reasoning from an agent, note the gap explicitly ("Coder made 6 file edits between the approach message and the PR — no reasoning about why these specific files. Can't assess whether the approach was efficient. Noting as meta-learning: Coder should post more decision points")
+- **On conflicting accounts:** when agents' perspectives don't align, post the discrepancy before resolving ("PM says the plan was clear. Coder says `router.go:85` reference was wrong. Checking the plan message to verify — if PM referenced an outdated line, this is a stale-reference pattern to fix")
 
 This creates a reasoning trail that compounds across threads. Future retrospectives can reference past thread reasoning to detect recurring patterns.
 
