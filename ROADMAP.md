@@ -79,18 +79,18 @@ block disallowed tools, idempotent re-execution returns cached results.
 
 The agent loop that drives all six agents. Same code, different config.
 
-### M5 — Agent Loop `pending`
+### M5 — Agent Loop `done`
 
 The core prompt → LLM → tool-call → execute → repeat loop.
 
-- [ ] `AgentRunner` struct with `LLMProvider`, `ToolExecutor`, `MessageSender` interfaces
-- [ ] `Run(ctx, Task) (Result, error)` — runs the loop until text response or max turns
-- [ ] System prompt building: seed MD + global.md (+ workflows.md for PM)
-- [ ] Tool call dispatch: match tool name → execute → append result → next LLM call
-- [ ] Parallel tool execution when multiple independent tool calls returned
-- [ ] Turn counter (check before each LLM call, never after)
-- [ ] Graceful stop: context cancellation propagates through loop
-- [ ] Unit tests with mock LLM provider
+- [x] `AgentRunner` struct with `LLMProvider`, `ToolExecutor`, `MessageSender` interfaces
+- [x] `Run(ctx, Task) (Result, error)` — runs the loop until text response or max turns
+- [x] System prompt building: seed MD + global.md (+ workflows.md for PM)
+- [x] Tool call dispatch: match tool name → execute → append result → next LLM call
+- [x] Parallel tool execution when multiple independent tool calls returned
+- [x] Turn counter (check before each LLM call, never after)
+- [x] Graceful stop: context cancellation propagates through loop
+- [x] Unit tests with mock LLM provider
 
 **Acceptance:** agent loop processes tool calls, respects MaxTurns, handles
 text responses, parallel tool execution works.
