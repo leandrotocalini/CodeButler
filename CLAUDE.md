@@ -36,6 +36,7 @@ seeds/
     triage-issue.md   # Triage GitHub issues (PM, GitHub MCP)
     review-pr.md      # Review PRs with inline comments (Reviewer, GitHub MCP)
     release.md        # Create GitHub releases (PM, GitHub MCP)
+    behavior-report.md # Aggregate agent behavior analysis (Lead)
 ```
 
 ## Key Concepts
