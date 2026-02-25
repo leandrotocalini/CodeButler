@@ -6,10 +6,22 @@ what you want in a Slack thread — the agents plan, build, review, and learn.
 
 **Status**: Defining specs and agent seeds. Code not yet written.
 
+## Implementation Roadmap
+
+`ROADMAP.md` contains the full implementation plan: 35 milestones across 12 phases.
+Each milestone has acceptance criteria and a clear dependency chain.
+
+**How to read the roadmap:**
+- Phases are sequential (1→12), milestones within a phase may parallelize.
+- Each milestone has a status: `pending` | `in_progress` | `done`.
+- The critical path to a first working flow is: M1→M2→M3→M4→M5→M6→M7→M8→M9→M16→M17→M18.
+- Use `/implement-next` (Claude Code command) to pick up the next pending milestone and implement it.
+
 ## Design Documents
 
 - `SPEC.md` — Product spec (what the system does, agents, flows, config, memory)
 - `ARCHITECTURE.md` — Implementation details (message routing, event loop, project structure, testing)
+- `ROADMAP.md` — Implementation roadmap with milestones, acceptance criteria, and dependencies
 - `seeds/` — Agent seed MDs (identity, personality, routing rules, tools, workflows)
 
 ## Agent Seeds
