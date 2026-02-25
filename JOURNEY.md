@@ -581,3 +581,90 @@ audio → check draft mode → normal pipeline. This means voice notes in draft 
 arrive as clean text, exactly like typed messages. The same Whisper transcription
 that works in normal mode works in draft mode, because the draft handler never
 sees the difference — it just receives a string.
+
+---
+
+## 2026-02-25 — M2: Two config files, one truth
+
+### The problem: secrets and settings don't belong in the same place
+
+CodeButler runs six agent processes, all parameterized from the same binary. Each
+needs to know which Slack channel to listen on, which LLM model to use, and how to
+authenticate with OpenRouter and Slack. The obvious approach — one config file with
+everything — immediately hits a wall: API keys can't be committed to git, but model
+assignments and channel IDs should be.
+
+The spec defines two config files for this reason. `~/.codebutler/config.json` holds
+secrets (Slack tokens, OpenRouter key, OpenAI key) and lives on each machine, never
+committed. `.codebutler/config.json` inside the repo holds everything else — models,
+limits, channel — and gets committed so the whole team shares the same agent
+configuration.
+
+### Finding the repo
+
+Before loading anything, the loader needs to find the repo root. CodeButler uses
+`.codebutler/` as its marker directory (similar to how git uses `.git/`). The loader
+walks up from the current working directory, checking each level for a `.codebutler/`
+subdirectory. This means you can run `codebutler --role pm` from any subdirectory
+of the project and it will find the right config.
+
+The alternative was requiring an explicit path flag, but that's friction for every
+invocation. The walk-up approach matches developer expectations — `git` works the
+same way.
+
+### Environment variable resolution happens before JSON parsing
+
+MCP server configs reference secrets with `${VAR}` syntax — for example,
+`"${GITHUB_TOKEN}"` in the server's env block. These need to resolve to actual
+values from the process environment, since secrets come from the service unit or
+shell, not from committed files.
+
+The resolution is a simple regex replacement on the raw JSON string *before*
+`json.Unmarshal`. This is intentional: doing it at the string level means it works
+for any field in any config file, not just specifically annotated fields. The MCP
+config (loaded by a different package in a later milestone) will get the same
+resolution for free because it uses the same `loadJSON` helper.
+
+Unset environment variables resolve to empty strings rather than causing an error
+at the resolution stage. The validation step catches the problem downstream with
+a clear message ("slack.botToken is required") rather than a cryptic "SLACK_BOT_TOKEN
+is not set." This way the user knows *which config field* is broken, not just which
+env var is missing.
+
+### Typed structs mirror the spec exactly
+
+Each agent role has its own model configuration shape. The PM gets a `default` model
+plus a `pool` map for hot-swapping (`/pm claude`, `/pm kimi`). Standard agents (Coder,
+Reviewer, Researcher, Lead) get a single `model` plus an optional `fallbackModel` for
+circuit breaker recovery. The Artist is different again — separate `uxModel` (for
+design reasoning via Claude) and `imageModel` (for generation via OpenAI).
+
+These could have been a single generic struct with optional fields, but that would
+push validation complexity into every consumer. With distinct types, the compiler
+catches mistakes: you can't accidentally read `Model` on a PM config that only has
+`Default` and `Pool`.
+
+### Validation: fail fast, fail all at once
+
+The validator collects all missing required fields before returning, rather than
+failing on the first one. When you're setting up a fresh machine and three fields
+are missing, you want to see all three — not fix one, re-run, fix the next, re-run.
+
+Only truly required fields are validated: the three authentication keys (Slack bot
+token, Slack app token, OpenRouter API key) and the Slack channel ID. The OpenAI
+key is optional — only the Artist agent needs it, and not every team uses the Artist.
+Model assignments are optional too; defaults can be applied at the agent runner level
+when that code exists.
+
+### Testing with real file layouts
+
+The tests create temporary directory trees that mirror the actual file structure:
+`tmpdir/.codebutler/config.json` for the repo config, a separate temp directory
+for the global config. This exercises the full `Load` path including repo root
+discovery, file reading, env var resolution, and validation — not just individual
+functions in isolation.
+
+The `globalDir` parameter on `Load` exists specifically for testing. In production
+it's empty and defaults to `~/.codebutler/`. In tests it points to a temp directory.
+This avoids the need to mock `os.UserHomeDir` or pollute the real home directory
+during tests.
