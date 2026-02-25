@@ -9,18 +9,18 @@ Status legend: `pending` | `in_progress` | `done`
 The platform that everything else builds on. No agents yet — just the core
 runtime, config loading, OpenRouter client, and tool execution.
 
-### M1 — Project Bootstrap `pending`
+### M1 — Project Bootstrap `done`
 
 Initialize the Go project and establish the directory structure from
 ARCHITECTURE.md.
 
-- [ ] `go mod init github.com/leandrotocalini/codebutler`
-- [ ] Create `cmd/codebutler/main.go` with `--role` flag (cobra or stdlib flag)
-- [ ] Create `internal/` package layout matching ARCHITECTURE.md:
+- [x] `go mod init github.com/leandrotocalini/codebutler`
+- [x] Create `cmd/codebutler/main.go` with `--role` flag (cobra or stdlib flag)
+- [x] Create `internal/` package layout matching ARCHITECTURE.md:
       `slack/`, `provider/openrouter/`, `provider/openai/`, `tools/`,
       `mcp/`, `skills/`, `multimodel/`, `router/`, `conflicts/`,
       `worktree/`, `config/`, `models/`, `decisions/`, `github/`
-- [ ] Minimal `main()` that parses `--role` and prints it (proof of life)
+- [x] Minimal `main()` that parses `--role` and prints it (proof of life)
 
 **Acceptance:** `go build ./cmd/codebutler && ./codebutler --role pm` prints role.
 
