@@ -278,6 +278,18 @@ Skills marked **(GitHub MCP)** require the GitHub MCP server configured in `mcp.
 - **Lead** — proposes new skills during retrospective when it spots recurring patterns ("you've asked for deploys 4 times — want me to create a deploy skill?")
 - **PM** — suggests skills when users repeatedly describe the same type of task
 
+**Skill validation:** `codebutler validate` checks all skill files in `.codebutler/skills/` and reports errors:
+
+| Check | Error |
+|-------|-------|
+| Missing required section (`# name`, `## Trigger`, `## Agent`, `## Prompt`) | `deploy.md: missing ## Agent section` |
+| Invalid agent name | `deploy.md: agent "builder" is not a valid role (pm, coder, reviewer, researcher, artist, lead)` |
+| Duplicate trigger phrases across skills | `deploy.md and release.md: duplicate trigger "deploy"` |
+| Undefined `{{variable}}` in prompt (not captured by any trigger `{param}`) | `deploy.md: {{env}} used in prompt but no {env} in triggers` |
+| Empty prompt | `deploy.md: ## Prompt section is empty` |
+
+Validation runs automatically during `codebutler init` and when the PM reloads skills (file change detected). Errors are logged as warnings — invalid skills are skipped, not fatal.
+
 ### 1.7 Why CodeButler Exists
 
 **vs. Claude Code:** Slack-native. PM planning 100x cheaper. Automated memory. N parallel threads. Audit trail.
@@ -539,6 +551,47 @@ User (final authority)
 
 When two agents disagree → Lead decides. **The user outranks everyone** — can jump in at any point, override any decision. The user IS the escalation.
 
+### Message Redaction
+
+Agents have access to MCP servers (databases, APIs, monitoring) and tools that can return sensitive data. Before any message is posted to Slack via `SendMessage`, the runtime applies a redaction filter.
+
+**What gets redacted:**
+
+| Pattern | Example | Replacement |
+|---------|---------|-------------|
+| API keys | `sk-or-v1-abc123...`, `sk-...`, `xoxb-...` | `[REDACTED:api_key]` |
+| JWT tokens | `eyJhbG...` (base64 with dots) | `[REDACTED:jwt]` |
+| Private keys | `-----BEGIN.*PRIVATE KEY-----` | `[REDACTED:private_key]` |
+| Connection strings | `postgres://user:pass@host/db` | `[REDACTED:connection_string]` |
+| Common secret patterns | `password=`, `secret=`, `token=` followed by value | `[REDACTED:secret]` |
+| IP addresses + ports (internal) | `192.168.*`, `10.*`, `172.16-31.*` with ports | `[REDACTED:internal_ip]` |
+
+**How it works:**
+
+1. Agent calls `SendMessage(message, waitForReply)`
+2. Before posting to Slack, the message passes through `redact.Filter(text) string`
+3. The filter runs a set of compiled regexes against the text
+4. Matches are replaced with `[REDACTED:<type>]`
+5. If any redaction occurred, the original unredacted text is logged locally (structured log, `Debug` level) for debugging
+6. The redacted message is posted to Slack
+
+**What stays unredacted:** code snippets, file paths, git hashes, branch names, URLs to public services. The filter is tuned to avoid false positives on normal development content.
+
+**Per-repo custom patterns:** `.codebutler/policy.json` can define additional redaction patterns:
+
+```json
+{
+  "redaction": {
+    "patterns": [
+      {"name": "internal_url", "regex": "https?://internal\\.company\\.com[^\\s]*"},
+      {"name": "customer_id", "regex": "cust_[a-zA-Z0-9]{20,}"}
+    ]
+  }
+}
+```
+
+The redactor is a pure function — regex match + replace, no network calls, no LLM. Runs in microseconds. Applied to every outbound Slack message, no exceptions.
+
 ---
 
 ## 8. Agent Architectures
@@ -596,7 +649,19 @@ Claude Opus 4.6. Listens for @mentions from PM (task) and Reviewer (feedback). F
 
 ### Reviewer — Code Review Loop
 
-Listens for @mentions from Coder ("PR ready"). Checks: code quality, security (OWASP), test coverage, consistency, plan compliance. Sends structured feedback back to Coder via @mention. Loop until approved (max 3 rounds). When approved, @mentions Lead. Disagreements escalate to Lead. System prompt: `reviewer.md` + `global.md`.
+Listens for @mentions from Coder ("PR ready"). Sends structured feedback back to Coder via @mention. Loop until approved (max 3 rounds). When approved, @mentions Lead. Disagreements escalate to Lead. System prompt: `reviewer.md` + `global.md`.
+
+**Structured review protocol — the Reviewer produces three artifacts before commenting on the diff:**
+
+1. **Invariants list** — what MUST NOT break. Extracted from the PM's plan, existing tests, and the codebase context. Example: "auth middleware must reject expired tokens", "API response format must not change for existing endpoints". These become the Reviewer's acceptance criteria
+2. **Risk matrix** — categorizes changes by risk area:
+   - **Security**: auth, input validation, secrets, permissions
+   - **Performance**: N+1 queries, unbounded loops, missing pagination
+   - **Compatibility**: API changes, schema migrations, config format changes
+   - **Correctness**: edge cases, error handling, race conditions
+3. **Test plan** — minimum tests that should exist for the changes. Categorized as unit / integration / e2e. The Reviewer checks if the Coder wrote them; if not, the first review round requests them before reviewing logic
+
+**Only after producing these three artifacts does the Reviewer comment on the diff.** This prevents "looks good" reviews and catches subtle bugs that line-by-line comments miss. The invariants and risk matrix are posted in the thread (visible to Lead for retrospective). The test plan is included in feedback to the Coder.
 
 ### Lead — Mediator + Retrospective
 
@@ -607,6 +672,17 @@ Listens for @mentions from Reviewer ("approved") or from agents in disagreement.
 3. **Proposals** (to user) — concrete updates to agent MDs, `global.md`, `workflows.md`
 
 **Produces:** PR description, learnings for agent MDs, workflow evolution, usage report.
+
+**Structured retrospective output — the Lead produces a fixed format:**
+
+- **3 things that went well** — with evidence (thread message links, metrics)
+- **3 friction points** — root cause, not symptoms. "Coder used 40 turns because PM didn't include auth middleware location" not "Coder took too long"
+- **1 process change** — concrete workflow step to add, remove, or modify
+- **1 prompt change** — specific update to an agent's seed or learnings
+- **1 new skill or skill tweak** — if a pattern in this thread would benefit from a reusable skill (optional — only if applicable)
+- **1 guardrail** — new check, limit, or safety measure if the thread revealed a risk (optional)
+
+Each item includes: severity (low/medium/high), estimated impact on future threads, and the specific file + section to update. This structured output makes it easy for the user to approve or reject individual proposals.
 
 **Workflow evolution** — add step, create new workflow, or automate a step. Built collaboratively with agents during discussion.
 
@@ -745,6 +821,51 @@ After PR creation, Lead proposes updates routed to the right file:
 
 **Inter-agent:** Each agent's MD accumulates how to work with other agents. PM learns what Coder needs. Artist learns what detail level Coder expects. Cross-cutting knowledge goes to `global.md`.
 
+### Learnings Schema
+
+Learnings are the most volatile part of agent MDs. Without structure, they accumulate into an incoherent blob of contradictory rules. Every learning the Lead proposes must follow a structured format in the markdown:
+
+```markdown
+### [Learning title]
+- **When:** [situation/trigger that makes this relevant]
+- **Rule:** [the concrete instruction]
+- **Example:** [specific case from the thread where this was learned]
+- **Confidence:** high | medium | low
+- **Source:** thread-<ts>, <date>
+```
+
+**Example:**
+
+```markdown
+### Always check for existing auth middleware before creating new
+- **When:** implementing features that need authentication
+- **Rule:** before writing auth code, search for existing middleware in internal/auth/ and reuse it
+- **Example:** thread-1709312345: Coder wrote a new JWT validator when internal/auth/middleware.go already had one, causing 4 extra review rounds
+- **Confidence:** high
+- **Source:** thread-1709312345, 2026-02-20
+```
+
+### Learnings Pruning
+
+Agent MDs grow over time. The Lead manages this growth with periodic pruning — same as re-learn is knowledge GC for project maps, pruning is knowledge GC for learnings.
+
+**When pruning runs:**
+- During every retrospective, the Lead reviews existing learnings in the agents it's updating
+- During re-learn, the Lead reviews all learnings across all agents
+- The Lead can also propose pruning standalone if it detects MD bloat
+
+**Pruning criteria:**
+
+| Signal | Action |
+|--------|--------|
+| Learning contradicts a newer learning | Remove the older one, keep the newer. Note the replacement in the new learning |
+| Learning references code/patterns that no longer exist | Archive (move to a `## Archived Learnings` section at the bottom of the MD, collapsed) |
+| Learning has `confidence: low` and hasn't been reinforced in 10+ threads | Archive |
+| Learning is redundant with project conventions in `global.md` | Remove from agent MD (it's already covered globally) |
+| Agent MD exceeds ~30K tokens | Lead must prune before adding new learnings. Net-zero or net-negative token growth |
+
+**Archived learnings** stay in the MD but in a collapsed section that's excluded from the system prompt (the prompt builder skips `## Archived Learnings`). They remain in git history and can be restored if needed.
+
 ### Git Flow
 
 All MDs follow PR flow: Lead proposes → user approves → committed to PR branch → lands on main with merge. Git IS the knowledge transport.
@@ -828,11 +949,59 @@ Agents can run on different machines. The default is all 6 on one machine, but t
 | Python | `venv + pip install` | `.venv/` per worktree |
 | Rust | Nothing | `CARGO_TARGET_DIR=.target` |
 
+### Worktree Garbage Collection
+
+Normal cleanup happens when the user closes a thread (Lead deletes worktree + remote branch). But orphans accumulate: PM crashes before cleanup, threads are abandoned, close sequence fails. The PM runs garbage collection on startup and every 6 hours.
+
+**A worktree is orphaned when:** no Slack activity for 48h + thread is not in `coder` phase + no open PR exists for the branch.
+
+**GC sequence:** warn in thread (tag participants, 24h grace period) → wait → archive reports/decisions to main → remove worktree → delete remote branch → close stale PR if any.
+
+**On any agent restart:** reconcile local worktrees with Slack threads — if thread is gone, clean up immediately. See ARCHITECTURE.md for full implementation details.
+
 ---
 
 ## 14. Multi-Model Orchestration
 
 All via OpenRouter. PM has model pool with hot swap. Cost controls: per-thread cap, per-day cap, per-user hourly limit. Circuit breaker: 3x PM failure → fallback for 5 minutes.
+
+### Dynamic Model Routing
+
+Not every task needs Opus. The PM classifies task complexity during planning and assigns models accordingly. This reduces cost without sacrificing quality where it matters.
+
+**Complexity tiers:**
+
+| Tier | Examples | Coder model | Estimated cost |
+|------|----------|-------------|----------------|
+| **Simple** | Rename variable, fix typo, update config value, add comment | Sonnet | ~$0.02-0.10 |
+| **Medium** | Add endpoint, write tests for existing code, refactor function, fix straightforward bug | Sonnet | ~$0.10-0.50 |
+| **Complex** | New feature with multiple files, architecture change, complex bug with unclear root cause, integration work | Opus | ~$0.50-2.00 |
+
+**How it works:**
+
+1. PM classifies complexity as part of the plan (already estimates cost — this makes it precise)
+2. PM includes the model recommendation in the plan: "Complexity: simple → Sonnet"
+3. The Coder process reads the model recommendation from the PM's message and uses it for that activation
+4. If the Coder hits issues that suggest the task is harder than estimated (stuck detection fires, >50% of maxTurns used, multiple test failures), it can self-escalate to the more capable model mid-task
+
+**Config:**
+
+```json
+{
+  "models": {
+    "coder": {
+      "default": "anthropic/claude-opus-4-6",
+      "simple": "anthropic/claude-sonnet-4-5-20250929",
+      "medium": "anthropic/claude-sonnet-4-5-20250929",
+      "complex": "anthropic/claude-opus-4-6"
+    }
+  }
+}
+```
+
+**The PM decides, not the Coder.** The PM has already explored the codebase and understands the scope. The Coder receives the model assignment and uses it. This avoids the Coder always choosing the most capable (expensive) model for itself.
+
+**Two-pass review optimization:** for the Reviewer, the first pass can use a cheaper model to catch obvious issues (linting, formatting, missing tests). If the first pass finds nothing, the review is done. If it finds issues, a second pass with the full model does deep analysis (security, architecture, subtle bugs). Configured per-repo — teams that want thorough reviews on every PR can disable two-pass.
 
 ---
 
@@ -845,6 +1014,36 @@ All via OpenRouter. PM has model pool with hot swap. Cost controls: per-thread c
 - Reactions: 👀 processing, ✅ done
 - Threads = sessions (1:1). Multiple concurrent
 - Code snippets: <20 lines inline, ≥20 lines as file uploads
+
+### Block Kit Interactive Messages
+
+For decision points that need user input, agents use Slack Block Kit instead of plain text. This replaces "reply with 1, 2, or 3" with actual buttons.
+
+**Where Block Kit is used:**
+
+| Decision point | Agent | Block Kit element |
+|---------------|-------|------------------|
+| Plan approval | PM | Buttons: `Approve` / `Modify` / `Reject` |
+| Learnings approval | Lead | Buttons per learning: `Accept` / `Reject` (multi-select) |
+| Destructive tool approval | Any | Buttons: `Approve` / `Reject` + command preview in code block |
+| Workflow selection (ambiguous intent) | PM | Button group with workflow names + descriptions |
+| Merge readiness | Lead | Buttons: `Merge` / `Hold` / `Close without merge` |
+| GC warning | PM | Buttons: `Keep open` / `Close & clean` |
+
+**How it works:**
+
+1. Agent calls `SendMessage` with a `blocks` parameter (JSON array of Block Kit blocks)
+2. Slack renders the interactive message with buttons
+3. When user clicks a button, Slack sends an `interaction` event (separate from message events)
+4. The agent process receives the interaction, extracts the `action_id` and `value`
+5. The agent resumes its loop with the user's choice as input
+
+**Fallback:** if Block Kit rendering fails or the Slack app doesn't have `interactions` scope, agents fall back to plain text with numbered options. The user replies with text as before.
+
+**Reactions as signals:** beyond Block Kit buttons, emoji reactions on agent messages are lightweight signals:
+- 👍 on a learning = approve it
+- 🛑 on any agent message = stop the agent immediately (agent checks reactions before each tool call)
+- 👀 is set automatically by the agent when it starts processing a message
 
 ### Logging
 Structured tags: INF, WRN, ERR, DBG, MSG, PM, RSH, CLD, LED, IMG, RSP, MEM, AGT. Ring buffer + SSE for web dashboard.
@@ -867,6 +1066,76 @@ Each process is independent — one crash doesn't affect others.
 
 ### Access Control
 Channel membership = access. Optional: allowed users, max concurrent threads, hourly/daily limits.
+
+---
+
+## 15b. Tool Risk Tiers & Approval Gates
+
+All agents share the same tool set, but not all tools carry the same risk. A file read is free; a `git push` is visible to the team; a database migration is potentially destructive. The tool executor classifies every tool call by risk tier and enforces approval gates for dangerous operations.
+
+### Risk Tiers
+
+| Tier | Tools | Behavior |
+|------|-------|----------|
+| **READ** | Read, Grep, Glob, WebSearch, WebFetch | Execute immediately. No approval needed. Zero side effects |
+| **WRITE_LOCAL** | Write, Edit, Bash (safe subset: test runners, linters, build commands) | Execute immediately. Changes stay in the worktree. Reversible via git |
+| **WRITE_VISIBLE** | GitCommit, GitPush, GHCreatePR, SendMessage | Execute with logging. These are visible to the team (Slack thread, GitHub). Agent proceeds autonomously but every action is logged in the decision log |
+| **DESTRUCTIVE** | Bash (dangerous subset: `rm -rf`, `DROP TABLE`, package installs, deploy scripts, credential rotation) | **Requires explicit user approval.** Agent posts the exact command + explanation in the thread, waits for user confirmation before executing |
+
+### Classification
+
+Tool risk is determined by a combination of:
+
+1. **Tool name** — Read, Grep, Glob are always READ. GitPush is always WRITE_VISIBLE
+2. **Bash command analysis** — the executor parses the command before execution and classifies it:
+   - Safe list: `go test`, `npm test`, `make build`, `go vet`, `eslint`, `pytest`, linters, compilers → WRITE_LOCAL
+   - Dangerous patterns: `rm -rf`, `DROP`, `DELETE FROM`, `deploy`, `docker`, `sudo`, `chmod`, `curl | sh`, package managers with install flags → DESTRUCTIVE
+   - Unknown commands → WRITE_LOCAL (conservative default for unknown, but not blocking)
+3. **Per-repo overrides** — `.codebutler/policy.json` can promote or demote specific commands:
+
+```json
+{
+  "tool_overrides": {
+    "bash": {
+      "destructive": ["npm publish", "yarn deploy", "./scripts/migrate.sh"],
+      "safe": ["docker compose up -d"]
+    }
+  },
+  "require_approval": {
+    "git_push_to": ["main", "master", "release/*"],
+    "create_pr_to": ["main"]
+  }
+}
+```
+
+### Approval Flow
+
+When a DESTRUCTIVE tool call is detected:
+
+1. Agent pauses the loop
+2. Posts in thread: "I need to run a potentially destructive command. Please approve or reject."
+   ```
+   Command: ./scripts/migrate.sh --env production
+   Risk: DESTRUCTIVE (matches policy.json override)
+   Reason: Coder needs to run migration as part of the implementation plan
+   ```
+3. User replies with approval (or the agent detects 👍 reaction) → execute
+4. User rejects → agent finds alternative or escalates to PM
+
+### Per-Role Restrictions
+
+On top of tiers, agents have role-based restrictions enforced at the executor level (not just in seeds):
+
+| Agent | Cannot use |
+|-------|-----------|
+| **PM** | Write, Edit, GitCommit, GitPush, GHCreatePR (PM never writes code) |
+| **Researcher** | Write, Edit, Bash, GitCommit, GitPush (Researcher only reads web + writes to `research/` via a dedicated tool) |
+| **Artist** | Bash, GitCommit, GitPush (Artist produces designs, not code) |
+| **Reviewer** | Write, Edit, Bash (Reviewer reads and comments, never modifies code) |
+| **Lead** | Bash (Lead writes to MDs via Write/Edit, but never runs commands) |
+| **Coder** | No restrictions (full tool access within worktree sandbox) |
+
+These restrictions are structural — the executor rejects the call before it reaches the tool. Stronger than prompt-only instructions.
 
 ---
 
@@ -1082,6 +1351,20 @@ This ensures the right people get notified even when they're not actively watchi
 - [x] **MCP support with per-agent access** — `.codebutler/mcp.json` defines MCP servers + which roles can use them. Agent process only launches servers assigned to its role. MCP tools appear alongside native tools in the agent loop. Secrets via env vars, never in config
 - [x] **Skills — custom commands** — `.codebutler/skills/*.md` defines project-specific reusable commands. More atomic than workflows, single-agent focused. PM matches trigger phrases during intent classification. Variables captured from user message. Created by team, Lead proposes from retrospective patterns
 - [x] **No vector DB for memory** — MD-based memory with Lead curation, git versioning, and full-context loading is sufficient. Agent MDs are small enough to load entirely into context (100% recall, no retrieval errors). Vector DB adds infrastructure, latency, embedding costs, and breaks distributed agents (which coordinate via git + Slack only). Revisit if MDs grow beyond ~50K tokens or cross-project knowledge transfer is needed
+- [x] **Event dedup** — each agent process deduplicates Slack events via bounded in-memory `event_id` set (10K entries, 5min TTL). Prevents duplicate tool executions and double-posted messages from Socket Mode retries. No persistent storage needed — restart recovery uses thread history natural dedup
+- [x] **Tool risk tiers + approval gates** — tools classified as READ, WRITE_LOCAL, WRITE_VISIBLE, DESTRUCTIVE. Destructive operations require explicit user approval in the thread before execution. Per-role tool restrictions enforced at executor level (not just seeds). Per-repo overrides in `policy.json`
+- [x] **Learnings schema + pruning** — every learning follows structured format (when/rule/example/confidence/source). Lead prunes during retros: remove contradictions, archive stale learnings, enforce ~30K token cap per agent MD. Archived learnings excluded from system prompt but preserved in git
+- [x] **Message redaction** — regex-based filter on every outbound Slack message. Catches API keys, JWTs, private keys, connection strings, internal IPs. Per-repo custom patterns in `policy.json`. Pure function, microseconds, no LLM. Unredacted text logged locally at Debug level
+- [x] **Worktree GC** — PM runs garbage collection on startup + every 6h. Orphan detection: 48h inactivity + not in coder phase + no open PR. Warns first (24h grace), then archives reports and cleans. Agent restart reconciles local worktrees with Slack threads
+- [x] **Decision log** — append-only JSONL per thread in worktree. Records significant decisions (workflow selected, model chosen, stuck detected, plan deviated) with input/state/decision/alternatives/evidence. Lead reads during retrospective. Not every tool call — only choice points between alternatives
+- [x] **Dynamic model routing** — PM classifies task complexity (simple/medium/complex) during planning and assigns Coder model accordingly. Simple tasks use Sonnet, complex use Opus. Coder can self-escalate to more capable model if stuck detection fires. Two-pass review optimization for Reviewer (cheap first pass, deep second if needed)
+- [x] **Reviewer structured protocol** — Reviewer produces invariants list + risk matrix + test plan before commenting on the diff. Prevents "looks good" reviews. Invariants and risk matrix posted in thread for Lead visibility
+- [x] **Lead structured retro output** — fixed format: 3 things well + 3 friction points + 1 process change + 1 prompt change + 1 skill tweak + 1 guardrail. Each with severity, impact estimate, and specific file+section to update. Makes user approval granular
+- [x] **Block Kit interactive messages** — Slack Block Kit for decision points (plan approval, learning approval, destructive tool confirmation, workflow selection). Buttons replace "reply with 1/2/3". Fallback to plain text if interactions scope unavailable. 🛑 emoji reaction = stop agent immediately
+- [x] **Skills validation** — `codebutler validate` checks all skill files: required sections present, valid agent name, no duplicate triggers, no undefined variables in prompts. Runs on init and on file change. Invalid skills skipped with warning, not fatal
+- [x] **No thread state machine** — agents drive flow via @mentions, ordering is emergent (PM→Coder→Reviewer→Lead). No centralized state file or locks. Event dedup solves the Slack duplicate problem without adding coordination. Thread phases are informational, not enforced
+- [x] **No separate Tester agent** — Coder (Opus) writes tests as part of implementation. Splitting test writing to a cheaper model would produce worse tests. If coverage is insufficient, improve Coder seed or Reviewer checklist
+- [x] **No internal Coder-Reviewer loop** — all communication stays in Slack. Adding Go channels between agents breaks the audit trail and the Lead's retrospective input. Slack latency (200-600ms) is acceptable for review loops that happen every 5-15 minutes
 
 ---
 
