@@ -95,15 +95,15 @@ The core prompt → LLM → tool-call → execute → repeat loop.
 **Acceptance:** agent loop processes tool calls, respects MaxTurns, handles
 text responses, parallel tool execution works.
 
-### M6 — Conversation Persistence `pending`
+### M6 — Conversation Persistence `done`
 
 Per-agent, per-thread conversation files for crash recovery.
 
-- [ ] Conversation file format: JSON array of messages (OpenAI format)
-- [ ] Save after every model round (crash-safe: write temp + rename)
-- [ ] Load on resume: rebuild conversation from file
-- [ ] Thread isolation: path = `.codebutler/branches/<branch>/conversations/<role>.json`
-- [ ] Unit tests: write, load, resume mid-conversation
+- [x] Conversation file format: JSON array of messages (OpenAI format)
+- [x] Save after every model round (crash-safe: write temp + rename)
+- [x] Load on resume: rebuild conversation from file
+- [x] Thread isolation: path = `.codebutler/branches/<branch>/conversations/<role>.json`
+- [x] Unit tests: write, load, resume mid-conversation
 
 **Acceptance:** agent crashes mid-loop, restarts, resumes from last saved round.
 

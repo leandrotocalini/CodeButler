@@ -75,6 +75,41 @@ func (d *discardSender) SendMessage(_ context.Context, _, _, _ string) error {
 	return nil
 }
 
+// mockStore records Save calls and returns pre-configured Load results.
+type mockStore struct {
+	messages  []Message // returned by Load
+	loadErr   error
+	saveErr   error
+	saveCount int
+	saved     [][]Message // history of Save calls
+}
+
+func (m *mockStore) Load(_ context.Context) ([]Message, error) {
+	if m.loadErr != nil {
+		return nil, m.loadErr
+	}
+	if m.messages == nil {
+		return nil, nil
+	}
+	// Return a copy to avoid mutation
+	cp := make([]Message, len(m.messages))
+	copy(cp, m.messages)
+	return cp, nil
+}
+
+func (m *mockStore) Save(_ context.Context, messages []Message) error {
+	if m.saveErr != nil {
+		return m.saveErr
+	}
+	m.saveCount++
+	cp := make([]Message, len(messages))
+	copy(cp, messages)
+	m.saved = append(m.saved, cp)
+	// Update messages so subsequent Load returns latest state
+	m.messages = cp
+	return nil
+}
+
 // --- Tests ---
 
 func TestRun_TextResponse(t *testing.T) {
@@ -834,5 +869,415 @@ func TestRun_ParallelToolExecutionPreservesOrder(t *testing.T) {
 	}
 	if toolMsgs[1].ToolCallID != "second" {
 		t.Errorf("expected second tool result ID %q, got %q", "second", toolMsgs[1].ToolCallID)
+	}
+}
+
+// --- Conversation Persistence Tests ---
+
+func TestRun_SavesAfterEachRound(t *testing.T) {
+	store := &mockStore{}
+	provider := &mockProvider{
+		responses: []*ChatResponse{
+			{Message: Message{Role: "assistant", ToolCalls: []ToolCall{{ID: "c1", Name: "Read", Arguments: `{}`}}}},
+			{Message: Message{Role: "assistant", Content: "Done."}},
+		},
+	}
+	executor := &mockExecutor{
+		results:  map[string]ToolResult{"Read": {Content: "data"}},
+		toolDefs: []ToolDefinition{{Name: "Read"}},
+	}
+	runner := NewAgentRunner(provider, &discardSender{}, executor, AgentConfig{
+		SystemPrompt: "sys",
+		MaxTurns:     10,
+	}, WithConversationStore(store))
+
+	result, err := runner.Run(context.Background(), Task{
+		Messages: []Message{{Role: "user", Content: "Go"}},
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Response != "Done." {
+		t.Errorf("expected response %q, got %q", "Done.", result.Response)
+	}
+
+	// Should have saved twice: after tool round + after text response
+	if store.saveCount != 2 {
+		t.Fatalf("expected 2 saves, got %d", store.saveCount)
+	}
+
+	// First save: [system, user, assistant(tc), tool(result)]
+	first := store.saved[0]
+	if len(first) != 4 {
+		t.Fatalf("first save: expected 4 messages, got %d", len(first))
+	}
+	expectedRoles := []string{"system", "user", "assistant", "tool"}
+	for i, role := range expectedRoles {
+		if first[i].Role != role {
+			t.Errorf("first save[%d]: expected role %q, got %q", i, role, first[i].Role)
+		}
+	}
+
+	// Second save: [system, user, assistant(tc), tool(result), assistant(text)]
+	second := store.saved[1]
+	if len(second) != 5 {
+		t.Fatalf("second save: expected 5 messages, got %d", len(second))
+	}
+	if second[4].Role != "assistant" || second[4].Content != "Done." {
+		t.Errorf("second save[4]: expected assistant 'Done.', got role=%q content=%q",
+			second[4].Role, second[4].Content)
+	}
+}
+
+func TestRun_ResumeAfterCrash(t *testing.T) {
+	store := &mockStore{}
+	executor := &mockExecutor{
+		results:  map[string]ToolResult{"Read": {Content: "file contents"}},
+		toolDefs: []ToolDefinition{{Name: "Read"}},
+	}
+
+	// --- First run: tool call succeeds, then "crashes" (provider runs out of responses) ---
+	provider1 := &mockProvider{
+		responses: []*ChatResponse{
+			{Message: Message{Role: "assistant", ToolCalls: []ToolCall{{ID: "c1", Name: "Read", Arguments: `{}`}}}},
+			// No more responses — simulates crash
+		},
+	}
+	runner1 := NewAgentRunner(provider1, &discardSender{}, executor, AgentConfig{
+		SystemPrompt: "sys",
+		MaxTurns:     10,
+	}, WithConversationStore(store))
+
+	_, err := runner1.Run(context.Background(), Task{
+		Messages: []Message{{Role: "user", Content: "Read the file"}},
+	})
+	if err == nil {
+		t.Fatal("expected error from simulated crash")
+	}
+
+	// Store should have saved after round 1
+	if store.saveCount != 1 {
+		t.Fatalf("expected 1 save after crash, got %d", store.saveCount)
+	}
+
+	// --- Second run: resume from stored conversation ---
+	provider2 := &mockProvider{
+		responses: []*ChatResponse{
+			{Message: Message{Role: "assistant", Content: "Resumed and done."}},
+		},
+	}
+	runner2 := NewAgentRunner(provider2, &discardSender{}, executor, AgentConfig{
+		SystemPrompt: "sys",
+		MaxTurns:     10,
+	}, WithConversationStore(store))
+
+	result, err := runner2.Run(context.Background(), Task{})
+	if err != nil {
+		t.Fatalf("unexpected error on resume: %v", err)
+	}
+	if result.Response != "Resumed and done." {
+		t.Errorf("expected response %q, got %q", "Resumed and done.", result.Response)
+	}
+	// 1 turn from first run + 1 turn from resume = 2 total
+	if result.TurnsUsed != 2 {
+		t.Errorf("expected 2 total turns, got %d", result.TurnsUsed)
+	}
+
+	// Verify the resumed LLM call received the full prior conversation
+	req := provider2.requests[0]
+	expectedRoles := []string{"system", "user", "assistant", "tool"}
+	if len(req.Messages) != len(expectedRoles) {
+		t.Fatalf("expected %d messages in resumed request, got %d", len(expectedRoles), len(req.Messages))
+	}
+	for i, role := range expectedRoles {
+		if req.Messages[i].Role != role {
+			t.Errorf("resumed request message[%d]: expected role %q, got %q", i, role, req.Messages[i].Role)
+		}
+	}
+}
+
+func TestRun_ResumeCompletedConversation(t *testing.T) {
+	// Store has a fully completed conversation (last message is text response)
+	store := &mockStore{
+		messages: []Message{
+			{Role: "system", Content: "sys"},
+			{Role: "user", Content: "hello"},
+			{Role: "assistant", Content: "Already completed."},
+		},
+	}
+	provider := &mockProvider{
+		responses: []*ChatResponse{
+			{Message: Message{Role: "assistant", Content: "Should not reach"}},
+		},
+	}
+	runner := NewAgentRunner(provider, &discardSender{}, &mockExecutor{}, AgentConfig{
+		SystemPrompt: "sys",
+		MaxTurns:     10,
+	}, WithConversationStore(store))
+
+	result, err := runner.Run(context.Background(), Task{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Response != "Already completed." {
+		t.Errorf("expected response %q, got %q", "Already completed.", result.Response)
+	}
+	if result.TurnsUsed != 1 {
+		t.Errorf("expected 1 turn (from loaded conversation), got %d", result.TurnsUsed)
+	}
+	// No LLM call should have been made
+	if provider.calls != 0 {
+		t.Errorf("expected 0 LLM calls for completed conversation, got %d", provider.calls)
+	}
+}
+
+func TestRun_ResumeRespectsMaxTurns(t *testing.T) {
+	// Store has 2 completed turns, MaxTurns is 3 — only 1 more turn allowed
+	store := &mockStore{
+		messages: []Message{
+			{Role: "system", Content: "sys"},
+			{Role: "user", Content: "go"},
+			{Role: "assistant", ToolCalls: []ToolCall{{ID: "c1", Name: "Read", Arguments: `{}`}}},
+			{Role: "tool", Content: "data", ToolCallID: "c1"},
+			{Role: "assistant", ToolCalls: []ToolCall{{ID: "c2", Name: "Read", Arguments: `{}`}}},
+			{Role: "tool", Content: "more data", ToolCallID: "c2"},
+		},
+	}
+	provider := &mockProvider{
+		responses: []*ChatResponse{
+			// This 3rd turn should execute (turn 2, 0-indexed)
+			{Message: Message{Role: "assistant", ToolCalls: []ToolCall{{ID: "c3", Name: "Read", Arguments: `{}`}}}},
+			// 4th turn would be turn 3, which equals MaxTurns=3 — should not execute
+		},
+	}
+	executor := &mockExecutor{
+		results:  map[string]ToolResult{"Read": {Content: "data"}},
+		toolDefs: []ToolDefinition{{Name: "Read"}},
+	}
+	runner := NewAgentRunner(provider, &discardSender{}, executor, AgentConfig{
+		MaxTurns: 3,
+	}, WithConversationStore(store))
+
+	result, err := runner.Run(context.Background(), Task{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.TurnsUsed != 3 {
+		t.Errorf("expected 3 total turns, got %d", result.TurnsUsed)
+	}
+	// Only 1 LLM call should have been made (the 3rd turn)
+	if provider.calls != 1 {
+		t.Errorf("expected 1 LLM call on resume, got %d", provider.calls)
+	}
+}
+
+func TestRun_ResumeWithNewMessages(t *testing.T) {
+	// Store has partial conversation, new task messages should be appended
+	store := &mockStore{
+		messages: []Message{
+			{Role: "system", Content: "sys"},
+			{Role: "user", Content: "original request"},
+			{Role: "assistant", ToolCalls: []ToolCall{{ID: "c1", Name: "Read", Arguments: `{}`}}},
+			{Role: "tool", Content: "data", ToolCallID: "c1"},
+		},
+	}
+	provider := &mockProvider{
+		responses: []*ChatResponse{
+			{Message: Message{Role: "assistant", Content: "Done with new info."}},
+		},
+	}
+	executor := &mockExecutor{
+		results:  map[string]ToolResult{"Read": {Content: "data"}},
+		toolDefs: []ToolDefinition{{Name: "Read"}},
+	}
+	runner := NewAgentRunner(provider, &discardSender{}, executor, AgentConfig{
+		MaxTurns: 10,
+	}, WithConversationStore(store))
+
+	// New message received while agent was down
+	result, err := runner.Run(context.Background(), Task{
+		Messages: []Message{{Role: "user", Content: "also do Y"}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Response != "Done with new info." {
+		t.Errorf("expected response %q, got %q", "Done with new info.", result.Response)
+	}
+
+	// LLM should have received: system + user + assistant(tc) + tool + user(new)
+	req := provider.requests[0]
+	if len(req.Messages) != 5 {
+		t.Fatalf("expected 5 messages, got %d", len(req.Messages))
+	}
+	if req.Messages[4].Content != "also do Y" {
+		t.Errorf("expected new message content %q, got %q", "also do Y", req.Messages[4].Content)
+	}
+}
+
+func TestRun_NoStoreNoPersistence(t *testing.T) {
+	// Without a store, behavior is unchanged from pre-M6
+	provider := &mockProvider{
+		responses: []*ChatResponse{
+			{Message: Message{Role: "assistant", Content: "Hello!"}},
+		},
+	}
+	runner := NewAgentRunner(provider, &discardSender{}, &mockExecutor{}, AgentConfig{
+		SystemPrompt: "sys",
+		MaxTurns:     10,
+	})
+
+	result, err := runner.Run(context.Background(), Task{
+		Messages: []Message{{Role: "user", Content: "Hi"}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Response != "Hello!" {
+		t.Errorf("expected response %q, got %q", "Hello!", result.Response)
+	}
+}
+
+func TestRun_StoreLoadErrorStartsFresh(t *testing.T) {
+	// If the store fails to load, the runner starts a fresh conversation
+	store := &mockStore{
+		loadErr: fmt.Errorf("disk read error"),
+	}
+	provider := &mockProvider{
+		responses: []*ChatResponse{
+			{Message: Message{Role: "assistant", Content: "Fresh start."}},
+		},
+	}
+	runner := NewAgentRunner(provider, &discardSender{}, &mockExecutor{}, AgentConfig{
+		SystemPrompt: "sys",
+		MaxTurns:     10,
+	}, WithConversationStore(store))
+
+	result, err := runner.Run(context.Background(), Task{
+		Messages: []Message{{Role: "user", Content: "Hi"}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Response != "Fresh start." {
+		t.Errorf("expected response %q, got %q", "Fresh start.", result.Response)
+	}
+	// Verify it built the conversation from scratch (system + user)
+	req := provider.requests[0]
+	if len(req.Messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(req.Messages))
+	}
+	if req.Messages[0].Role != "system" {
+		t.Errorf("expected system message first, got %q", req.Messages[0].Role)
+	}
+}
+
+func TestRun_StoreSaveErrorDoesNotStopLoop(t *testing.T) {
+	// Save errors are logged but don't stop the agent loop
+	store := &mockStore{
+		saveErr: fmt.Errorf("disk full"),
+	}
+	provider := &mockProvider{
+		responses: []*ChatResponse{
+			{Message: Message{Role: "assistant", ToolCalls: []ToolCall{{ID: "c1", Name: "Read", Arguments: `{}`}}}},
+			{Message: Message{Role: "assistant", Content: "Done despite save failure."}},
+		},
+	}
+	executor := &mockExecutor{
+		results:  map[string]ToolResult{"Read": {Content: "data"}},
+		toolDefs: []ToolDefinition{{Name: "Read"}},
+	}
+	runner := NewAgentRunner(provider, &discardSender{}, executor, AgentConfig{
+		SystemPrompt: "sys",
+		MaxTurns:     10,
+	}, WithConversationStore(store))
+
+	result, err := runner.Run(context.Background(), Task{
+		Messages: []Message{{Role: "user", Content: "Go"}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Response != "Done despite save failure." {
+		t.Errorf("expected response %q, got %q", "Done despite save failure.", result.Response)
+	}
+	if result.TurnsUsed != 2 {
+		t.Errorf("expected 2 turns, got %d", result.TurnsUsed)
+	}
+}
+
+func TestRun_MultiRoundResumeEndToEnd(t *testing.T) {
+	// Simulate a 3-turn conversation with crash after turn 2, resume, complete
+	store := &mockStore{}
+	executor := &mockExecutor{
+		results: map[string]ToolResult{
+			"Read":  {Content: "file data"},
+			"Write": {Content: "written"},
+		},
+		toolDefs: []ToolDefinition{{Name: "Read"}, {Name: "Write"}},
+	}
+
+	// --- Run 1: 2 tool rounds, then crash ---
+	provider1 := &mockProvider{
+		responses: []*ChatResponse{
+			{Message: Message{Role: "assistant", ToolCalls: []ToolCall{{ID: "c1", Name: "Read", Arguments: `{}`}}}},
+			{Message: Message{Role: "assistant", ToolCalls: []ToolCall{{ID: "c2", Name: "Write", Arguments: `{}`}}}},
+			// Crash — no more responses
+		},
+	}
+	runner1 := NewAgentRunner(provider1, &discardSender{}, executor, AgentConfig{
+		SystemPrompt: "You are a coder.",
+		MaxTurns:     10,
+	}, WithConversationStore(store))
+
+	_, err := runner1.Run(context.Background(), Task{
+		Messages: []Message{{Role: "user", Content: "Build feature"}},
+	})
+	if err == nil {
+		t.Fatal("expected error from crash")
+	}
+	if store.saveCount != 2 {
+		t.Fatalf("expected 2 saves before crash, got %d", store.saveCount)
+	}
+
+	// --- Run 2: resume, complete with text response ---
+	provider2 := &mockProvider{
+		responses: []*ChatResponse{
+			{Message: Message{Role: "assistant", Content: "Feature complete."}},
+		},
+	}
+	runner2 := NewAgentRunner(provider2, &discardSender{}, executor, AgentConfig{
+		SystemPrompt: "You are a coder.",
+		MaxTurns:     10,
+	}, WithConversationStore(store))
+
+	result, err := runner2.Run(context.Background(), Task{})
+	if err != nil {
+		t.Fatalf("unexpected error on resume: %v", err)
+	}
+	if result.Response != "Feature complete." {
+		t.Errorf("expected response %q, got %q", "Feature complete.", result.Response)
+	}
+	if result.TurnsUsed != 3 {
+		t.Errorf("expected 3 total turns, got %d", result.TurnsUsed)
+	}
+
+	// Verify full conversation was sent to the LLM on resume
+	// Expected: system + user + asst(tc1) + tool(r1) + asst(tc2) + tool(r2)
+	req := provider2.requests[0]
+	if len(req.Messages) != 6 {
+		t.Fatalf("expected 6 messages on resume, got %d", len(req.Messages))
+	}
+	expectedRoles := []string{"system", "user", "assistant", "tool", "assistant", "tool"}
+	for i, role := range expectedRoles {
+		if req.Messages[i].Role != role {
+			t.Errorf("message[%d]: expected role %q, got %q", i, role, req.Messages[i].Role)
+		}
+	}
+
+	// Total saves: 2 from first run + 1 from resume = 3
+	if store.saveCount != 3 {
+		t.Errorf("expected 3 total saves, got %d", store.saveCount)
 	}
 }
