@@ -41,10 +41,10 @@ Each file stores the **complete agent↔model transcript**: system prompt, user 
 
 | Layer | What it holds | Who sees it | Lifetime |
 |-------|--------------|-------------|----------|
-| **Slack thread** | Curated agent outputs, user messages, inter-agent @mentions | Everyone (user + all agents) | Permanent (Slack retention) |
-| **Conversation file** | Full model transcript (tool calls, results, reasoning, retries) | Only the owning agent (+ Lead for deep analysis) | Worktree lifetime |
+| **Slack thread** | Curated agent outputs, decision-point reasoning, user messages, inter-agent @mentions | Everyone (user + all agents) | Permanent (Slack retention) |
+| **Conversation file** | Full model transcript (tool calls, results, retries) | Only the owning agent | Worktree lifetime |
 
-The agent decides what to post to Slack. The model may return 20 tool-call rounds, but only the final "PR ready" or "here's the plan" goes to the thread.
+The agent decides what to post to Slack. Tool calls and intermediate results stay private. **But reasoning at decision points goes to Slack** — the PM posts why it explores certain code and how findings shape the plan, the Coder posts implementation approach and deviations from the plan, the Lead posts observed patterns and evidence behind proposals. This is because the Slack thread is the Lead's source of truth for retrospectives. If reasoning stays only in the conversation file, the Lead can't learn from it and the team doesn't improve.
 
 ### Processing a message
 
