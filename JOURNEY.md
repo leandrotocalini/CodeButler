@@ -4,6 +4,59 @@ Detailed record of architecture decisions and features implemented.
 
 ---
 
+## 2026-02-25 — M1: Project Bootstrap
+
+### What was built
+
+The Go project foundation: module initialization, CLI entrypoint, and the full
+internal package layout that all future milestones build on.
+
+### Decisions
+
+**stdlib `flag` over cobra** — M1 only needs `--role`. Cobra adds a dependency
+and boilerplate for something one `flag.String` call handles. If future milestones
+need subcommands (`init`, `start`, `stop`, `validate`), cobra can be introduced
+then. No point paying the complexity cost now.
+
+**doc.go per package** — Each internal package gets a `doc.go` with a package
+declaration and doc comment. This makes every package a valid Go package that
+`go build`, `go test`, and `go vet` recognize, even before any real code exists.
+It also serves as lightweight documentation of each package's purpose.
+
+**Role validation in main** — The valid roles map lives in `main.go` rather than
+a separate package. It's a simple string set that validates CLI input. Moving it
+to `internal/models` would be premature — when the agent runner needs role types,
+it'll define its own (likely an enum-style `type Role string`).
+
+### Package layout
+
+```
+cmd/codebutler/main.go          — Entrypoint, --role flag, role validation
+internal/
+  slack/                         — Slack client, Socket Mode, dedup
+  github/                        — PR operations via gh CLI
+  models/                        — Agent interfaces and shared types
+  provider/openrouter/           — OpenRouter chat completions client
+  provider/openai/               — OpenAI image gen (Artist)
+  tools/                         — Tool interface, registry, executor
+  mcp/                           — Model Context Protocol client
+  skills/                        — Skill parser, validator, index
+  multimodel/                    — Multi-model fan-out
+  router/                        — Per-agent message routing
+  conflicts/                     — File overlap detection
+  worktree/                      — Git worktree management
+  config/                        — Config loading and validation
+  decisions/                     — Decision log (JSONL)
+```
+
+### What's next
+
+M2 (Config System) — load global and per-repo config files with typed structs
+and environment variable resolution. This unblocks M3 (OpenRouter Client) and
+M4 (Tool System).
+
+---
+
 ## 2026-02-22 — Vector DB evaluation for agent memory
 
 ### The question
