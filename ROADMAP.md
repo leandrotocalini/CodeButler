@@ -195,17 +195,17 @@ Create, initialize, and remove git worktrees.
 **Acceptance:** worktree created with correct branch, initialized per platform,
 cleanup removes worktree + remote branch.
 
-### M12 — Git & GitHub Tools `pending`
+### M12 — Git & GitHub Tools `done`
 
 Git and GitHub operations as agent tools.
 
-- [ ] GitCommit tool: stage files, commit (check for already-applied)
-- [ ] GitPush tool: push branch (idempotent if remote up to date)
-- [ ] GHCreatePR tool: create PR via `gh` CLI (skip if PR exists for branch)
-- [ ] Git sync protocol: commit+push after every change, pull before reading shared state
-- [ ] `gh pr edit` for PR description updates
-- [ ] `gh pr merge --squash` for merge
-- [ ] Unit tests with git test repos
+- [x] GitCommit tool: stage files, commit (check for already-applied)
+- [x] GitPush tool: push branch (idempotent if remote up to date)
+- [x] GHCreatePR tool: create PR via `gh` CLI (skip if PR exists for branch)
+- [x] Git sync protocol: commit+push after every change, pull before reading shared state
+- [x] `gh pr edit` for PR description updates
+- [x] `gh pr merge --squash` for merge
+- [x] Unit tests with git test repos
 
 **Acceptance:** agent can commit, push, create PR, update description, merge —
 all idempotent on retry.
