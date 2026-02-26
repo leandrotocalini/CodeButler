@@ -1482,3 +1482,53 @@ files themselves.
 
 M16 (PM Agent) and M17 (Coder Agent) are next — the first two working
 agents that can handle user requests end-to-end.
+
+---
+
+## 2026-02-25 — M16: PM Agent
+
+### What was built
+
+PM agent implementation in `internal/agent/pm.go` with supporting tools:
+
+**PMRunner** — wraps `AgentRunner` with PM-specific behavior:
+- Pre-classifies user intent before running the agent loop
+- Logs intent classification for metrics/debugging
+- Supports workflow and skill definitions as configuration
+
+**Intent Classification** — deterministic pre-filter:
+- `ClassifyIntent(message, workflows, skills)` — checks skill triggers first
+  (more specific), then workflow keywords (broader), returns ambiguous if no match.
+  This is a pre-filter — the LLM (PM) makes the final decision via its system prompt.
+
+**Dynamic Model Routing**:
+- `ClassifyComplexity(plan)` — keyword-based complexity assessment (simple/medium/complex)
+- `ModelForComplexity(complexity, default)` — maps complexity to model ID
+  (simple→Sonnet, complex→Opus, medium→default)
+
+**Delegation & Menus**:
+- `FormatWorkflowMenu` — formats workflows + skills as a Slack message
+- `DelegationMessage` — creates @codebutler.<role> messages with plan + context
+
+**New Tools** (in `internal/tools/`):
+- `SendMessage` — posts to Slack thread (WRITE_VISIBLE tier)
+- `GitCommit` — stages files + commits (WRITE_VISIBLE, idempotent)
+- `GitPush` — pushes branch (WRITE_VISIBLE, idempotent)
+- `GHCreatePR` — creates PR via gh CLI (WRITE_VISIBLE, idempotent)
+
+### Design decisions
+
+**Intent classification as pre-filter, not final decision.** The deterministic
+classifier catches obvious matches but the LLM always has the final say.
+This avoids false positives from keyword matching while still providing
+useful logging and metrics about classification patterns.
+
+**Tools use thin interfaces.** `GitCommitter`, `GitPusher`, `PRCreator`,
+`MessageSender` — each tool depends on a single-method interface rather than
+on concrete implementations. This makes testing trivial and allows different
+backends.
+
+### What's next
+
+M17 (Coder Agent) creates the builder agent that receives plans from PM
+and implements them in worktrees. M18 wires PM + Coder for end-to-end.
