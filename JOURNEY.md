@@ -2430,3 +2430,73 @@ for mock processes or container dependencies.
 **Benchmarks use short benchtime.** CI runs with `-benchtime=100ms` to
 keep the pipeline fast while still getting stable numbers. Developers
 can run longer benchmarks locally.
+
+---
+
+## 2026-02-26 — M35: Graceful Shutdown & Recovery
+
+### What was built
+
+Lifecycle manager (`internal/lifecycle/`) for graceful shutdown and
+crash recovery of agent processes.
+
+**Manager** — `Run()` installs SIGTERM/SIGINT handlers and runs the main
+agent function with a cancellable context. On signal: cancels root context
+(all goroutines wind down), runs shutdown hooks in registration order with
+a grace period deadline, then exits. On normal return or error: runs hooks
+with a short timeout and returns appropriate exit code.
+
+**Shutdown hooks** — `OnShutdown(name, fn)` registers cleanup functions
+that run during shutdown (save conversations, flush logs, close MCP
+servers). Hooks run in order; a failed hook logs an error but doesn't
+block subsequent hooks. Idempotent — calling `gracefulShutdown()` twice
+only runs hooks once.
+
+**Recovery** — `RecoverAgent()` builds a `RecoveryState` from the list
+of active worktrees and conversation file existence. Interfaces:
+`WorktreeReconciler` (list worktrees, check thread existence),
+`ConversationLoader` (check conversation file), `MentionScanner`
+(find unresponded @mentions). These let the agent pick up pending
+work on restart.
+
+### Design decisions
+
+**Signal-driven, not timer-driven.** Shutdown triggers only on
+SIGTERM/SIGINT, not on periodic health checks. The service manager
+(systemd/launchd) handles restart-on-crash. The lifecycle package
+handles in-process cleanup.
+
+**Hooks over embedded shutdown logic.** Rather than building shutdown
+logic for conversations, MCP servers, and Slack connections into the
+lifecycle package, each subsystem registers its own hook. This keeps
+lifecycle generic and avoids importing every subsystem.
+
+**Recovery state as data, not behavior.** `RecoverAgent()` returns a
+`RecoveryState` struct describing what needs to be done, not a function
+that does it. The caller decides what to resume based on the recovery
+report. This makes recovery testable and inspectable.
+
+---
+
+## 2026-02-26 — Roadmap Complete
+
+All 35 milestones across 12 phases implemented. The CodeButler codebase
+now has:
+
+- 24 internal packages with tests
+- Agent loop with safety (stuck detection, escape strategies, compaction)
+- Slack integration (Socket Mode, Block Kit, thread routing, redaction)
+- Git worktree management with GC
+- Skill system (parser, validator, hot-reload)
+- All 6 agents (PM, Coder, Reviewer, Researcher, Artist, Lead)
+- MCP integration (stdio JSON-RPC, merged registry)
+- Multi-model fan-out for brainstorm workflow
+- Decision logging (JSONL)
+- Roadmap system with dependency graph and orchestrator
+- Learn workflow (3-phase parallel exploration)
+- Init wizard (3-step, cross-platform)
+- CLI commands (router, service management)
+- Budget tracking (per-thread, per-day, cost estimation)
+- Conflict detection (file, directory, semantic overlaps)
+- Integration tests and benchmarks
+- Graceful shutdown and recovery
