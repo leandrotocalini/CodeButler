@@ -1375,3 +1375,59 @@ cases where a worktree was manually deleted or cleaned by another process.
 M14 adds seed loading and system prompt building — parsing agent MD files
 and assembling the system prompt for each role. M15 adds skill file
 parsing and validation.
+
+---
+
+## 2026-02-25 — M14: Seed Loading & Prompt Building
+
+### What was built
+
+New `internal/prompt/` package with four files:
+
+**seed.go** — seed file loading:
+- `LoadSeed(seedsDir, filename)` — reads a single MD file, strips archived
+  learnings section.
+- `LoadSeedFiles(seedsDir, role)` — loads role seed + global.md + workflows.md
+  (PM only). Returns `SeedFiles` struct.
+- `ExcludeArchivedLearnings(content)` — finds `## Archived Learnings` marker
+  and removes everything from that point onward.
+
+**builder.go** — system prompt assembly:
+- `BuildSystemPrompt(seeds, skillIndex)` — pure function that joins
+  seed + global + workflows + skill index with `---` separators.
+  Only includes non-empty sections.
+
+**skillindex.go** — skill directory scanning:
+- `ScanSkillIndex(skillsDir)` — reads all `.md` files, extracts name
+  (from `#` header or filename), description (first paragraph), and
+  triggers (from `## Trigger` section).
+- `FormatSkillIndex(skills)` — formats as markdown for the PM's prompt.
+
+**watcher.go** — hot-reload cache:
+- `PromptCache` with `Get()` that checks file modification times and
+  rebuilds the prompt when any watched file changes. Thread-safe with
+  RWMutex. `Invalidate()` forces rebuild on next call.
+
+### Design decisions
+
+**Pure builder function.** `BuildSystemPrompt` is a pure function — same
+inputs always produce the same output. No file I/O, no state. This makes
+it trivially testable and composable.
+
+**PM-only sections.** Workflows and skill index are only included for the
+PM role. Other agents don't need workflow knowledge or skill listings —
+they receive specific instructions from PM via @mentions.
+
+**Mod-time based change detection.** The cache checks `os.Stat` mod times
+rather than computing file hashes. This is simpler, faster, and
+sufficient — we only need to know "did anything change", not "what changed".
+
+**Archived learnings exclusion.** Uses simple string scanning for the
+`## Archived Learnings` marker. Everything from that point is stripped.
+This keeps the system prompt focused on current learnings while preserving
+archived content in the file for git history.
+
+### What's next
+
+M15 adds full skill file parsing and validation — structured extraction
+of all skill sections, variable detection, and `codebutler validate`.
