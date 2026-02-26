@@ -128,17 +128,17 @@ apply in order, agent escalates after all strategies exhausted.
 Connect agents to Slack. After this phase, a single agent can receive a message
 and respond.
 
-### M8 — Slack Client `pending`
+### M8 — Slack Client `done`
 
 Socket Mode connection, message send/receive, agent identity.
 
-- [ ] Slack Socket Mode client (using `slack-go/slack`)
-- [ ] Event listener: `message.channels`, `message.groups`
-- [ ] Message sending: `chat.postMessage` with per-agent display name + icon
-- [ ] File uploads for code snippets (≥20 lines)
-- [ ] Emoji reactions: 👀 on processing, ✅ on done
-- [ ] Event deduplication: bounded in-memory `event_id` set (10K entries, 5min TTL)
-- [ ] Integration test: connect to Slack, send/receive a message
+- [x] Slack Socket Mode client (using `slack-go/slack`)
+- [x] Event listener: `message.channels`, `message.groups`
+- [x] Message sending: `chat.postMessage` with per-agent display name + icon
+- [x] File uploads for code snippets (≥20 lines)
+- [x] Emoji reactions: 👀 on processing, ✅ on done
+- [x] Event deduplication: bounded in-memory `event_id` set (10K entries, 5min TTL)
+- [x] Integration test: connect to Slack, send/receive a message
 
 **Acceptance:** agent connects to Slack via Socket Mode, receives events,
 posts with its identity, deduplicates retries.
