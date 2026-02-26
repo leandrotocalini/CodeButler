@@ -502,19 +502,19 @@ Batch execution of the entire roadmap.
 **Acceptance:** PM orchestrates multiple threads, respects dependencies,
 handles blocked items, reports progress.
 
-### M29 — Learn Workflow `pending`
+### M29 — Learn Workflow `done`
 
 Onboarding and knowledge refresh.
 
-- [ ] Auto-trigger on first run (existing codebase detected)
-- [ ] Manual trigger: "re-learn" / "refresh knowledge"
-- [ ] Phase 1: PM maps project (structure, features, domains)
-- [ ] Phase 2: Technical agents in parallel (Coder, Reviewer, Artist) — each reads PM's map, explores from own perspective
-- [ ] Phase 3: Lead synthesizes → populates `global.md`
-- [ ] Researcher reactive during all phases
-- [ ] Re-learn: compare with existing knowledge, compact (remove outdated, update changed, add new)
-- [ ] User approves all MD changes
-- [ ] Integration test: learn on a sample codebase
+- [x] Auto-trigger on first run (existing codebase detected)
+- [x] Manual trigger: "re-learn" / "refresh knowledge"
+- [x] Phase 1: PM maps project (structure, features, domains)
+- [x] Phase 2: Technical agents in parallel (Coder, Reviewer, Artist) — each reads PM's map, explores from own perspective
+- [x] Phase 3: Lead synthesizes → populates `global.md`
+- [x] Researcher reactive during all phases
+- [x] Re-learn: compare with existing knowledge, compact (remove outdated, update changed, add new)
+- [x] User approves all MD changes
+- [x] Integration test: learn on a sample codebase
 
 **Acceptance:** all agents explore codebase from their perspective, populate
 project maps, Lead synthesizes to global.md, user approves.
