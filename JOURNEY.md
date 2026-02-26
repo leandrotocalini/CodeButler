@@ -2093,5 +2093,49 @@ noise. Logging only choice points produces signal the Lead can analyze.
 
 ### What's next
 
-Phase 9 is complete. Phase 10 adds Roadmap System (M27), Learn Workflow
-(M28), and Unattended Mode (M29).
+Phase 9 is complete. Phase 10 adds Roadmap System (M27), Develop Workflow
+(M28), and Learn Workflow (M29).
+
+---
+
+## 2026-02-26 — M27: Roadmap System
+
+### What was built
+
+Roadmap package (`internal/roadmap/`) — parser, status tracking, and
+dependency resolution for `.codebutler/roadmap.md`.
+
+**Parser** (`parser.go`) — Regex-based markdown parser that extracts
+roadmap items from the spec-defined format (`## N. Title`, `- Status:`,
+`- Branch:`, `- Depends on:`, `- Acceptance criteria:`, `- Blocked by:`).
+`ParseString`/`Parse` for reading, `Format` for serializing back to
+markdown with round-trip fidelity. `AddItem`, `SetStatus`, `SetBranch`
+for roadmap mutations.
+
+**Dependency Graph** (`graph.go`) — `BuildGraph` constructs an adjacency
+list from item dependencies. Key methods:
+- `Unblocked()` — items that are pending with all deps done (ready to start)
+- `NewlyUnblocked(n)` — items unblocked by completing item N (for cascading)
+- `Dependents(n)` — items that directly depend on N
+- `TopologicalOrder()` — dependency-first ordering for execution
+- `CriticalPath()` — longest dependency chain (bottleneck identification)
+- `HasCycle()` — DFS-based cycle detection
+- `Stats()` + `FormatProgress()` — summary reporting
+
+### Design decisions
+
+**Regex-based parser, not a markdown AST.** The roadmap format is rigid
+(spec-defined), not free-form markdown. A few regexes match the specific
+patterns faster and more simply than a full markdown parser. The format
+round-trips through `Parse` → `Format` → `Parse` without loss.
+
+**Graph rebuilt after mutations.** Rather than maintaining incremental
+graph state, `BuildGraph` is called fresh after status changes. The
+roadmap is small (tens of items, not thousands) so the O(n) rebuild is
+trivial. This avoids the complexity of incremental graph updates and
+makes the code easier to reason about.
+
+### What's next
+
+M28 (Develop Workflow) adds unattended batch execution of the roadmap.
+M29 (Learn Workflow) closes Phase 10.
