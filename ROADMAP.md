@@ -229,17 +229,17 @@ Orphan detection and cleanup.
 Load agent seeds and skills. After this phase, agents can be configured
 with their full personalities and custom commands.
 
-### M14 — Seed Loading & Prompt Building `pending`
+### M14 — Seed Loading & Prompt Building `done`
 
 Read agent seed MDs and construct system prompts.
 
-- [ ] Seed file reader: parse `seeds/<role>.md`
-- [ ] System prompt builder: seed + `global.md` + `workflows.md` (PM only)
-- [ ] Skill index builder: scan `skills/`, extract name + triggers + description
-- [ ] Append skill index to PM's system prompt
-- [ ] Hot-reload: detect file changes, rebuild prompt on next LLM call
-- [ ] Exclude `## Archived Learnings` from system prompt
-- [ ] Unit tests: prompt building with various seed combinations
+- [x] Seed file reader: parse `seeds/<role>.md`
+- [x] System prompt builder: seed + `global.md` + `workflows.md` (PM only)
+- [x] Skill index builder: scan `skills/`, extract name + triggers + description
+- [x] Append skill index to PM's system prompt
+- [x] Hot-reload: detect file changes, rebuild prompt on next LLM call
+- [x] Exclude `## Archived Learnings` from system prompt
+- [x] Unit tests: prompt building with various seed combinations
 
 **Acceptance:** system prompt built from seed + global + workflows + skill index.
 
