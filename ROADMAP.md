@@ -343,24 +343,24 @@ Quality gate. Reviews PRs for security, quality, tests, plan compliance.
 **Acceptance:** Reviewer produces invariants + risk matrix + test plan,
 structured feedback, loops with Coder, approves and notifies Lead.
 
-### M20 — Lead Agent `pending`
+### M20 — Lead Agent `done`
 
 Mediator and improvement driver. Runs retrospectives, evolves team.
 
-- [ ] Mediation: read context when agents disagree, decide
-- [ ] Retrospective phases:
+- [x] Mediation: read context when agents disagree, decide
+- [x] Retrospective phases:
   - Analysis: read full Slack thread, identify friction
   - Discussion: @mention agents, ask about issues
   - Proposals: structured output (3 well + 3 friction + 1 process + 1 prompt + 1 skill + 1 guardrail)
-- [ ] Memory extraction: route learnings to correct agent MDs
-- [ ] Learnings schema: when/rule/example/confidence/source
-- [ ] Learnings pruning: contradiction removal, stale archival, token cap
-- [ ] Global.md updates: architecture, conventions, decisions
-- [ ] Workflows.md updates: new steps, new workflows
-- [ ] Thread report generation (`.codebutler/reports/<thread-ts>.json`)
-- [ ] PR description update via `gh pr edit`
-- [ ] Usage report: token/cost breakdown per agent
-- [ ] Integration test: mock thread → retrospective → proposals
+- [x] Memory extraction: route learnings to correct agent MDs
+- [x] Learnings schema: when/rule/example/confidence/source
+- [x] Learnings pruning: contradiction removal, stale archival, token cap
+- [x] Global.md updates: architecture, conventions, decisions
+- [x] Workflows.md updates: new steps, new workflows
+- [x] Thread report generation (`.codebutler/reports/<thread-ts>.json`)
+- [x] PR description update via `gh pr edit`
+- [x] Usage report: token/cost breakdown per agent
+- [x] Integration test: mock thread → retrospective → proposals
 
 **Acceptance:** Lead reads thread, produces structured retrospective, proposes
 learnings to correct files, generates thread report.
