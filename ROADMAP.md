@@ -472,16 +472,16 @@ Structured decision recording for debugging and retrospective.
 
 Roadmap system, learn workflow, and unattended development.
 
-### M27 — Roadmap System `pending`
+### M27 — Roadmap System `done`
 
 Roadmap file management and roadmap-based workflows.
 
-- [ ] Roadmap file parser (`.codebutler/roadmap.md` markdown format)
-- [ ] roadmap-add workflow: PM interviews → creates roadmap items
-- [ ] roadmap-implement workflow: PM reads item → runs implement workflow
-- [ ] Status tracking: pending → in_progress → done → blocked
-- [ ] Dependency resolution: build graph, identify unblocked items
-- [ ] Integration test: add items → implement one → status updated
+- [x] Roadmap file parser (`.codebutler/roadmap.md` markdown format)
+- [x] roadmap-add workflow: PM interviews → creates roadmap items
+- [x] roadmap-implement workflow: PM reads item → runs implement workflow
+- [x] Status tracking: pending → in_progress → done → blocked
+- [x] Dependency resolution: build graph, identify unblocked items
+- [x] Integration test: add items → implement one → status updated
 
 **Acceptance:** roadmap items added via conversation, implemented individually,
 status tracked with dependencies.
