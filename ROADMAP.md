@@ -384,18 +384,18 @@ review and retrospective.
 
 Researcher and Artist. After this phase, all six agents are operational.
 
-### M22 — Researcher Agent `pending`
+### M22 — Researcher Agent `done`
 
 Web research on demand from any agent.
 
-- [ ] WebSearch tool implementation
-- [ ] WebFetch tool implementation
-- [ ] Receive @mention from any agent (not just PM)
-- [ ] Check existing research in `.codebutler/research/` before searching
-- [ ] Synthesize findings in structured format
-- [ ] Persist findings to `.codebutler/research/<topic>.md`
-- [ ] Update Research Index in `global.md`
-- [ ] Integration test: agent asks question → Researcher searches → returns findings
+- [x] WebSearch tool implementation
+- [x] WebFetch tool implementation
+- [x] Receive @mention from any agent (not just PM)
+- [x] Check existing research in `.codebutler/research/` before searching
+- [x] Synthesize findings in structured format
+- [x] Persist findings to `.codebutler/research/<topic>.md`
+- [x] Update Research Index in `global.md`
+- [x] Integration test: agent asks question → Researcher searches → returns findings
 
 **Acceptance:** any agent can @mention Researcher, get structured findings,
 findings persisted and indexed.
