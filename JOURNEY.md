@@ -1926,3 +1926,67 @@ programmatic access is needed.
 
 Phase 8 is complete — all six agents are operational. Phase 9 adds MCP
 integration (M24), multi-model fan-out (M25), and the decision log (M26).
+
+---
+
+## 2026-02-25 — M24: MCP Integration
+
+### What was built
+
+MCP (Model Context Protocol) client and server lifecycle management
+(`internal/mcp/`), enabling agents to use external tool servers.
+
+**Config parser** (`config.go`) — Reads `.codebutler/mcp.json`, resolves
+`${VAR}` environment variables, and filters servers by agent role. Missing
+file is not an error — agent starts with zero MCP tools. Empty `roles` array
+means all roles get access.
+
+**JSON-RPC 2.0 client** (`client.go`) — Communicates with MCP servers over
+stdio using newline-delimited JSON-RPC 2.0. Supports `initialize` handshake
+(protocol version `2024-11-05`), `tools/list` discovery, and `tools/call`
+execution. Uses a read loop goroutine to dispatch responses to pending
+requests via channels. Context cancellation works for all calls.
+
+**Server manager** (`manager.go`) — Manages the full lifecycle of MCP server
+child processes:
+1. Start: spawn process, create stdio pipes, initialize, discover tools
+2. Call: route tool calls to correct server with timeout (30s default)
+3. Stop: SIGTERM → 5s grace period → SIGKILL
+
+Failed server starts are logged and skipped — not fatal. Crashed servers have
+their tools removed from the registry. The `ProcessStarter` interface
+abstracts process creation for testability.
+
+**Merged tool registry** (`registry.go`) — Combines native tools from
+`internal/tools.Registry` with MCP tools from the manager. Native tools win
+on name collision (logged as warning). The `Execute` method routes calls to
+either native or MCP execution transparently. `DiscoverTools()` refreshes
+the MCP tool mapping after servers start.
+
+### Design decisions
+
+**JSON-RPC 2.0 over stdio, not HTTP.** MCP specifies stdio transport. The
+client sends newline-delimited JSON to stdin and reads newline-delimited
+JSON from stdout. This avoids port allocation, firewall issues, and the
+complexity of HTTP server lifecycle — the child process is the server.
+
+**ProcessStarter interface for testing.** The manager accepts a
+`ProcessStarter` interface that abstracts `exec.Command` + pipe creation.
+Tests inject mock starters that use `io.Pipe` instead of real OS processes.
+This makes tests fast (~70ms for 29 tests) and avoids needing real MCP
+server binaries in CI.
+
+**Read loop goroutine with channel dispatch.** The client runs a background
+goroutine that continuously reads from stdout and dispatches responses to
+pending request channels by JSON-RPC ID. This cleanly separates reading from
+request/response correlation and handles context cancellation correctly —
+the `call` method uses `select` on the response channel and context.
+
+**Merged registry wraps rather than extends.** `MergedRegistry` holds a
+reference to the native `tools.Registry` and the MCP `Manager` rather than
+inheriting from either. This keeps the native registry unchanged and avoids
+coupling the general tool system to MCP concerns.
+
+### What's next
+
+M25 (Multi-Model Fan-Out) and M26 (Decision Log) complete Phase 9.
