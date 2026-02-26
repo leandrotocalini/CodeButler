@@ -2352,3 +2352,43 @@ that's already over budget by the time it completes.
 **Injectable Clock.** Time is injected via a `Clock` interface — tests
 use `fixedClock` for deterministic date-based behavior (daily budgets
 key on YYYY-MM-DD strings). Production uses `realClock`.
+
+---
+
+## 2026-02-26 — M33: Conflict Detection & Merge Coordination
+
+### What was built
+
+Thread-safe conflict detector (`internal/conflicts/`) that identifies
+file and directory overlaps between active development threads and
+suggests merge ordering.
+
+**Detector** — `Register()` tracks files modified by each thread.
+`DetectOverlaps()` does pairwise comparison across all threads.
+`DetectForThread()` checks a single thread against all others.
+`Update()` refreshes a thread's file list (called after Coder changes).
+`Unregister()` removes a thread when merged/closed.
+
+**Overlap types** — File overlap (high severity): exact same file modified
+by two threads. Directory overlap (medium): files in same directory but
+different files — suppressed when a file overlap already covers that
+directory. Semantic overlap (medium): PM-driven analysis added via
+`AddSemanticOverlap()`.
+
+**Merge ordering** — `SuggestMergeOrder()` sorts threads by file count
+(smallest first) and marks threads that need rebase because they share
+files with an earlier-priority merge.
+
+### Design decisions
+
+**Pairwise comparison.** With typically <10 concurrent threads, O(n^2)
+comparison is negligible. No need for inverted index or bloom filters.
+
+**Directory overlap suppression.** If `src/api/handler.go` has a file
+overlap, we don't also report `src/api` as a directory overlap — that
+would be noise. Only report directory overlaps when there's no file
+overlap in that directory.
+
+**Smallest-first merge order.** Merging the smallest changeset first
+minimizes the rebase surface for subsequent merges. The `NeedsRebase`
+flag tells agents which merges will require rebasing.
