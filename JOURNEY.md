@@ -2223,6 +2223,43 @@ succeeded. The result includes error annotations for failed explorations.
 
 ### What's next
 
-Phase 10 is complete. Phase 11 adds init wizard (M30), service management
-(M31), and CLI commands (M32). Phase 12 adds observability (M33),
-integration tests (M34), and documentation (M35).
+Phase 10 is complete. Phase 11 adds init wizard (M30), CLI commands (M31).
+Phase 12 adds cost controls (M32), conflict detection (M33), testing (M34),
+and graceful shutdown (M35).
+
+---
+
+## 2026-02-26 — M30: codebutler init Wizard
+
+### What was built
+
+Init wizard (`internal/initwiz/`) — three-step first-time setup for
+CodeButler on a new repo.
+
+**Step 1: Global tokens** — Creates `~/.codebutler/config.json` with
+placeholder fields for Slack bot/app tokens, OpenRouter key, and OpenAI key.
+Skips if the file already exists (idempotent).
+
+**Step 2: Repo setup** — Seeds `.codebutler/` directory with: `config.json`
+(per-repo with default models for all 6 agents), `mcp.json` (empty servers),
+agent MDs (pm, coder, reviewer, researcher, artist, lead, global, workflows),
+`roadmap.md`, and subdirectories (skills, branches, images, research).
+Updates `.gitignore` with CodeButler-specific entries (idempotent — no
+duplicates). Skips if `.codebutler/` already exists.
+
+**Step 3: Service install** — Detects OS (darwin/linux) and generates
+service configs. `GenerateServiceConfig()` produces LaunchAgent plists for
+macOS and systemd user units for Linux, both with auto-restart.
+
+**Validation** — `Validate()` checks that all required files exist (global
+config, repo config, required agent MDs).
+
+### Design decisions
+
+**Idempotent steps.** Each step checks if its output already exists before
+acting. Running `codebutler init` twice is safe — it skips already-completed
+steps. This also means the wizard works incrementally if interrupted.
+
+**Prompter interface.** User interaction is abstracted behind `Prompter`
+(Prompt + Confirm methods). Tests use a mock; production will use terminal
+I/O. This keeps the wizard logic testable without terminal dependencies.
