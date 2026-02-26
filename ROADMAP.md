@@ -486,18 +486,18 @@ Roadmap file management and roadmap-based workflows.
 **Acceptance:** roadmap items added via conversation, implemented individually,
 status tracked with dependencies.
 
-### M28 — Develop Workflow (Unattended) `pending`
+### M28 — Develop Workflow (Unattended) `done`
 
 Batch execution of the entire roadmap.
 
-- [ ] PM reads roadmap, builds dependency graph
-- [ ] Launch independent items in parallel (respect `maxConcurrentThreads`)
-- [ ] Create new Slack thread per item (1 thread = 1 branch = 1 PR)
-- [ ] Orchestration thread: periodic status updates
-- [ ] On item completion: check if dependents unblocked → launch them
-- [ ] Failure handling: mark blocked, continue independent items, tag users
-- [ ] User unblock: PM resumes automatically
-- [ ] Integration test: roadmap with 3 items → parallel execution
+- [x] PM reads roadmap, builds dependency graph
+- [x] Launch independent items in parallel (respect `maxConcurrentThreads`)
+- [x] Create new Slack thread per item (1 thread = 1 branch = 1 PR)
+- [x] Orchestration thread: periodic status updates
+- [x] On item completion: check if dependents unblocked → launch them
+- [x] Failure handling: mark blocked, continue independent items, tag users
+- [x] User unblock: PM resumes automatically
+- [x] Integration test: roadmap with 3 items → parallel execution
 
 **Acceptance:** PM orchestrates multiple threads, respects dependencies,
 handles blocked items, reports progress.
