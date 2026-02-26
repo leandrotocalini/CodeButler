@@ -2263,3 +2263,46 @@ steps. This also means the wizard works incrementally if interrupted.
 **Prompter interface.** User interaction is abstracted behind `Prompter`
 (Prompt + Confirm methods). Tests use a mock; production will use terminal
 I/O. This keeps the wizard logic testable without terminal dependencies.
+
+---
+
+## 2026-02-26 — M31: CLI Commands
+
+### What was built
+
+Router-based CLI command dispatch system (`internal/cli/`) with service
+management for all six agents across macOS and Linux.
+
+**Router** — `NewRouter()` creates a command registry. `Register()` adds
+commands with name, description, and run function. `Dispatch()` matches
+the first arg to a command name and passes remaining args. `HasCommand()`,
+`ListCommands()`, and `Usage()` support introspection and help text.
+
+**ServiceManager** — OS-aware service management for agent processes.
+`Start()` launches all agents via launchd (macOS) or systemd (Linux).
+`Stop()` stops them. `Status()` returns a `[]ServiceStatus` with role,
+running state, PID, and error info. Platform detection uses `runtime.GOOS`.
+
+**FormatStatus** — Pretty-prints service status with role, state
+(running/stopped), PID, and error messages.
+
+**FindBinary** / **FindRepoDir** — Utility functions for locating the
+codebutler binary and repo root.
+
+### Design decisions
+
+**Router pattern over cobra.** The CLI needs are simple: a few subcommands
+with straightforward args. A custom Router with `Register`/`Dispatch` keeps
+the dependency footprint minimal while supporting the six commands (configure,
+start, stop, status, validate, --role). If complexity grows, this can be
+swapped for cobra later.
+
+**ServiceManager abstraction.** Both launchd and systemd share the same
+interface (`Start`/`Stop`/`Status`) with OS-specific backends selected at
+runtime via `runtime.GOOS`. Labels follow `com.codebutler.<role>` for macOS
+and `codebutler-<role>` for Linux, matching the conventions each init system
+expects.
+
+**AgentRoles as package-level slice.** The canonical list of six roles lives
+in `cli.AgentRoles` — a single source of truth for iteration in start/stop/
+status commands rather than duplicating the list in each function.
