@@ -161,15 +161,15 @@ Per-agent message filtering and goroutine-per-thread dispatch.
 **Acceptance:** messages route to correct agent, thread goroutines spawn/die
 correctly, redaction catches sensitive patterns.
 
-### M10 — Block Kit & Interactions `pending`
+### M10 — Block Kit & Interactions `done`
 
 Interactive messages for approval flows.
 
-- [ ] Block Kit message builder (buttons for approve/reject/modify)
-- [ ] Interaction event handler (button clicks → resume agent loop)
-- [ ] Emoji reaction handler (🛑 = stop agent, 👍 = approve)
-- [ ] Fallback to plain text when Block Kit unavailable
-- [ ] Integration test with Slack
+- [x] Block Kit message builder (buttons for approve/reject/modify)
+- [x] Interaction event handler (button clicks → resume agent loop)
+- [x] Emoji reaction handler (🛑 = stop agent, 👍 = approve)
+- [x] Fallback to plain text when Block Kit unavailable
+- [x] Integration test with Slack
 
 **Acceptance:** PM can post a plan with Approve/Reject buttons, user clicks,
 agent receives the choice and continues.
