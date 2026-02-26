@@ -525,20 +525,20 @@ project maps, Lead synthesizes to global.md, user approves.
 
 Init wizard, service management, CLI commands.
 
-### M30 — `codebutler init` Wizard `pending`
+### M30 — `codebutler init` Wizard `done`
 
 First-time setup: tokens, repo config, services.
 
-- [ ] Step 1: Global tokens (Slack bot+app tokens, OpenRouter key, OpenAI key)
+- [x] Step 1: Global tokens (Slack bot+app tokens, OpenRouter key, OpenAI key)
   - Skip if `~/.codebutler/config.json` exists
   - Guide user through Slack app creation
-- [ ] Step 2: Repo setup (seed `.codebutler/`, channel selection, `.gitignore`)
+- [x] Step 2: Repo setup (seed `.codebutler/`, channel selection, `.gitignore`)
   - Skip if `.codebutler/` exists
   - Copy seeds, create config, create directories
-- [ ] Step 3: Service install (select agents, detect OS, install services)
+- [x] Step 3: Service install (select agents, detect OS, install services)
   - macOS: LaunchAgent plists
   - Linux: systemd user units
-- [ ] Validation: check all required tokens, verify Slack connection
+- [x] Validation: check all required tokens, verify Slack connection
 
 **Acceptance:** `codebutler init` in a fresh repo creates config, seeds
 `.codebutler/`, installs services, starts agents.
