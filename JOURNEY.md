@@ -1851,3 +1851,78 @@ search, fetch, synthesize, optionally persist, and reply to the requester.
 ### What's next
 
 M23 (Artist Agent) completes Phase 8 with all six agents operational.
+
+---
+
+## 2026-02-25 — M23: Artist Agent
+
+### What was built
+
+Artist agent (`internal/agent/artist.go`), OpenAI image client
+(`internal/provider/openai/images.go`), and image tools
+(`internal/tools/tool_image.go`).
+
+**OpenAI Image Client** — `ImageClient` interface with `Generate` and `Edit`
+methods. `Client` struct uses injectable `HTTPDoer` interface for testability.
+Supports configurable base URL, authenticated requests with Bearer tokens,
+and structured request/response types (`ImageGenerateRequest`,
+`ImageEditRequest`, `ImageResponse`). The client targets OpenAI's
+`gpt-image-1` model for high-quality image generation.
+
+**GenerateImage + EditImage tools** — Both `WRITE_LOCAL` tier. `GenerateImage`
+takes prompt, size, quality, and output path; delegates to `ImageGenerator`
+interface. `EditImage` takes image path, mask path, prompt, size, and output
+path; delegates to `ImageEditor` interface. Both validate required fields and
+return structured results with the saved file path.
+
+**ArtistRunner** — Wraps `AgentRunner` with a `Design()` method that builds
+a structured UX design prompt. The design protocol instructs the model to:
+1. Check existing UI patterns in the assets directory (if configured)
+2. Produce a structured UX proposal with layout, components, interaction,
+   responsive behavior, and notes for the Coder agent
+3. Optionally generate mockup images
+
+**Design proposal types**:
+- `DesignProposal` — top-level: feature, layout, components, interaction,
+  responsive spec, coder notes, generated images
+- `ComponentSpec` — name, purpose, states, props
+- `ResponsiveSpec` — desktop, tablet, mobile breakpoint descriptions
+
+**Round-trip formatting**:
+- `FormatDesignPrompt` — builds the design request prompt with optional
+  assets directory exploration instruction
+- `FormatDesignProposal` — serializes a `DesignProposal` to the text format
+  the spec defines (sections for layout, components with states, interaction,
+  responsive, coder notes, images)
+- `ParseDesignProposal` — extracts structured data from model response text
+  by parsing section headers and bullet points
+
+### Design decisions
+
+**Separate image client from OpenRouter.** Image generation uses OpenAI's
+direct API, not OpenRouter. This is by design — OpenRouter is for chat
+completions, OpenAI is for image generation. The two clients have completely
+different request/response formats and authentication flows. Keeping them
+separate avoids a forced abstraction that would complicate both.
+
+**Injectable HTTPDoer.** The image client accepts an `HTTPDoer` interface
+(`Do(*http.Request) (*http.Response, error)`) rather than a concrete
+`*http.Client`. This lets tests inject a mock HTTP transport without needing
+an `httptest.Server`, making tests fast and deterministic.
+
+**WRITE_LOCAL tier for image tools.** Image generation creates files on disk
+but doesn't interact with external services visible to users (no Slack posts,
+no PRs). `WRITE_LOCAL` is the appropriate tier — it's higher than `READ` but
+lower than `WRITE_VISIBLE`.
+
+**Design proposal as structured text, not JSON.** The UX proposal format uses
+markdown-like sections (Layout, Components, Interaction, etc.) rather than
+JSON. This is intentional — the output is consumed by both humans (in Slack)
+and the Coder agent (as context). Structured text is readable in both
+contexts. The `ParseDesignProposal` function handles extraction when
+programmatic access is needed.
+
+### What's next
+
+Phase 8 is complete — all six agents are operational. Phase 9 adds MCP
+integration (M24), multi-model fan-out (M25), and the decision log (M26).
