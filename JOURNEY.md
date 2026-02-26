@@ -1218,3 +1218,49 @@ values with helper functions: `IsStopSignal` (🛑) and `IsApproveSignal`
 
 Phase 3 (Slack & Communication) is complete. Phase 4 starts with M11
 (Worktree Management) for isolated git workspaces per coding task.
+
+---
+
+## 2026-02-26 — M11: Worktree Management
+
+### What was built
+
+Git worktree lifecycle management: create isolated workspaces per coding
+task, initialize them per platform, list active worktrees, and clean up
+when done.
+
+### Worktree Manager
+
+The `Manager` struct wraps git worktree commands with a clean API:
+`Create`, `Remove`, `List`, `Init`, `Exists`, `Path`. All git operations
+go through an injectable `CommandRunner` — production uses
+`exec.CommandContext`, tests use a mock that records calls.
+
+`Create` tries `git worktree add -b` first (new branch), then falls back
+to `git worktree add` with an existing branch. This handles both fresh
+tasks and resumed work. If the worktree directory already exists, it
+returns immediately — idempotent on retry.
+
+`Remove` is aggressive: `--force` remove, manual cleanup if git fails,
+prune stale entries, delete local branch, optionally delete remote
+branch. Each step is best-effort — a failure in one doesn't block the
+others.
+
+### Platform detection and init
+
+`DetectPlatform` checks for marker files: `go.mod` (Go), `package.json`
+(Node), `requirements.txt`/`pyproject.toml` (Python), `Cargo.toml`
+(Rust). Go and Rust need no explicit init. Node runs `npm ci`. Python
+creates a venv and installs from `requirements.txt` if present.
+
+### Branch naming
+
+`BranchSlug` generates deterministic branch names from task descriptions:
+lowercase, special chars to hyphens, collapsed doubles, truncated to 50
+chars. Convention: `codebutler/<slug>`. This makes branches self-
+documenting without needing to cross-reference thread IDs.
+
+### What's next
+
+M12 (Git & GitHub Tools) adds commit, push, and PR creation as agent
+tools. M13 adds worktree garbage collection for orphan cleanup.
