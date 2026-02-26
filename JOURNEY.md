@@ -1825,3 +1825,29 @@ and the receiver gets the right input.
 
 Phase 7 is complete. Phase 8 (Support Agents) adds Researcher and Artist.
 Phase 9+ covers Decision Log, Multi-Model, MCP, Observability, and Polish.
+
+---
+
+## 2026-02-25 — M22: Researcher Agent
+
+### What was built
+
+Researcher agent (`internal/agent/researcher.go`) and web tools
+(`internal/tools/tool_web.go`).
+
+**WebSearch/WebFetch tools** — injectable via `WebSearcher` and `WebFetcher`
+interfaces. WebSearch returns structured `[]SearchResult` (title, URL, snippet).
+WebFetch returns page content as text with 50KB truncation. Both are Read-tier.
+
+**ResearcherRunner** — wraps `AgentRunner`, `Research()` method builds a
+structured prompt instructing the model to: check existing research first,
+search, fetch, synthesize, optionally persist, and reply to the requester.
+
+**Research protocol helpers**:
+- `FormatResearchFindings` — produces the spec output format
+- `ParseResearchFindings` — extracts findings from model responses
+- `ResearchTopicSlug` — generates filename-safe slugs for persistence
+
+### What's next
+
+M23 (Artist Agent) completes Phase 8 with all six agents operational.
