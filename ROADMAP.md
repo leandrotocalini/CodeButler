@@ -400,18 +400,18 @@ Web research on demand from any agent.
 **Acceptance:** any agent can @mention Researcher, get structured findings,
 findings persisted and indexed.
 
-### M23 — Artist Agent `pending`
+### M23 — Artist Agent `done`
 
 UI/UX designer with image generation.
 
-- [ ] UX reasoning via Claude Sonnet (OpenRouter)
-- [ ] Image generation via OpenAI gpt-image-1 (direct API)
-- [ ] OpenAI client for image gen/edit (`provider/openai/images.go`)
-- [ ] Design proposal format (layout, components, interaction, responsive, notes for Coder)
-- [ ] Read existing UI patterns from `artist/assets/`
-- [ ] Save generated images to `.codebutler/images/`
-- [ ] GenerateImage + EditImage tools
-- [ ] Integration test: PM sends feature → Artist returns UX proposal
+- [x] UX reasoning via Claude Sonnet (OpenRouter)
+- [x] Image generation via OpenAI gpt-image-1 (direct API)
+- [x] OpenAI client for image gen/edit (`provider/openai/images.go`)
+- [x] Design proposal format (layout, components, interaction, responsive, notes for Coder)
+- [x] Read existing UI patterns from `artist/assets/`
+- [x] Save generated images to `.codebutler/images/`
+- [x] GenerateImage + EditImage tools
+- [x] Integration test: PM sends feature → Artist returns UX proposal
 
 **Acceptance:** Artist receives feature request, produces UX proposal with
 components + responsive behavior, generates images when needed.
