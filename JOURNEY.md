@@ -2180,3 +2180,49 @@ independent of the agent package.
 ### What's next
 
 M29 (Learn Workflow) completes Phase 10.
+
+---
+
+## 2026-02-26 — M29: Learn Workflow
+
+### What was built
+
+Learn workflow (`internal/agent/learn.go`) — three-phase onboarding and
+knowledge refresh process where all agents explore the codebase from their
+perspective, then the Lead synthesizes shared knowledge into `global.md`.
+
+**LearnWorkflow coordinator** — orchestrates the three phases via injected
+`LearnExplorer` and `LearnSynthesizer` interfaces. Phase 1: PM maps the
+project (structure, features, domains). Phase 2: technical agents (Coder,
+Reviewer, Artist) explore in parallel via errgroup, each reading the PM's
+map as starting context. Phase 3: Lead synthesizes all findings into
+`global.md`.
+
+**Auto-detection** — `NeedsLearn()` checks if the repo has code files but
+empty `global.md`, indicating a first run on an existing codebase.
+
+**Re-learn support** — `IsRelearn` flag triggers compaction mode where
+agents compare existing project maps with fresh findings. `CompactKnowledge()`
+builds a prompt for intelligent merging (remove outdated, update changed,
+add new).
+
+**Per-role prompts** — `FormatLearnPrompt()` generates role-specific
+exploration instructions: PM focuses on features/domains, Coder on
+architecture/patterns, Reviewer on quality/CI, Artist on UI/design.
+
+### Design decisions
+
+**Three phases, not all parallel.** Phase 1 (PM maps) must complete before
+Phase 2 (agents explore) because the PM's map gives technical agents
+context. Without it, agents might duplicate effort or miss important areas.
+Phase 2 runs fully parallel since agents explore independent perspectives.
+
+**Partial failures in Phase 2 don't cancel.** If the Reviewer's exploration
+fails, the Coder and Artist continue. The Lead synthesizes from whatever
+succeeded. The result includes error annotations for failed explorations.
+
+### What's next
+
+Phase 10 is complete. Phase 11 adds init wizard (M30), service management
+(M31), and CLI commands (M32). Phase 12 adds observability (M33),
+integration tests (M34), and documentation (M35).
