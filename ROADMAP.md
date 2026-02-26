@@ -323,22 +323,22 @@ message, end to end.
 Add Reviewer and Lead. After this phase, the full implement workflow works
 end-to-end including code review and retrospective.
 
-### M19 — Reviewer Agent `pending`
+### M19 — Reviewer Agent `done`
 
 Quality gate. Reviews PRs for security, quality, tests, plan compliance.
 
-- [ ] Receive PR notification from Coder
-- [ ] Read diff: `git diff main...<branch>`
-- [ ] Structured review protocol:
+- [x] Receive PR notification from Coder
+- [x] Read diff: `git diff main...<branch>`
+- [x] Structured review protocol:
   - Invariants list (what must not break)
   - Risk matrix (security, performance, compatibility, correctness)
   - Test plan (what tests should exist)
-- [ ] Structured feedback with `[security]`, `[test]`, `[quality]` tags and file:line refs
-- [ ] Review loop: send feedback → Coder fixes → re-review (max 3 rounds)
-- [ ] Approve → notify Lead
-- [ ] Escalate to Lead on disagreement
-- [ ] Two-pass review optimization (cheap first pass, deep second if needed)
-- [ ] Integration test: PR diff → structured review → feedback
+- [x] Structured feedback with `[security]`, `[test]`, `[quality]` tags and file:line refs
+- [x] Review loop: send feedback → Coder fixes → re-review (max 3 rounds)
+- [x] Approve → notify Lead
+- [x] Escalate to Lead on disagreement
+- [x] Two-pass review optimization (cheap first pass, deep second if needed)
+- [x] Integration test: PR diff → structured review → feedback
 
 **Acceptance:** Reviewer produces invariants + risk matrix + test plan,
 structured feedback, loops with Coder, approves and notifies Lead.
