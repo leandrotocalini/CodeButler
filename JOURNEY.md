@@ -2392,3 +2392,41 @@ overlap in that directory.
 **Smallest-first merge order.** Merging the smallest changeset first
 minimizes the rebase surface for subsequent merges. The `NeedsRebase`
 flag tells agents which merges will require rebasing.
+
+---
+
+## 2026-02-26 — M34: Comprehensive Testing
+
+### What was built
+
+Integration test package (`internal/integration/`) with mock external
+services and benchmarks across all major subsystems.
+
+**Mock OpenRouter** — HTTP test server that returns configurable responses
+(text or tool calls). Tracks call count. Thread-safe for concurrent access.
+Supports multiple sequential responses.
+
+**Mock Slack** — HTTP test server for `chat.postMessage` and `reactions.add`.
+Records all messages for assertion. Thread-safe.
+
+**Benchmarks** — Performance baselines for:
+- Conversation save/load: ~1.4ms per save+load cycle (20 messages)
+- Decision logging: ~14µs per write
+- Budget tracking: ~1.9µs per record
+- Conflict detection: ~98µs for 10 threads with overlaps
+- Roadmap parsing: ~5.2µs per parse
+- Skill parsing: ~3.9µs per parse
+- Cost calculation: ~8ns (zero allocs)
+
+**CI pipeline** — `scripts/ci.sh` runs vet, tests, coverage report,
+benchmarks, and build in sequence.
+
+### Design decisions
+
+**Integration tests use httptest, not process mocks.** `httptest.NewServer`
+gives us a real HTTP server on localhost with automatic cleanup. No need
+for mock processes or container dependencies.
+
+**Benchmarks use short benchtime.** CI runs with `-benchtime=100ms` to
+keep the pipeline fast while still getting stable numbers. Developers
+can run longer benchmarks locally.
