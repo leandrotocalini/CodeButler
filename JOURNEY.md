@@ -2306,3 +2306,49 @@ expects.
 **AgentRoles as package-level slice.** The canonical list of six roles lives
 in `cli.AgentRoles` — a single source of truth for iteration in start/stop/
 status commands rather than duplicating the list in each function.
+
+---
+
+## 2026-02-26 — M32: Token Budgets & Cost Controls
+
+### What was built
+
+Thread-safe budget tracking system (`internal/budget/`) that enforces
+per-thread and per-day spending limits across all agents.
+
+**Tracker** — Central coordinator. `Record()` logs each LLM call with
+model, tokens, and computed USD cost. Checks thread and daily limits after
+each recording — returns `*BudgetExceeded` if either is exceeded. Thread
+gets `Paused=true`, daily gets `Exhausted=true`. `ResumeThread()` unpauses
+after user approval. `CheckThread()` and `CheckDaily()` return remaining
+budget and pause/exhaustion status.
+
+**Persistence** — `Save()` writes thread budgets to
+`<dataDir>/budgets/<threadID>.json` using atomic write (temp+rename).
+`Load()` reads them back. Supports crash recovery — agents can restore
+budget state on restart.
+
+**Cost estimation** — `EstimateCost()` and `CostEstimate` struct let PM
+include cost projections in plans before execution. `EstimatePlanCost()`
+sums across plan steps. `FormatCostEstimate()` renders a markdown table.
+
+**Formatting** — `FormatCostSummary()` renders per-thread breakdown
+(per-agent tokens/cost, percentage of limit, paused status).
+`FormatDailySummary()` shows daily totals with API call count.
+
+### Design decisions
+
+**Duplicated pricing table from multimodel.** Both packages need model
+prices but importing multimodel from budget would create a tight coupling.
+The pricing data is small and stable — duplication is cheaper than an
+abstraction that exists only to share 10 lines of data.
+
+**Record-then-check pattern.** Budget enforcement happens after recording,
+not before. This means the last call that exceeds the budget still gets
+recorded (so cost tracking stays accurate) but future calls are blocked.
+This avoids the TOCTOU race where checking before would allow a call
+that's already over budget by the time it completes.
+
+**Injectable Clock.** Time is injected via a `Clock` interface — tests
+use `fixedClock` for deterministic date-based behavior (daily budgets
+key on YYYY-MM-DD strings). Production uses `realClock`.
