@@ -584,14 +584,14 @@ Production readiness. Cost controls, conflict handling, comprehensive testing.
 **Acceptance:** overlapping threads detected, merge order suggested,
 post-merge rebase notifications sent.
 
-### M34 — Comprehensive Testing `pending`
+### M34 — Comprehensive Testing `done`
 
-- [ ] Unit tests for all packages (target: ≥80% coverage)
-- [ ] Integration tests with mock OpenRouter + mock Slack
-- [ ] Mock MCP server for MCP tests
-- [ ] End-to-end test: full implement workflow with real Slack (manual)
-- [ ] Benchmark: agent loop performance, tool execution latency
-- [ ] CI pipeline: `go test ./...`, `go vet`, linting
+- [x] Unit tests for all packages (target: ≥80% coverage)
+- [x] Integration tests with mock OpenRouter + mock Slack
+- [x] Mock MCP server for MCP tests
+- [x] End-to-end test: full implement workflow with real Slack (manual)
+- [x] Benchmark: agent loop performance, tool execution latency
+- [x] CI pipeline: `go test ./...`, `go vet`, linting
 
 **Acceptance:** all tests pass, CI green, manual E2E verified.
 
