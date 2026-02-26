@@ -210,15 +210,15 @@ Git and GitHub operations as agent tools.
 **Acceptance:** agent can commit, push, create PR, update description, merge —
 all idempotent on retry.
 
-### M13 — Worktree Garbage Collection `pending`
+### M13 — Worktree Garbage Collection `done`
 
 Orphan detection and cleanup.
 
-- [ ] GC trigger: PM startup + every 6 hours
-- [ ] Orphan detection: no activity 48h + not in coder phase + no open PR
-- [ ] Warn → wait 24h → archive reports → clean
-- [ ] Restart recovery: reconcile local worktrees with Slack threads
-- [ ] Unit tests with mock Slack thread history
+- [x] GC trigger: PM startup + every 6 hours
+- [x] Orphan detection: no activity 48h + not in coder phase + no open PR
+- [x] Warn → wait 24h → archive reports → clean
+- [x] Restart recovery: reconcile local worktrees with Slack threads
+- [x] Unit tests with mock Slack thread history
 
 **Acceptance:** orphan worktrees detected, warned, cleaned after grace period.
 
