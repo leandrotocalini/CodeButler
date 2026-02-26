@@ -1653,3 +1653,60 @@ needing a real Slack connection while still verifying the handoff happened.
 Phase 6 is complete — the first working flow is wired end-to-end. Phase 7
 starts with M19 (Reviewer Agent) and M20 (Lead Agent), adding code review
 and retrospective capabilities.
+
+---
+
+## 2026-02-25 — M19: Reviewer Agent
+
+### What was built
+
+Reviewer agent implementation in `internal/agent/reviewer.go` — the quality
+gate that reviews PRs for security, quality, test coverage, and plan compliance.
+
+**ReviewerRunner** — wraps `AgentRunner` with review-specific behavior:
+- `ReviewWithDiff(ctx, diff, branch, channel, thread)` — injects the diff
+  and structured review protocol as the initial prompt.
+- `CanReview()` — tracks review rounds (max 3 by default).
+- `CurrentRound()` — returns the current round number.
+
+**Structured Review Protocol** — each review prompt requests:
+1. Invariants — what must not break
+2. Risk matrix — security/performance/compatibility/correctness (none/low/medium/high)
+3. Test plan — what tests should exist for the change
+4. Issues — tagged with `[security]`, `[test]`, `[quality]`, `[consistency]`, `[performance]`
+
+**Review Feedback Parsing**:
+- `ParseReviewIssues(text)` — regex-based extraction of tagged issues from
+  reviewer responses. Validates tags against the known set.
+- `FormatReviewFeedback(issues)` — formats issues into the spec's feedback format.
+- `HasBlockers(issues)` — checks if any issue is severity "blocker".
+- `CountByTag(issues)` — tag distribution for metrics.
+
+**Two-Pass Review**:
+- `TwoPassReviewPrompt(diff)` — lightweight first-pass prompt checking only
+  for security vulnerabilities, critical bugs, and missing error handling.
+- `NeedsDeepReview(response)` — returns false if first pass says "LGTM",
+  skipping the expensive full review for clean diffs.
+
+### Design decisions
+
+**Round tracking on the runner, not the protocol.** The `currentRound` counter
+lives on `ReviewerRunner`, not in the review types. This means the same runner
+instance tracks state across multiple `ReviewWithDiff` calls within a thread,
+matching the real-world pattern where one reviewer instance handles the full
+review loop for a PR.
+
+**Issue parsing uses tag validation.** Only `[security]`, `[test]`, `[quality]`,
+`[consistency]`, and `[performance]` are recognized. Unknown tags (like `[typo]`
+or `[opinion]`) are silently ignored. This prevents the reviewer from inventing
+arbitrary categories while keeping the feedback structured.
+
+**Severity inference from content.** Rather than requiring the model to use a
+specific severity format, `ParseReviewIssues` infers severity from keywords:
+"blocker" → blocker, "suggestion" → suggestion, everything else → warning.
+This is more robust than parsing structured severity fields.
+
+### What's next
+
+M20 (Lead Agent) adds mediation, retrospectives, and team learning. M21
+wires the full flow: PM → Coder → Reviewer → Lead → merge.
