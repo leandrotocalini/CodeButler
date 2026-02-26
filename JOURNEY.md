@@ -1710,3 +1710,66 @@ This is more robust than parsing structured severity fields.
 
 M20 (Lead Agent) adds mediation, retrospectives, and team learning. M21
 wires the full flow: PM → Coder → Reviewer → Lead → merge.
+
+---
+
+## 2026-02-25 — M20: Lead Agent
+
+### What was built
+
+Lead agent implementation in `internal/agent/lead.go` — the mediator and
+continuous improvement driver that runs retrospectives and evolves team
+knowledge.
+
+**LeadRunner** — wraps `AgentRunner` with Lead-specific functionality:
+- `RunRetrospective(ctx, threadSummary, agentResults, channel, thread)` —
+  builds a structured retrospective prompt from thread context and agent metrics.
+- `Mediate(ctx, dispute, channel, thread)` — handles disagreements between
+  agents with a structured mediation protocol.
+
+**Retrospective Protocol** — each retrospective prompt requests:
+1. 3 things that went well
+2. 3 friction points
+3. 4 proposals: 1 process, 1 prompt, 1 skill, 1 guardrail
+
+**Learning System**:
+- `Learning` struct with when/rule/example/confidence/source schema.
+- `FormatLearning` — renders a learning for agent MD inclusion.
+- `PruneLearnings` — removes low-confidence (<30%) learnings first,
+  then enforces a max count cap by removing oldest entries.
+
+**Thread Reports**:
+- `ThreadReport` struct with per-agent metrics, patterns, deviations, and costs.
+- `NewThreadReport` — builds a report from `*Result` maps with cost estimation.
+- `MarshalReport` — serializes to indented JSON for `.codebutler/reports/`.
+- `FormatUsageReport` — renders a markdown table with per-agent breakdowns.
+
+**Mediation**:
+- `FormatMediationContext` — structures both agents' positions for evaluation.
+- Mediation prompt instructs the Lead to evaluate based on code quality,
+  team efficiency, project conventions, and user intent.
+
+### Design decisions
+
+**Learning pruning is deterministic.** Two-phase pruning: first remove all
+learnings below 30% confidence (these are speculative and likely noise), then
+if still over cap, remove oldest (first in list) entries. This ensures high-
+confidence learnings from recent threads survive while speculative ones from
+early threads are cleaned up. No LLM call needed for pruning.
+
+**Thread report as plain JSON.** The report is a straightforward struct
+serialized with `json.MarshalIndent`. No custom format, no binary encoding.
+The Lead's retrospective fills in qualitative fields; the runtime pre-fills
+metrics from `*Result`. Reports are stored in `.codebutler/reports/` for the
+`/behavior-report` skill to aggregate later.
+
+**Cost estimation as rough blended rate.** The `TotalCost` uses $9/Mtokens
+as a blended rate (between Sonnet's ~$3/$15 and Opus's ~$15/$75 input/output).
+This is intentionally approximate — precise cost tracking requires knowing
+which model each agent used, which isn't stored in `TokenUsage`. Accurate
+cost tracking is deferred to M32 (Token Budgets & Cost Controls).
+
+### What's next
+
+M21 (Full Implement Workflow E2E) wires all four agents together:
+PM → Coder → Reviewer → Lead → merge.
