@@ -1588,3 +1588,68 @@ M7 (stuck detection, escape strategies, context compaction) apply automatically.
 
 M18 (End-to-End: User → PM → Coder → PR) wires the PM and Coder together
 for the first working flow from Slack message to pull request.
+
+---
+
+## 2026-02-25 — M18: End-to-End: User → PM → Coder → PR
+
+### What was built
+
+Integration tests in `internal/agent/e2e_test.go` that verify the complete
+flow from user feature request to PR creation, with all intermediate steps:
+intent classification, codebase exploration, plan generation, delegation,
+implementation, testing, git operations, and reviewer handoff.
+
+### The main test: TestE2E_UserToPMToCoderToPR
+
+The centerpiece is a 9-phase test that exercises both agents sequentially:
+
+1. **User message** → PM receives "implement a login page with JWT authentication"
+2. **PM intent classification** → deterministic pre-filter matches "implement" workflow
+3. **PM exploration** → PM uses SendMessage, Read, Glob to explore the codebase
+4. **PM plan** → PM produces a text response with `@codebutler.coder` delegation,
+   file:line references, and structured task/context sections
+5. **Plan parsing** → `ParsePlan` extracts file refs, `ClassifyComplexity` routes
+   to Opus (authentication = complex task)
+6. **Coder implementation** → 9 tool calls: Read → Write × 2 → Bash (tests) →
+   GitCommit → GitPush → GHCreatePR → SendMessage (@reviewer handoff) → text response
+7. **Verification** — checks PM intent classification, tool call counts, plan
+   structure, model routing, delegation format, and reviewer handoff
+
+The test uses the existing mock patterns from `runner_test.go`: `mockProvider`
+(sequenced responses), `mockExecutor` (tool result map), plus a new
+`captureSender` that records all messages for verification.
+
+### Supporting tests
+
+- **TestE2E_PMClassifiesToBugfix** — verifies "crash bug" routes to bugfix workflow
+- **TestE2E_CoderSandboxEnforcement** — validates sandbox catches `/etc/passwd` in plan refs
+- **TestE2E_CoderComplexityRouting** — table-driven: typo→simple→Sonnet, auth→complex→Opus
+- **TestE2E_PRDescriptionFromPlan** — verifies PR body includes summary + file list + attribution
+- **TestE2E_DelegationMessageFormat** — checks `@codebutler.coder` + Task + Context sections
+- **TestE2E_CoderRunWithPlan** — verifies `RunWithPlan` passes the plan as a user message
+
+### Design decisions
+
+**Sequential agent execution, not concurrent.** In production, PM and Coder are
+separate OS processes communicating via Slack. In tests, we run them sequentially
+in the same process — PM produces a plan, we extract it, feed it to Coder. This
+tests the contract between agents (plan format, file refs, delegation structure)
+without needing real Slack or multiple processes.
+
+**Mock provider, not mock LLM.** The `mockProvider` returns pre-configured
+responses in order. This means we're testing the wiring (tool dispatch, message
+flow, turn counting, conversation building) not the model's ability to plan or
+code. Model behavior is tested by running real models against sample prompts —
+a separate concern from integration testing.
+
+**Reviewer handoff verified via provider requests.** The `SendMessage` tool call
+with `@codebutler.reviewer` is verified by inspecting the requests sent to the
+mock provider (which include the tool calls from earlier turns). This avoids
+needing a real Slack connection while still verifying the handoff happened.
+
+### What's next
+
+Phase 6 is complete — the first working flow is wired end-to-end. Phase 7
+starts with M19 (Reviewer Agent) and M20 (Lead Agent), adding code review
+and retrospective capabilities.
