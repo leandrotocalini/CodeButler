@@ -143,20 +143,20 @@ Socket Mode connection, message send/receive, agent identity.
 **Acceptance:** agent connects to Slack via Socket Mode, receives events,
 posts with its identity, deduplicates retries.
 
-### M9 — Message Routing & Thread Registry `pending`
+### M9 — Message Routing & Thread Registry `done`
 
 Per-agent message filtering and goroutine-per-thread dispatch.
 
-- [ ] Message filter: PM gets unmentioned + `@codebutler.pm`; others get their @mention only
-- [ ] `@codebutler.<role>` extraction from message text
-- [ ] Thread registry: `map[string]*ThreadWorker` — one goroutine per active thread
-- [ ] Goroutine lifecycle: spawn on first message, die after 60s inactivity, respawn on next
-- [ ] Panic recovery per goroutine
-- [ ] Buffered channel per thread worker (message inbox)
-- [ ] SendMessage tool: post to current thread, auto-prefix `@codebutler.<self>:`
-- [ ] Message redaction filter (API keys, JWTs, private keys, connection strings, internal IPs)
-- [ ] Custom redaction patterns from `policy.json`
-- [ ] Unit tests: routing rules, redaction patterns
+- [x] Message filter: PM gets unmentioned + `@codebutler.pm`; others get their @mention only
+- [x] `@codebutler.<role>` extraction from message text
+- [x] Thread registry: `map[string]*ThreadWorker` — one goroutine per active thread
+- [x] Goroutine lifecycle: spawn on first message, die after 60s inactivity, respawn on next
+- [x] Panic recovery per goroutine
+- [x] Buffered channel per thread worker (message inbox)
+- [x] SendMessage tool: post to current thread, auto-prefix `@codebutler.<self>:`
+- [x] Message redaction filter (API keys, JWTs, private keys, connection strings, internal IPs)
+- [x] Custom redaction patterns from `policy.json`
+- [x] Unit tests: routing rules, redaction patterns
 
 **Acceptance:** messages route to correct agent, thread goroutines spawn/die
 correctly, redaction catches sensitive patterns.
