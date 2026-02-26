@@ -562,13 +562,13 @@ Service management and validation.
 
 Production readiness. Cost controls, conflict handling, comprehensive testing.
 
-### M32 — Token Budgets & Cost Controls `pending`
+### M32 — Token Budgets & Cost Controls `done`
 
-- [ ] Per-thread cost tracking (aggregate from all agents' ThreadCost)
-- [ ] Per-thread budget: pause + ask user when exceeded
-- [ ] Per-day budget: stop all agents, notify in channel
-- [ ] Cost-aware planning: PM includes estimates in plans
-- [ ] Cost display in thread reports
+- [x] Per-thread cost tracking (aggregate from all agents' ThreadCost)
+- [x] Per-thread budget: pause + ask user when exceeded
+- [x] Per-day budget: stop all agents, notify in channel
+- [x] Cost-aware planning: PM includes estimates in plans
+- [x] Cost display in thread reports
 
 **Acceptance:** agents stop at budget limits, user can approve continuation.
 
