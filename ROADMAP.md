@@ -264,22 +264,22 @@ from SPEC §1.7.
 Two agents working together. After this phase, a user can describe a feature
 in Slack and get a PR.
 
-### M16 — PM Agent `pending`
+### M16 — PM Agent `done`
 
 The orchestrator. Receives user messages, classifies intent, interviews,
 explores codebase, proposes plans, delegates.
 
-- [ ] Intent classification: match workflows first, then skills, then ambiguous menu
-- [ ] Workflow execution: implement, bugfix, question, refactor
-- [ ] User interview loop (clarifying questions until plan is ready)
-- [ ] Codebase exploration (Read, Grep, Glob)
-- [ ] Plan proposal with file:line references
-- [ ] User approval flow (Block Kit buttons)
-- [ ] Delegation to Coder via `@codebutler.coder` in SendMessage
-- [ ] Dynamic model routing: classify task complexity, assign Coder model
-- [ ] Skill execution: resolve variables, route to target agent
-- [ ] PM model pool + hot swap (`/pm claude`, `/pm kimi`)
-- [ ] Integration test: user message → PM plan → approval
+- [x] Intent classification: match workflows first, then skills, then ambiguous menu
+- [x] Workflow execution: implement, bugfix, question, refactor
+- [x] User interview loop (clarifying questions until plan is ready)
+- [x] Codebase exploration (Read, Grep, Glob)
+- [x] Plan proposal with file:line references
+- [x] User approval flow (Block Kit buttons)
+- [x] Delegation to Coder via `@codebutler.coder` in SendMessage
+- [x] Dynamic model routing: classify task complexity, assign Coder model
+- [x] Skill execution: resolve variables, route to target agent
+- [x] PM model pool + hot swap (`/pm claude`, `/pm kimi`)
+- [x] Integration test: user message → PM plan → approval
 
 **Acceptance:** PM receives user message, classifies intent, interviews,
 proposes plan, user approves, delegates to Coder with plan.
