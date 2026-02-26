@@ -543,16 +543,16 @@ First-time setup: tokens, repo config, services.
 **Acceptance:** `codebutler init` in a fresh repo creates config, seeds
 `.codebutler/`, installs services, starts agents.
 
-### M31 — CLI Commands `pending`
+### M31 — CLI Commands `done`
 
 Service management and validation.
 
-- [ ] `codebutler configure` — change channel, add/remove agents, update tokens
-- [ ] `codebutler start` — start all agents on this machine
-- [ ] `codebutler stop` — stop all agents
-- [ ] `codebutler status` — show running agents, active threads
-- [ ] `codebutler validate` — check all skill files, config
-- [ ] `codebutler --role <role>` — run single agent in foreground (dev mode)
+- [x] `codebutler configure` — change channel, add/remove agents, update tokens
+- [x] `codebutler start` — start all agents on this machine
+- [x] `codebutler stop` — stop all agents
+- [x] `codebutler status` — show running agents, active threads
+- [x] `codebutler validate` — check all skill files, config
+- [x] `codebutler --role <role>` — run single agent in foreground (dev mode)
 
 **Acceptance:** all CLI commands work on macOS and Linux.
 
