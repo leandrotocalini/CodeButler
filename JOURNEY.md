@@ -1773,3 +1773,55 @@ cost tracking is deferred to M32 (Token Budgets & Cost Controls).
 
 M21 (Full Implement Workflow E2E) wires all four agents together:
 PM → Coder → Reviewer → Lead → merge.
+
+---
+
+## 2026-02-25 — M21: Full Implement Workflow E2E
+
+### What was built
+
+Complete end-to-end integration tests in `internal/agent/full_workflow_test.go`
+verifying the full implement workflow: User → PM → Coder → Reviewer → Lead → done.
+
+**TestFullWorkflow_PMCoderReviewerLead** — the main test exercises all four
+agents sequentially in a single test, verifying every handoff contract:
+
+1. PM receives "add rate limiting", classifies as implement workflow
+2. PM explores codebase (Read, Grep), produces plan with `@codebutler.coder` delegation
+3. Coder receives plan, reads code, writes middleware + tests, edits routes
+4. Coder runs tests, commits, pushes, creates PR, sends `@codebutler.reviewer`
+5. Reviewer reads diff, produces structured review (invariants, risk matrix, test plan, issues)
+6. Reviewer approves and sends `@codebutler.lead`
+7. Lead discusses with agents via SendMessage, produces retrospective (3 well, 3 friction, 4 proposals)
+8. Thread report generated with per-agent metrics
+
+Verifies 6 handoff contracts: PM→Coder (plan format), Coder→Reviewer
+(SendMessage), Reviewer response (structured issues), Reviewer→Lead
+(approval), Lead discussion (SendMessage to agents), report generation.
+
+**TestFullWorkflow_ReviewerFeedbackLoop** — tests the multi-round review:
+Reviewer finds blocker → Coder fixes → Reviewer re-reviews → approved.
+Verifies `HasBlockers()` correctly identifies round 1 issues and that
+round 2 clears them.
+
+**TestFullWorkflow_LeadMediatesDisagreement** — tests the mediation flow
+when Coder and Reviewer disagree on an approach. Uses `FormatMediationContext`
+to structure the dispute.
+
+### Design decisions
+
+**Sequential agent execution.** In production, agents are separate OS processes
+communicating via Slack. In tests, we run them sequentially — PM produces plan,
+plan feeds to Coder, Coder result feeds to Reviewer, etc. This verifies the
+data contracts between agents without requiring real Slack or concurrency.
+
+**Six handoff verifications per test.** Each agent-to-agent transition is
+verified by inspecting either the response text (contains `@codebutler.*`)
+or the provider's recorded requests (contains specific tool calls). This
+ensures the contract is bidirectional: the sender produces the right message
+and the receiver gets the right input.
+
+### What's next
+
+Phase 7 is complete. Phase 8 (Support Agents) adds Researcher and Artist.
+Phase 9+ covers Decision Log, Multi-Model, MCP, Observability, and Polish.
