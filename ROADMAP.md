@@ -107,16 +107,16 @@ Per-agent, per-thread conversation files for crash recovery.
 
 **Acceptance:** agent crashes mid-loop, restarts, resumes from last saved round.
 
-### M7 — Agent Loop Safety `pending`
+### M7 — Agent Loop Safety `done`
 
 MaxTurns enforcement, context compaction, and stuck detection.
 
-- [ ] MaxTurns: per-agent caps (PM=15, Coder=100, etc.), configurable
-- [ ] Context compaction: when approaching context window, summarize old messages
-- [ ] Stuck detection: same tool+params 3x, same error 3x, no progress 3x
-- [ ] Escape strategies: inject reflection → force reasoning → reduce tools → escalate
-- [ ] Progress tracking: hash recent tool calls, detect cycles
-- [ ] Unit tests for each detection signal + escape strategy
+- [x] MaxTurns: per-agent caps (PM=15, Coder=100, etc.), configurable
+- [x] Context compaction: when approaching context window, summarize old messages
+- [x] Stuck detection: same tool+params 3x, same error 3x, no progress 3x
+- [x] Escape strategies: inject reflection → force reasoning → reduce tools → escalate
+- [x] Progress tracking: hash recent tool calls, detect cycles
+- [x] Unit tests for each detection signal + escape strategy
 
 **Acceptance:** stuck detection fires on repeated tool calls, escape strategies
 apply in order, agent escalates after all strategies exhausted.

@@ -65,10 +65,12 @@ type Task struct {
 
 // Result represents the outcome of an agent run.
 type Result struct {
-	Response   string     // Final text response (empty if max turns reached)
-	TurnsUsed  int        // Number of LLM calls made
-	TokenUsage TokenUsage // Cumulative token usage across all turns
-	ToolCalls  int        // Total number of tool calls executed
+	Response      string     // Final text response (empty if max turns reached)
+	TurnsUsed     int        // Number of LLM calls made
+	TokenUsage    TokenUsage // Cumulative token usage across all turns
+	ToolCalls     int        // Total number of tool calls executed
+	LoopsDetected int        // Number of stuck conditions detected during the run
+	Escalated     bool       // True if the agent escalated (all escape strategies exhausted)
 }
 
 // AgentConfig configures an agent runner instance.
