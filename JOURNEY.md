@@ -1990,3 +1990,56 @@ coupling the general tool system to MCP concerns.
 ### What's next
 
 M25 (Multi-Model Fan-Out) and M26 (Decision Log) complete Phase 9.
+
+---
+
+## 2026-02-26 — M25: Multi-Model Fan-Out
+
+### What was built
+
+Multi-model fan-out package (`internal/multimodel/`) enabling parallel
+single-shot LLM calls to different models — the engine behind brainstorming,
+multi-perspective code review, and any use case needing diverse model
+perspectives.
+
+**Types** (`types.go`) — `ThinkerConfig` (name, system prompt, model),
+`ThinkerResult` (response, tokens, duration, error), `FanOutCost` with
+per-thinker cost breakdown, `FanOutConfig` (pool, max agents, cost limit),
+`FanOutRequest`/`FanOutResponse`.
+
+**Fan-out execution** (`fanout.go`) — `FanOut()` launches N goroutines via
+`errgroup`, each making a single `ChatCompletion` call with a custom system
+prompt and the shared user prompt. Errors don't propagate — one model failing
+doesn't cancel the others. `Validate()` enforces: no duplicate models (model
+diversity is the whole point), pool membership (when pool is configured),
+max agents per round, non-empty names/prompts. `CheckCostLimit()` estimates
+cost before execution and compares against the soft limit.
+
+**Cost estimation** (`cost.go`) — Model pricing table with per-million-token
+rates for Anthropic, OpenAI, Google, DeepSeek, and Moonshot models.
+`EstimateCost()` uses prompt character length as a rough token proxy.
+`CalculateFanOutCost()` aggregates actual costs from real token usage after
+execution. Wall clock time is max(durations) since calls run in parallel.
+
+### Design decisions
+
+**errgroup, not raw goroutines.** `errgroup.WithContext` gives us structured
+concurrency — all goroutines share a cancellation context. Individual errors
+return `nil` to the group (so others continue), but if the parent context
+is cancelled (user timeout), all goroutines see it immediately.
+
+**Separate LLMProvider interface.** The multimodel package defines its own
+`LLMProvider` interface (`ChatCompletion(ctx, ChatRequest) (*ChatResponse, error)`)
+rather than importing `agent.LLMProvider`. This avoids a circular dependency
+— the multimodel package doesn't need to know about the agent package. An
+adapter at the call site bridges the two interfaces.
+
+**Cost as estimation, not billing.** The pricing table is approximate and
+will drift as providers change rates. That's fine — the cost tracking is for
+budget awareness and the Lead's usage reports, not for invoicing. The key
+insight is wall clock = max(durations), not sum, since calls are parallel.
+
+### What's next
+
+M26 (Decision Log) completes Phase 9. Then Phase 10 (Observability) and
+Phase 11-12 (Polish, Docs).
