@@ -1264,3 +1264,61 @@ documenting without needing to cross-reference thread IDs.
 
 M12 (Git & GitHub Tools) adds commit, push, and PR creation as agent
 tools. M13 adds worktree garbage collection for orphan cleanup.
+
+---
+
+## 2026-02-25 — M12: Git & GitHub Tools
+
+### What was built
+
+Two structs in `internal/github/` that give agents full git + GitHub PR
+capabilities, all idempotent on retry:
+
+**GitOps** (`git.go`) — wraps git CLI commands:
+- `Commit(ctx, files, message)` — stages files, checks for staged changes,
+  commits. No-op if nothing staged (idempotent).
+- `Push(ctx)` — pushes current branch. No-op if "Everything up-to-date".
+- `Pull(ctx)` — pulls with rebase.
+- `HasChanges(ctx)` — checks `git status --porcelain`.
+- `CurrentBranch(ctx)` — reads current branch name.
+
+**GHOps** (`pr.go`) — wraps `gh` CLI for pull request operations:
+- `PRExists(ctx, head)` — checks if a PR exists for a head branch via
+  `gh pr list --head`. Returns nil if none found.
+- `CreatePR(ctx, input)` — creates a PR. **Idempotent**: checks PRExists
+  first, returns existing PR if one already exists for the branch.
+- `EditPR(ctx, input)` — updates title/body via `gh pr edit`.
+- `MergePR(ctx, number)` — squash merges with branch deletion.
+  **Idempotent**: handles "already been merged" gracefully.
+- `PRStatus(ctx, number)` — fetches PR info via `gh pr view`.
+
+### Design decisions
+
+**Injectable CommandRunner pattern.** Both structs accept a `CommandRunner`
+function (`func(ctx, dir, name, args) (string, error)`) via options.
+Production uses `exec.CommandContext`; tests inject a mock that replays
+recorded outputs. This avoids real git/gh calls in tests while verifying
+the exact command sequences.
+
+**Shared CommandRunner type.** `git.go` defines the `CommandRunner` type
+and `defaultRunner` function. `pr.go` reuses them since both are in the
+same package. This avoids duplication while keeping the package cohesive.
+
+**Idempotency as a first-class concern.** Every operation that could be
+replayed on agent restart handles the "already done" case:
+- Commit: `git diff --cached --quiet` returns exit 0 = no changes = skip
+- Push: "Everything up-to-date" in stderr = skip
+- CreatePR: PRExists check before creation = return existing
+- MergePR: "already been merged" in output = skip
+
+This matches the idempotent tool execution requirement from ARCHITECTURE.md.
+
+**JSON structured output from gh.** PRExists and PRStatus use
+`--json number,url,title,state,headRefName` to get structured data instead
+of parsing human-readable output. This is more reliable and avoids
+locale-dependent formatting issues.
+
+### What's next
+
+M13 adds worktree garbage collection — orphan detection, warn/wait/clean
+cycle, and restart recovery. M14 adds seed loading and prompt building.
