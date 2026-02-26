@@ -1074,3 +1074,53 @@ M7 completes Phase 2 (Agent Core). Phase 3 starts with M8 (Slack Client),
 connecting the agent loop to Slack via Socket Mode. The safety features from
 M7 will be exercised end-to-end once real conversations flow through the
 system.
+
+---
+
+## 2026-02-26 — M8: Slack Client
+
+### What was built
+
+The Slack integration layer: Socket Mode connection, message sending with
+per-agent identity, file uploads for code snippets, emoji reactions, and
+event deduplication. This is the bridge between the agent loop (M5) and the
+outside world.
+
+### Three components
+
+**DedupSet** — A bounded, TTL-based set that prevents duplicate event
+processing. Slack Socket Mode can deliver the same event multiple times
+during reconnects and retries. The set tracks 10,000 event IDs with a
+5-minute TTL, using a simple `map[string]time.Time` with mutex protection.
+The time source is injectable for testing.
+
+**Client** — Wraps `slack-go/slack` with Socket Mode event handling.
+Receives events, acks them, filters through dedup, extracts message
+content, and dispatches to a registered handler. Sends messages with
+per-agent display name and icon emoji. Handles code snippets (inline for
+<20 lines, file upload for longer). Manages emoji reactions for status
+signaling.
+
+**AgentIdentity** — Maps each agent role to a display name and icon.
+PM gets :clipboard:, Coder gets :hammer_and_wrench:, Reviewer gets :mag:,
+etc. All agents share one Slack bot app but post with distinct identities.
+
+### Design decisions
+
+**Skip bot messages** — The client filters out messages with a `bot_id` to
+prevent self-loops. Without this, an agent posting a response would trigger
+all agents to process their own messages, creating an infinite loop.
+
+**Skip message subtypes** — Slack uses subtypes for edits, deletions, joins,
+and other non-message events. The client only processes plain user messages
+(`SubType == ""`), avoiding wasted LLM calls on thread meta-events.
+
+**Thread fallback** — When a message has no `ThreadTimeStamp`, the client
+uses the message's own timestamp as the thread. This handles top-level
+messages correctly: they become the root of their own thread.
+
+### What's next
+
+M9 (Message Routing & Thread Registry) builds on this client to add
+per-agent message filtering and goroutine-per-thread dispatch. M10 adds
+Block Kit interactive messages for approval flows.
