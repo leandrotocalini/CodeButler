@@ -1322,3 +1322,56 @@ locale-dependent formatting issues.
 
 M13 adds worktree garbage collection — orphan detection, warn/wait/clean
 cycle, and restart recovery. M14 adds seed loading and prompt building.
+
+---
+
+## 2026-02-25 — M13: Worktree Garbage Collection
+
+### What was built
+
+Two modules in `internal/worktree/` for orphan detection and startup recovery:
+
+**GarbageCollector** (`gc.go`) — periodic orphan detection and cleanup:
+- `RunOnce(ctx)` — single GC pass: list worktrees, check each against
+  three orphan criteria, warn or clean as appropriate.
+- `Run(ctx)` — blocking loop that runs RunOnce immediately then every 6h.
+- Orphan detection requires ALL three conditions: 48h+ inactivity, not in
+  coder phase, no open PR for the branch.
+- Warn-wait-clean cycle: first detection posts a warning in the thread,
+  records the warn time. Next pass after 24h grace period triggers cleanup
+  (worktree removal + remote branch deletion + mapping cleanup).
+- Warning resets automatically if the thread becomes active again.
+
+**RecoveryHandler** (`recovery.go`) — startup reconciliation:
+- `Reconcile(ctx)` — compares local worktrees against thread mappings.
+  If thread is gone → immediate cleanup. If worktree has no mapping →
+  flagged as orphaned (left for GC). Active threads left alone.
+- Returns `RecoveryResult` with counts for monitoring.
+
+### Design decisions
+
+**Five interfaces for dependency injection.** The GC needs to check Slack
+threads, PR status, thread phases, send notifications, and read/write
+mappings. Rather than coupling to concrete Slack/GitHub clients, five
+small interfaces (`ThreadChecker`, `PRChecker`, `PhaseChecker`,
+`GCNotifier`, `MappingStore`) allow testing with simple mocks.
+
+**Injectable clock.** The `WithGCClock` option injects `func() time.Time`
+so tests can control time deterministically. This avoids flaky tests that
+depend on wall-clock timing and lets us test the 48h inactivity threshold
+and 24h grace period precisely.
+
+**In-memory GC state.** Warned-at timestamps are kept in a `map[string]time.Time`
+protected by a mutex. On restart, this state is lost — which is fine because
+the recovery handler runs first and handles the immediate cases, while GC
+will re-detect orphans and re-warn them. No persistent state file needed.
+
+**Mapping cleanup for stale entries.** If a mapping exists but no local
+worktree is found, the mapping is cleaned up immediately. This handles
+cases where a worktree was manually deleted or cleaned by another process.
+
+### What's next
+
+M14 adds seed loading and system prompt building — parsing agent MD files
+and assembling the system prompt for each role. M15 adds skill file
+parsing and validation.
