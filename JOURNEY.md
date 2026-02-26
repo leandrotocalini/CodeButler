@@ -1177,3 +1177,44 @@ no LLM, no I/O, microsecond latency.
 M10 (Block Kit & Interactions) adds interactive Slack messages for
 approval flows. Then Phase 4 (Worktree Management) for isolated git
 workspaces.
+
+---
+
+## 2026-02-26 — M10: Block Kit & Interactions
+
+### What was built
+
+Interactive Slack messages using Block Kit for decision points: plan
+approval, destructive tool confirmation, and workflow selection. Plus
+emoji reaction handling for lightweight signals.
+
+### Block Kit builder
+
+`BlockKitMessage` is a simple builder that produces Slack Block Kit JSON:
+header section (bold text), body section (markdown), and an action block
+with buttons. Each button has an `ActionID`, display text, value, and
+optional style ("primary" for green, "danger" for red).
+
+Two presets are provided: `PlanApproval` (Approve/Modify/Reject) and
+`DestructiveToolApproval` (Approve/Reject with the command in a code
+block).
+
+### Fallback to plain text
+
+Every `BlockKitMessage` generates a plain-text version with numbered
+options. If the Block Kit API call fails (missing scope, rendering error),
+`SendBlockKit` falls back to this text automatically. Users reply with
+the option number instead of clicking buttons.
+
+### Interaction routing
+
+`InteractionRouter` dispatches button clicks by `ActionID` to registered
+handlers. `ParseInteractionPayload` extracts the first block action from
+Slack's callback JSON. Emoji reactions are converted to `Interaction`
+values with helper functions: `IsStopSignal` (🛑) and `IsApproveSignal`
+(👍 or approve button).
+
+### What's next
+
+Phase 3 (Slack & Communication) is complete. Phase 4 starts with M11
+(Worktree Management) for isolated git workspaces per coding task.
