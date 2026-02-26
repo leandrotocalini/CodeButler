@@ -365,15 +365,15 @@ Mediator and improvement driver. Runs retrospectives, evolves team.
 **Acceptance:** Lead reads thread, produces structured retrospective, proposes
 learnings to correct files, generates thread report.
 
-### M21 — Full Implement Workflow E2E `pending`
+### M21 — Full Implement Workflow E2E `done`
 
 Complete workflow: user → PM → Coder → Reviewer → Lead → merge.
 
-- [ ] User → PM plans → Coder implements → PR created
-- [ ] Reviewer reviews → feedback loop with Coder → approved
-- [ ] Lead retrospective → learnings proposed → user approves
-- [ ] PR merged, worktree cleaned, branch deleted
-- [ ] Thread report saved
+- [x] User → PM plans → Coder implements → PR created
+- [x] Reviewer reviews → feedback loop with Coder → approved
+- [x] Lead retrospective → learnings proposed → user approves
+- [x] PR merged, worktree cleaned, branch deleted
+- [x] Thread report saved
 
 **Acceptance:** full implement workflow from Slack message to merged PR with
 review and retrospective.
