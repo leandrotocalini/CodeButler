@@ -1431,3 +1431,54 @@ archived content in the file for git history.
 
 M15 adds full skill file parsing and validation — structured extraction
 of all skill sections, variable detection, and `codebutler validate`.
+
+---
+
+## 2026-02-25 — M15: Skill Parser & Validator
+
+### What was built
+
+Full skill parsing and validation in `internal/skills/`:
+
+**parser.go** — structured skill file parsing:
+- `ParseSkill(content)` — extracts `# name`, description (first paragraph),
+  `## Trigger` (comma-separated list), `## Agent`, `## Prompt`.
+- Variable extraction: `{param}` from triggers (regex), `{{param}}` and
+  `{{param | default: "value"}}` from prompt (regex with optional default).
+- `ValidateSkill` — checks required sections, valid agent name, undefined
+  variables (in prompt but not in trigger and no default).
+- `ValidateAll` — cross-skill duplicate trigger detection via normalization
+  (lowercase + replace `{param}` with `{}`).
+
+**loader.go** — directory scanning and index building:
+- `LoadIndex(skillsDir)` — reads all `.md` files, parses, validates,
+  builds `Index` with `ByName` lookup map. Invalid skills skipped with
+  warning (not fatal).
+- `Validate(skillsDir)` — reports ALL errors without skipping (for CLI).
+
+**codebutler validate command** — added to `cmd/codebutler/main.go`:
+- `codebutler validate [skills-dir]` — validates all skill files, reports
+  errors with file:message format, exits 1 if any errors found.
+
+### Design decisions
+
+**Two validation modes.** `LoadIndex` skips invalid skills gracefully
+(the system runs with whatever is valid). `Validate` reports everything
+(the developer needs to see all issues). Same underlying validation
+functions, different error handling at the caller level.
+
+**Trigger normalization for duplicate detection.** Triggers like
+`"do {thing}"` and `"do {stuff}"` are duplicates because they'd match
+the same user intent. Normalizing `{param}` to `{}` before comparison
+catches this. Same-name skill triggers are allowed (a skill can have
+multiple triggers).
+
+**Integration test against real seeds.** `TestLoadIndex_RealSkills` loads
+the actual `seeds/skills/` directory. All 13 seed skills loaded and
+validated successfully — this serves as a regression test for the seed
+files themselves.
+
+### What's next
+
+M16 (PM Agent) and M17 (Coder Agent) are next — the first two working
+agents that can handle user requests end-to-end.
