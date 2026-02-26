@@ -107,16 +107,16 @@ Per-agent, per-thread conversation files for crash recovery.
 
 **Acceptance:** agent crashes mid-loop, restarts, resumes from last saved round.
 
-### M7 — Agent Loop Safety `pending`
+### M7 — Agent Loop Safety `done`
 
 MaxTurns enforcement, context compaction, and stuck detection.
 
-- [ ] MaxTurns: per-agent caps (PM=15, Coder=100, etc.), configurable
-- [ ] Context compaction: when approaching context window, summarize old messages
-- [ ] Stuck detection: same tool+params 3x, same error 3x, no progress 3x
-- [ ] Escape strategies: inject reflection → force reasoning → reduce tools → escalate
-- [ ] Progress tracking: hash recent tool calls, detect cycles
-- [ ] Unit tests for each detection signal + escape strategy
+- [x] MaxTurns: per-agent caps (PM=15, Coder=100, etc.), configurable
+- [x] Context compaction: when approaching context window, summarize old messages
+- [x] Stuck detection: same tool+params 3x, same error 3x, no progress 3x
+- [x] Escape strategies: inject reflection → force reasoning → reduce tools → escalate
+- [x] Progress tracking: hash recent tool calls, detect cycles
+- [x] Unit tests for each detection signal + escape strategy
 
 **Acceptance:** stuck detection fires on repeated tool calls, escape strategies
 apply in order, agent escalates after all strategies exhausted.
@@ -128,48 +128,48 @@ apply in order, agent escalates after all strategies exhausted.
 Connect agents to Slack. After this phase, a single agent can receive a message
 and respond.
 
-### M8 — Slack Client `pending`
+### M8 — Slack Client `done`
 
 Socket Mode connection, message send/receive, agent identity.
 
-- [ ] Slack Socket Mode client (using `slack-go/slack`)
-- [ ] Event listener: `message.channels`, `message.groups`
-- [ ] Message sending: `chat.postMessage` with per-agent display name + icon
-- [ ] File uploads for code snippets (≥20 lines)
-- [ ] Emoji reactions: 👀 on processing, ✅ on done
-- [ ] Event deduplication: bounded in-memory `event_id` set (10K entries, 5min TTL)
-- [ ] Integration test: connect to Slack, send/receive a message
+- [x] Slack Socket Mode client (using `slack-go/slack`)
+- [x] Event listener: `message.channels`, `message.groups`
+- [x] Message sending: `chat.postMessage` with per-agent display name + icon
+- [x] File uploads for code snippets (≥20 lines)
+- [x] Emoji reactions: 👀 on processing, ✅ on done
+- [x] Event deduplication: bounded in-memory `event_id` set (10K entries, 5min TTL)
+- [x] Integration test: connect to Slack, send/receive a message
 
 **Acceptance:** agent connects to Slack via Socket Mode, receives events,
 posts with its identity, deduplicates retries.
 
-### M9 — Message Routing & Thread Registry `pending`
+### M9 — Message Routing & Thread Registry `done`
 
 Per-agent message filtering and goroutine-per-thread dispatch.
 
-- [ ] Message filter: PM gets unmentioned + `@codebutler.pm`; others get their @mention only
-- [ ] `@codebutler.<role>` extraction from message text
-- [ ] Thread registry: `map[string]*ThreadWorker` — one goroutine per active thread
-- [ ] Goroutine lifecycle: spawn on first message, die after 60s inactivity, respawn on next
-- [ ] Panic recovery per goroutine
-- [ ] Buffered channel per thread worker (message inbox)
-- [ ] SendMessage tool: post to current thread, auto-prefix `@codebutler.<self>:`
-- [ ] Message redaction filter (API keys, JWTs, private keys, connection strings, internal IPs)
-- [ ] Custom redaction patterns from `policy.json`
-- [ ] Unit tests: routing rules, redaction patterns
+- [x] Message filter: PM gets unmentioned + `@codebutler.pm`; others get their @mention only
+- [x] `@codebutler.<role>` extraction from message text
+- [x] Thread registry: `map[string]*ThreadWorker` — one goroutine per active thread
+- [x] Goroutine lifecycle: spawn on first message, die after 60s inactivity, respawn on next
+- [x] Panic recovery per goroutine
+- [x] Buffered channel per thread worker (message inbox)
+- [x] SendMessage tool: post to current thread, auto-prefix `@codebutler.<self>:`
+- [x] Message redaction filter (API keys, JWTs, private keys, connection strings, internal IPs)
+- [x] Custom redaction patterns from `policy.json`
+- [x] Unit tests: routing rules, redaction patterns
 
 **Acceptance:** messages route to correct agent, thread goroutines spawn/die
 correctly, redaction catches sensitive patterns.
 
-### M10 — Block Kit & Interactions `pending`
+### M10 — Block Kit & Interactions `done`
 
 Interactive messages for approval flows.
 
-- [ ] Block Kit message builder (buttons for approve/reject/modify)
-- [ ] Interaction event handler (button clicks → resume agent loop)
-- [ ] Emoji reaction handler (🛑 = stop agent, 👍 = approve)
-- [ ] Fallback to plain text when Block Kit unavailable
-- [ ] Integration test with Slack
+- [x] Block Kit message builder (buttons for approve/reject/modify)
+- [x] Interaction event handler (button clicks → resume agent loop)
+- [x] Emoji reaction handler (🛑 = stop agent, 👍 = approve)
+- [x] Fallback to plain text when Block Kit unavailable
+- [x] Integration test with Slack
 
 **Acceptance:** PM can post a plan with Approve/Reject buttons, user clicks,
 agent receives the choice and continues.
@@ -181,44 +181,44 @@ agent receives the choice and continues.
 Isolated workspaces for each thread. After this phase, agents can create
 branches, commit, push, and create PRs.
 
-### M11 — Worktree Management `pending`
+### M11 — Worktree Management `done`
 
 Create, initialize, and remove git worktrees.
 
-- [ ] `Create(branchName)` — `git worktree add`, push branch to remote
-- [ ] `Remove(branchName)` — `git worktree remove`, delete remote branch
-- [ ] Per-platform init (Go: nothing, Node: `npm ci`, Python: venv, etc.)
-- [ ] Branch naming: `codebutler/<slug>` from PM's classification
-- [ ] Path: `.codebutler/branches/<branchName>/`
-- [ ] Unit tests: create, verify, remove
+- [x] `Create(branchName)` — `git worktree add`, push branch to remote
+- [x] `Remove(branchName)` — `git worktree remove`, delete remote branch
+- [x] Per-platform init (Go: nothing, Node: `npm ci`, Python: venv, etc.)
+- [x] Branch naming: `codebutler/<slug>` from PM's classification
+- [x] Path: `.codebutler/branches/<branchName>/`
+- [x] Unit tests: create, verify, remove
 
 **Acceptance:** worktree created with correct branch, initialized per platform,
 cleanup removes worktree + remote branch.
 
-### M12 — Git & GitHub Tools `pending`
+### M12 — Git & GitHub Tools `done`
 
 Git and GitHub operations as agent tools.
 
-- [ ] GitCommit tool: stage files, commit (check for already-applied)
-- [ ] GitPush tool: push branch (idempotent if remote up to date)
-- [ ] GHCreatePR tool: create PR via `gh` CLI (skip if PR exists for branch)
-- [ ] Git sync protocol: commit+push after every change, pull before reading shared state
-- [ ] `gh pr edit` for PR description updates
-- [ ] `gh pr merge --squash` for merge
-- [ ] Unit tests with git test repos
+- [x] GitCommit tool: stage files, commit (check for already-applied)
+- [x] GitPush tool: push branch (idempotent if remote up to date)
+- [x] GHCreatePR tool: create PR via `gh` CLI (skip if PR exists for branch)
+- [x] Git sync protocol: commit+push after every change, pull before reading shared state
+- [x] `gh pr edit` for PR description updates
+- [x] `gh pr merge --squash` for merge
+- [x] Unit tests with git test repos
 
 **Acceptance:** agent can commit, push, create PR, update description, merge —
 all idempotent on retry.
 
-### M13 — Worktree Garbage Collection `pending`
+### M13 — Worktree Garbage Collection `done`
 
 Orphan detection and cleanup.
 
-- [ ] GC trigger: PM startup + every 6 hours
-- [ ] Orphan detection: no activity 48h + not in coder phase + no open PR
-- [ ] Warn → wait 24h → archive reports → clean
-- [ ] Restart recovery: reconcile local worktrees with Slack threads
-- [ ] Unit tests with mock Slack thread history
+- [x] GC trigger: PM startup + every 6 hours
+- [x] Orphan detection: no activity 48h + not in coder phase + no open PR
+- [x] Warn → wait 24h → archive reports → clean
+- [x] Restart recovery: reconcile local worktrees with Slack threads
+- [x] Unit tests with mock Slack thread history
 
 **Acceptance:** orphan worktrees detected, warned, cleaned after grace period.
 
@@ -229,30 +229,30 @@ Orphan detection and cleanup.
 Load agent seeds and skills. After this phase, agents can be configured
 with their full personalities and custom commands.
 
-### M14 — Seed Loading & Prompt Building `pending`
+### M14 — Seed Loading & Prompt Building `done`
 
 Read agent seed MDs and construct system prompts.
 
-- [ ] Seed file reader: parse `seeds/<role>.md`
-- [ ] System prompt builder: seed + `global.md` + `workflows.md` (PM only)
-- [ ] Skill index builder: scan `skills/`, extract name + triggers + description
-- [ ] Append skill index to PM's system prompt
-- [ ] Hot-reload: detect file changes, rebuild prompt on next LLM call
-- [ ] Exclude `## Archived Learnings` from system prompt
-- [ ] Unit tests: prompt building with various seed combinations
+- [x] Seed file reader: parse `seeds/<role>.md`
+- [x] System prompt builder: seed + `global.md` + `workflows.md` (PM only)
+- [x] Skill index builder: scan `skills/`, extract name + triggers + description
+- [x] Append skill index to PM's system prompt
+- [x] Hot-reload: detect file changes, rebuild prompt on next LLM call
+- [x] Exclude `## Archived Learnings` from system prompt
+- [x] Unit tests: prompt building with various seed combinations
 
 **Acceptance:** system prompt built from seed + global + workflows + skill index.
 
-### M15 — Skill Parser & Validator `pending`
+### M15 — Skill Parser & Validator `done`
 
 Parse skill markdown files and validate them.
 
-- [ ] Parse skill file: extract `# name`, description, `## Trigger`, `## Agent`, `## Prompt`
-- [ ] Variable extraction: `{param}` from triggers, `{{param}}` from prompt
-- [ ] Default values: `{{param | default: "value"}}`
-- [ ] Validation: required sections, valid agent name, no duplicate triggers, no undefined variables
-- [ ] `codebutler validate` command
-- [ ] Unit tests with valid and invalid skill files in `testdata/`
+- [x] Parse skill file: extract `# name`, description, `## Trigger`, `## Agent`, `## Prompt`
+- [x] Variable extraction: `{param}` from triggers, `{{param}}` from prompt
+- [x] Default values: `{{param | default: "value"}}`
+- [x] Validation: required sections, valid agent name, no duplicate triggers, no undefined variables
+- [x] `codebutler validate` command
+- [x] Unit tests with valid and invalid skill files in `testdata/`
 
 **Acceptance:** skill files parse correctly, validation catches all error types
 from SPEC §1.7.
@@ -264,54 +264,54 @@ from SPEC §1.7.
 Two agents working together. After this phase, a user can describe a feature
 in Slack and get a PR.
 
-### M16 — PM Agent `pending`
+### M16 — PM Agent `done`
 
 The orchestrator. Receives user messages, classifies intent, interviews,
 explores codebase, proposes plans, delegates.
 
-- [ ] Intent classification: match workflows first, then skills, then ambiguous menu
-- [ ] Workflow execution: implement, bugfix, question, refactor
-- [ ] User interview loop (clarifying questions until plan is ready)
-- [ ] Codebase exploration (Read, Grep, Glob)
-- [ ] Plan proposal with file:line references
-- [ ] User approval flow (Block Kit buttons)
-- [ ] Delegation to Coder via `@codebutler.coder` in SendMessage
-- [ ] Dynamic model routing: classify task complexity, assign Coder model
-- [ ] Skill execution: resolve variables, route to target agent
-- [ ] PM model pool + hot swap (`/pm claude`, `/pm kimi`)
-- [ ] Integration test: user message → PM plan → approval
+- [x] Intent classification: match workflows first, then skills, then ambiguous menu
+- [x] Workflow execution: implement, bugfix, question, refactor
+- [x] User interview loop (clarifying questions until plan is ready)
+- [x] Codebase exploration (Read, Grep, Glob)
+- [x] Plan proposal with file:line references
+- [x] User approval flow (Block Kit buttons)
+- [x] Delegation to Coder via `@codebutler.coder` in SendMessage
+- [x] Dynamic model routing: classify task complexity, assign Coder model
+- [x] Skill execution: resolve variables, route to target agent
+- [x] PM model pool + hot swap (`/pm claude`, `/pm kimi`)
+- [x] Integration test: user message → PM plan → approval
 
 **Acceptance:** PM receives user message, classifies intent, interviews,
 proposes plan, user approves, delegates to Coder with plan.
 
-### M17 — Coder Agent `pending`
+### M17 — Coder Agent `done`
 
 The builder. Receives task from PM, implements in worktree, creates PR.
 
-- [ ] Receive task from PM (parse plan from @mention message)
-- [ ] Implement in worktree (Write, Edit, Bash)
-- [ ] Run test suite
-- [ ] Ask PM when stuck (SendMessage with @codebutler.pm)
-- [ ] Reasoning in thread at decision points
-- [ ] Create PR (GitCommit, GitPush, GHCreatePR)
-- [ ] Hand off to Reviewer (SendMessage with @codebutler.reviewer)
-- [ ] Sandbox enforcement (path validation, command filtering)
-- [ ] Integration test: PM plan → Coder implements → PR created
+- [x] Receive task from PM (parse plan from @mention message)
+- [x] Implement in worktree (Write, Edit, Bash)
+- [x] Run test suite
+- [x] Ask PM when stuck (SendMessage with @codebutler.pm)
+- [x] Reasoning in thread at decision points
+- [x] Create PR (GitCommit, GitPush, GHCreatePR)
+- [x] Hand off to Reviewer (SendMessage with @codebutler.reviewer)
+- [x] Sandbox enforcement (path validation, command filtering)
+- [x] Integration test: PM plan → Coder implements → PR created
 
 **Acceptance:** Coder receives plan, implements code, runs tests, creates PR,
 hands off to Reviewer.
 
-### M18 — End-to-End: User → PM → Coder → PR `pending`
+### M18 — End-to-End: User → PM → Coder → PR `done`
 
 Integration milestone. Full flow from user message to merged PR (without
 review or retro).
 
-- [ ] User posts feature request in Slack
-- [ ] PM classifies, interviews, explores, proposes plan
-- [ ] User approves plan
-- [ ] PM delegates to Coder
-- [ ] Coder implements in worktree, creates PR
-- [ ] Verify: PR exists with correct changes, branch is clean
+- [x] User posts feature request in Slack
+- [x] PM classifies, interviews, explores, proposes plan
+- [x] User approves plan
+- [x] PM delegates to Coder
+- [x] Coder implements in worktree, creates PR
+- [x] Verify: PR exists with correct changes, branch is clean
 
 **Acceptance:** full implement workflow produces a correct PR from a Slack
 message, end to end.
@@ -323,57 +323,57 @@ message, end to end.
 Add Reviewer and Lead. After this phase, the full implement workflow works
 end-to-end including code review and retrospective.
 
-### M19 — Reviewer Agent `pending`
+### M19 — Reviewer Agent `done`
 
 Quality gate. Reviews PRs for security, quality, tests, plan compliance.
 
-- [ ] Receive PR notification from Coder
-- [ ] Read diff: `git diff main...<branch>`
-- [ ] Structured review protocol:
+- [x] Receive PR notification from Coder
+- [x] Read diff: `git diff main...<branch>`
+- [x] Structured review protocol:
   - Invariants list (what must not break)
   - Risk matrix (security, performance, compatibility, correctness)
   - Test plan (what tests should exist)
-- [ ] Structured feedback with `[security]`, `[test]`, `[quality]` tags and file:line refs
-- [ ] Review loop: send feedback → Coder fixes → re-review (max 3 rounds)
-- [ ] Approve → notify Lead
-- [ ] Escalate to Lead on disagreement
-- [ ] Two-pass review optimization (cheap first pass, deep second if needed)
-- [ ] Integration test: PR diff → structured review → feedback
+- [x] Structured feedback with `[security]`, `[test]`, `[quality]` tags and file:line refs
+- [x] Review loop: send feedback → Coder fixes → re-review (max 3 rounds)
+- [x] Approve → notify Lead
+- [x] Escalate to Lead on disagreement
+- [x] Two-pass review optimization (cheap first pass, deep second if needed)
+- [x] Integration test: PR diff → structured review → feedback
 
 **Acceptance:** Reviewer produces invariants + risk matrix + test plan,
 structured feedback, loops with Coder, approves and notifies Lead.
 
-### M20 — Lead Agent `pending`
+### M20 — Lead Agent `done`
 
 Mediator and improvement driver. Runs retrospectives, evolves team.
 
-- [ ] Mediation: read context when agents disagree, decide
-- [ ] Retrospective phases:
+- [x] Mediation: read context when agents disagree, decide
+- [x] Retrospective phases:
   - Analysis: read full Slack thread, identify friction
   - Discussion: @mention agents, ask about issues
   - Proposals: structured output (3 well + 3 friction + 1 process + 1 prompt + 1 skill + 1 guardrail)
-- [ ] Memory extraction: route learnings to correct agent MDs
-- [ ] Learnings schema: when/rule/example/confidence/source
-- [ ] Learnings pruning: contradiction removal, stale archival, token cap
-- [ ] Global.md updates: architecture, conventions, decisions
-- [ ] Workflows.md updates: new steps, new workflows
-- [ ] Thread report generation (`.codebutler/reports/<thread-ts>.json`)
-- [ ] PR description update via `gh pr edit`
-- [ ] Usage report: token/cost breakdown per agent
-- [ ] Integration test: mock thread → retrospective → proposals
+- [x] Memory extraction: route learnings to correct agent MDs
+- [x] Learnings schema: when/rule/example/confidence/source
+- [x] Learnings pruning: contradiction removal, stale archival, token cap
+- [x] Global.md updates: architecture, conventions, decisions
+- [x] Workflows.md updates: new steps, new workflows
+- [x] Thread report generation (`.codebutler/reports/<thread-ts>.json`)
+- [x] PR description update via `gh pr edit`
+- [x] Usage report: token/cost breakdown per agent
+- [x] Integration test: mock thread → retrospective → proposals
 
 **Acceptance:** Lead reads thread, produces structured retrospective, proposes
 learnings to correct files, generates thread report.
 
-### M21 — Full Implement Workflow E2E `pending`
+### M21 — Full Implement Workflow E2E `done`
 
 Complete workflow: user → PM → Coder → Reviewer → Lead → merge.
 
-- [ ] User → PM plans → Coder implements → PR created
-- [ ] Reviewer reviews → feedback loop with Coder → approved
-- [ ] Lead retrospective → learnings proposed → user approves
-- [ ] PR merged, worktree cleaned, branch deleted
-- [ ] Thread report saved
+- [x] User → PM plans → Coder implements → PR created
+- [x] Reviewer reviews → feedback loop with Coder → approved
+- [x] Lead retrospective → learnings proposed → user approves
+- [x] PR merged, worktree cleaned, branch deleted
+- [x] Thread report saved
 
 **Acceptance:** full implement workflow from Slack message to merged PR with
 review and retrospective.
@@ -384,34 +384,34 @@ review and retrospective.
 
 Researcher and Artist. After this phase, all six agents are operational.
 
-### M22 — Researcher Agent `pending`
+### M22 — Researcher Agent `done`
 
 Web research on demand from any agent.
 
-- [ ] WebSearch tool implementation
-- [ ] WebFetch tool implementation
-- [ ] Receive @mention from any agent (not just PM)
-- [ ] Check existing research in `.codebutler/research/` before searching
-- [ ] Synthesize findings in structured format
-- [ ] Persist findings to `.codebutler/research/<topic>.md`
-- [ ] Update Research Index in `global.md`
-- [ ] Integration test: agent asks question → Researcher searches → returns findings
+- [x] WebSearch tool implementation
+- [x] WebFetch tool implementation
+- [x] Receive @mention from any agent (not just PM)
+- [x] Check existing research in `.codebutler/research/` before searching
+- [x] Synthesize findings in structured format
+- [x] Persist findings to `.codebutler/research/<topic>.md`
+- [x] Update Research Index in `global.md`
+- [x] Integration test: agent asks question → Researcher searches → returns findings
 
 **Acceptance:** any agent can @mention Researcher, get structured findings,
 findings persisted and indexed.
 
-### M23 — Artist Agent `pending`
+### M23 — Artist Agent `done`
 
 UI/UX designer with image generation.
 
-- [ ] UX reasoning via Claude Sonnet (OpenRouter)
-- [ ] Image generation via OpenAI gpt-image-1 (direct API)
-- [ ] OpenAI client for image gen/edit (`provider/openai/images.go`)
-- [ ] Design proposal format (layout, components, interaction, responsive, notes for Coder)
-- [ ] Read existing UI patterns from `artist/assets/`
-- [ ] Save generated images to `.codebutler/images/`
-- [ ] GenerateImage + EditImage tools
-- [ ] Integration test: PM sends feature → Artist returns UX proposal
+- [x] UX reasoning via Claude Sonnet (OpenRouter)
+- [x] Image generation via OpenAI gpt-image-1 (direct API)
+- [x] OpenAI client for image gen/edit (`provider/openai/images.go`)
+- [x] Design proposal format (layout, components, interaction, responsive, notes for Coder)
+- [x] Read existing UI patterns from `artist/assets/`
+- [x] Save generated images to `.codebutler/images/`
+- [x] GenerateImage + EditImage tools
+- [x] Integration test: PM sends feature → Artist returns UX proposal
 
 **Acceptance:** Artist receives feature request, produces UX proposal with
 components + responsive behavior, generates images when needed.
@@ -422,47 +422,47 @@ components + responsive behavior, generates images when needed.
 
 MCP, multi-model, decision log, dynamic routing.
 
-### M24 — MCP Integration `pending`
+### M24 — MCP Integration `done`
 
 External tool servers via Model Context Protocol.
 
-- [ ] Config parser: `.codebutler/mcp.json` with per-role filtering
-- [ ] MCP client: stdio transport, protocol handshake, `tools/list`, `tools/call`
-- [ ] Server lifecycle: spawn child process, discover tools, shutdown (SIGTERM → SIGKILL)
-- [ ] Merged tool registry: native tools + MCP tools (native wins on name collision)
-- [ ] Error handling: server crash, hang (30s timeout), startup failure
-- [ ] Unit tests with mock MCP server
+- [x] Config parser: `.codebutler/mcp.json` with per-role filtering
+- [x] MCP client: stdio transport, protocol handshake, `tools/list`, `tools/call`
+- [x] Server lifecycle: spawn child process, discover tools, shutdown (SIGTERM → SIGKILL)
+- [x] Merged tool registry: native tools + MCP tools (native wins on name collision)
+- [x] Error handling: server crash, hang (30s timeout), startup failure
+- [x] Unit tests with mock MCP server
 
 **Acceptance:** agent starts MCP servers for its role, discovers tools, routes
 LLM tool calls to correct server, handles failures gracefully.
 
-### M25 — Multi-Model Fan-Out `pending`
+### M25 — Multi-Model Fan-Out `done`
 
 Parallel LLM calls to multiple models for brainstorm and other use cases.
 
-- [ ] `MultiModelFanOut` tool: parallel single-shot calls via errgroup
-- [ ] Model validation: all from pool, no duplicates, N ≤ maxAgentsPerRound
-- [ ] Cost estimation before fan-out
-- [ ] Error isolation: one failure doesn't cancel others
-- [ ] Result aggregation: structured JSON with per-model responses
-- [ ] Circuit breaker integration (per-model)
-- [ ] Cost tracking: `FanOutCost` in `ThreadCost`
-- [ ] Unit tests with mock multi-model provider
+- [x] `MultiModelFanOut` tool: parallel single-shot calls via errgroup
+- [x] Model validation: all from pool, no duplicates, N ≤ maxAgentsPerRound
+- [x] Cost estimation before fan-out
+- [x] Error isolation: one failure doesn't cancel others
+- [x] Result aggregation: structured JSON with per-model responses
+- [x] Circuit breaker integration (per-model)
+- [x] Cost tracking: `FanOutCost` in `ThreadCost`
+- [x] Unit tests with mock multi-model provider
 
 **Acceptance:** fan-out executes N parallel calls, handles partial failures,
 tracks cost, respects model pool constraints.
 
-### M26 — Decision Log `pending`
+### M26 — Decision Log `done`
 
 Structured decision recording for debugging and retrospective.
 
-- [ ] `DecisionLogger`: append-only JSONL writer, thread-safe
-- [ ] Decision types: workflow_selected, skill_matched, agent_delegated, model_selected,
+- [x] `DecisionLogger`: append-only JSONL writer, thread-safe
+- [x] Decision types: workflow_selected, skill_matched, agent_delegated, model_selected,
       tool_chosen, stuck_detected, escalated, plan_deviated, review_issue,
       learning_proposed, compaction_triggered, circuit_breaker
-- [ ] Inject logger into agent runner
-- [ ] Lead reads decision log during retrospective
-- [ ] Unit tests: write, read, concurrent writes
+- [x] Inject logger into agent runner
+- [x] Lead reads decision log during retrospective
+- [x] Unit tests: write, read, concurrent writes
 
 **Acceptance:** decisions logged to JSONL, Lead reads them for analysis.
 
@@ -472,49 +472,49 @@ Structured decision recording for debugging and retrospective.
 
 Roadmap system, learn workflow, and unattended development.
 
-### M27 — Roadmap System `pending`
+### M27 — Roadmap System `done`
 
 Roadmap file management and roadmap-based workflows.
 
-- [ ] Roadmap file parser (`.codebutler/roadmap.md` markdown format)
-- [ ] roadmap-add workflow: PM interviews → creates roadmap items
-- [ ] roadmap-implement workflow: PM reads item → runs implement workflow
-- [ ] Status tracking: pending → in_progress → done → blocked
-- [ ] Dependency resolution: build graph, identify unblocked items
-- [ ] Integration test: add items → implement one → status updated
+- [x] Roadmap file parser (`.codebutler/roadmap.md` markdown format)
+- [x] roadmap-add workflow: PM interviews → creates roadmap items
+- [x] roadmap-implement workflow: PM reads item → runs implement workflow
+- [x] Status tracking: pending → in_progress → done → blocked
+- [x] Dependency resolution: build graph, identify unblocked items
+- [x] Integration test: add items → implement one → status updated
 
 **Acceptance:** roadmap items added via conversation, implemented individually,
 status tracked with dependencies.
 
-### M28 — Develop Workflow (Unattended) `pending`
+### M28 — Develop Workflow (Unattended) `done`
 
 Batch execution of the entire roadmap.
 
-- [ ] PM reads roadmap, builds dependency graph
-- [ ] Launch independent items in parallel (respect `maxConcurrentThreads`)
-- [ ] Create new Slack thread per item (1 thread = 1 branch = 1 PR)
-- [ ] Orchestration thread: periodic status updates
-- [ ] On item completion: check if dependents unblocked → launch them
-- [ ] Failure handling: mark blocked, continue independent items, tag users
-- [ ] User unblock: PM resumes automatically
-- [ ] Integration test: roadmap with 3 items → parallel execution
+- [x] PM reads roadmap, builds dependency graph
+- [x] Launch independent items in parallel (respect `maxConcurrentThreads`)
+- [x] Create new Slack thread per item (1 thread = 1 branch = 1 PR)
+- [x] Orchestration thread: periodic status updates
+- [x] On item completion: check if dependents unblocked → launch them
+- [x] Failure handling: mark blocked, continue independent items, tag users
+- [x] User unblock: PM resumes automatically
+- [x] Integration test: roadmap with 3 items → parallel execution
 
 **Acceptance:** PM orchestrates multiple threads, respects dependencies,
 handles blocked items, reports progress.
 
-### M29 — Learn Workflow `pending`
+### M29 — Learn Workflow `done`
 
 Onboarding and knowledge refresh.
 
-- [ ] Auto-trigger on first run (existing codebase detected)
-- [ ] Manual trigger: "re-learn" / "refresh knowledge"
-- [ ] Phase 1: PM maps project (structure, features, domains)
-- [ ] Phase 2: Technical agents in parallel (Coder, Reviewer, Artist) — each reads PM's map, explores from own perspective
-- [ ] Phase 3: Lead synthesizes → populates `global.md`
-- [ ] Researcher reactive during all phases
-- [ ] Re-learn: compare with existing knowledge, compact (remove outdated, update changed, add new)
-- [ ] User approves all MD changes
-- [ ] Integration test: learn on a sample codebase
+- [x] Auto-trigger on first run (existing codebase detected)
+- [x] Manual trigger: "re-learn" / "refresh knowledge"
+- [x] Phase 1: PM maps project (structure, features, domains)
+- [x] Phase 2: Technical agents in parallel (Coder, Reviewer, Artist) — each reads PM's map, explores from own perspective
+- [x] Phase 3: Lead synthesizes → populates `global.md`
+- [x] Researcher reactive during all phases
+- [x] Re-learn: compare with existing knowledge, compact (remove outdated, update changed, add new)
+- [x] User approves all MD changes
+- [x] Integration test: learn on a sample codebase
 
 **Acceptance:** all agents explore codebase from their perspective, populate
 project maps, Lead synthesizes to global.md, user approves.
@@ -525,34 +525,34 @@ project maps, Lead synthesizes to global.md, user approves.
 
 Init wizard, service management, CLI commands.
 
-### M30 — `codebutler init` Wizard `pending`
+### M30 — `codebutler init` Wizard `done`
 
 First-time setup: tokens, repo config, services.
 
-- [ ] Step 1: Global tokens (Slack bot+app tokens, OpenRouter key, OpenAI key)
+- [x] Step 1: Global tokens (Slack bot+app tokens, OpenRouter key, OpenAI key)
   - Skip if `~/.codebutler/config.json` exists
   - Guide user through Slack app creation
-- [ ] Step 2: Repo setup (seed `.codebutler/`, channel selection, `.gitignore`)
+- [x] Step 2: Repo setup (seed `.codebutler/`, channel selection, `.gitignore`)
   - Skip if `.codebutler/` exists
   - Copy seeds, create config, create directories
-- [ ] Step 3: Service install (select agents, detect OS, install services)
+- [x] Step 3: Service install (select agents, detect OS, install services)
   - macOS: LaunchAgent plists
   - Linux: systemd user units
-- [ ] Validation: check all required tokens, verify Slack connection
+- [x] Validation: check all required tokens, verify Slack connection
 
 **Acceptance:** `codebutler init` in a fresh repo creates config, seeds
 `.codebutler/`, installs services, starts agents.
 
-### M31 — CLI Commands `pending`
+### M31 — CLI Commands `done`
 
 Service management and validation.
 
-- [ ] `codebutler configure` — change channel, add/remove agents, update tokens
-- [ ] `codebutler start` — start all agents on this machine
-- [ ] `codebutler stop` — stop all agents
-- [ ] `codebutler status` — show running agents, active threads
-- [ ] `codebutler validate` — check all skill files, config
-- [ ] `codebutler --role <role>` — run single agent in foreground (dev mode)
+- [x] `codebutler configure` — change channel, add/remove agents, update tokens
+- [x] `codebutler start` — start all agents on this machine
+- [x] `codebutler stop` — stop all agents
+- [x] `codebutler status` — show running agents, active threads
+- [x] `codebutler validate` — check all skill files, config
+- [x] `codebutler --role <role>` — run single agent in foreground (dev mode)
 
 **Acceptance:** all CLI commands work on macOS and Linux.
 
@@ -562,46 +562,46 @@ Service management and validation.
 
 Production readiness. Cost controls, conflict handling, comprehensive testing.
 
-### M32 — Token Budgets & Cost Controls `pending`
+### M32 — Token Budgets & Cost Controls `done`
 
-- [ ] Per-thread cost tracking (aggregate from all agents' ThreadCost)
-- [ ] Per-thread budget: pause + ask user when exceeded
-- [ ] Per-day budget: stop all agents, notify in channel
-- [ ] Cost-aware planning: PM includes estimates in plans
-- [ ] Cost display in thread reports
+- [x] Per-thread cost tracking (aggregate from all agents' ThreadCost)
+- [x] Per-thread budget: pause + ask user when exceeded
+- [x] Per-day budget: stop all agents, notify in channel
+- [x] Cost-aware planning: PM includes estimates in plans
+- [x] Cost display in thread reports
 
 **Acceptance:** agents stop at budget limits, user can approve continuation.
 
-### M33 — Conflict Detection & Merge Coordination `pending`
+### M33 — Conflict Detection & Merge Coordination `done`
 
-- [ ] File overlap detection between active threads
-- [ ] Directory overlap detection
-- [ ] Semantic overlap analysis (PM-driven)
-- [ ] Merge ordering: PM suggests smallest-first
-- [ ] Post-merge notification: other threads rebase
-- [ ] Check at thread start + after each Coder response
+- [x] File overlap detection between active threads
+- [x] Directory overlap detection
+- [x] Semantic overlap analysis (PM-driven)
+- [x] Merge ordering: PM suggests smallest-first
+- [x] Post-merge notification: other threads rebase
+- [x] Check at thread start + after each Coder response
 
 **Acceptance:** overlapping threads detected, merge order suggested,
 post-merge rebase notifications sent.
 
-### M34 — Comprehensive Testing `pending`
+### M34 — Comprehensive Testing `done`
 
-- [ ] Unit tests for all packages (target: ≥80% coverage)
-- [ ] Integration tests with mock OpenRouter + mock Slack
-- [ ] Mock MCP server for MCP tests
-- [ ] End-to-end test: full implement workflow with real Slack (manual)
-- [ ] Benchmark: agent loop performance, tool execution latency
-- [ ] CI pipeline: `go test ./...`, `go vet`, linting
+- [x] Unit tests for all packages (target: ≥80% coverage)
+- [x] Integration tests with mock OpenRouter + mock Slack
+- [x] Mock MCP server for MCP tests
+- [x] End-to-end test: full implement workflow with real Slack (manual)
+- [x] Benchmark: agent loop performance, tool execution latency
+- [x] CI pipeline: `go test ./...`, `go vet`, linting
 
 **Acceptance:** all tests pass, CI green, manual E2E verified.
 
-### M35 — Graceful Shutdown & Recovery `pending`
+### M35 — Graceful Shutdown & Recovery `done`
 
-- [ ] SIGTERM → cancel root context → all goroutines wind down → wait → force exit
-- [ ] On restart: reconcile worktrees with Slack threads
-- [ ] Process unresponded @mentions from thread history
-- [ ] Resume conversations from JSON files
-- [ ] Service auto-restart on crash (systemd/launchd)
+- [x] SIGTERM → cancel root context → all goroutines wind down → wait → force exit
+- [x] On restart: reconcile worktrees with Slack threads
+- [x] Process unresponded @mentions from thread history
+- [x] Resume conversations from JSON files
+- [x] Service auto-restart on crash (systemd/launchd)
 
 **Acceptance:** agent restarts cleanly, picks up pending work, no data loss.
 
