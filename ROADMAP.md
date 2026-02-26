@@ -452,17 +452,17 @@ Parallel LLM calls to multiple models for brainstorm and other use cases.
 **Acceptance:** fan-out executes N parallel calls, handles partial failures,
 tracks cost, respects model pool constraints.
 
-### M26 — Decision Log `pending`
+### M26 — Decision Log `done`
 
 Structured decision recording for debugging and retrospective.
 
-- [ ] `DecisionLogger`: append-only JSONL writer, thread-safe
-- [ ] Decision types: workflow_selected, skill_matched, agent_delegated, model_selected,
+- [x] `DecisionLogger`: append-only JSONL writer, thread-safe
+- [x] Decision types: workflow_selected, skill_matched, agent_delegated, model_selected,
       tool_chosen, stuck_detected, escalated, plan_deviated, review_issue,
       learning_proposed, compaction_triggered, circuit_breaker
-- [ ] Inject logger into agent runner
-- [ ] Lead reads decision log during retrospective
-- [ ] Unit tests: write, read, concurrent writes
+- [x] Inject logger into agent runner
+- [x] Lead reads decision log during retrospective
+- [x] Unit tests: write, read, concurrent writes
 
 **Acceptance:** decisions logged to JSONL, Lead reads them for analysis.
 
