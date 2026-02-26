@@ -595,13 +595,13 @@ post-merge rebase notifications sent.
 
 **Acceptance:** all tests pass, CI green, manual E2E verified.
 
-### M35 — Graceful Shutdown & Recovery `pending`
+### M35 — Graceful Shutdown & Recovery `done`
 
-- [ ] SIGTERM → cancel root context → all goroutines wind down → wait → force exit
-- [ ] On restart: reconcile worktrees with Slack threads
-- [ ] Process unresponded @mentions from thread history
-- [ ] Resume conversations from JSON files
-- [ ] Service auto-restart on crash (systemd/launchd)
+- [x] SIGTERM → cancel root context → all goroutines wind down → wait → force exit
+- [x] On restart: reconcile worktrees with Slack threads
+- [x] Process unresponded @mentions from thread history
+- [x] Resume conversations from JSON files
+- [x] Service auto-restart on crash (systemd/launchd)
 
 **Acceptance:** agent restarts cleanly, picks up pending work, no data loss.
 
