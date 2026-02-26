@@ -2139,3 +2139,44 @@ makes the code easier to reason about.
 
 M28 (Develop Workflow) adds unattended batch execution of the roadmap.
 M29 (Learn Workflow) closes Phase 10.
+
+---
+
+## 2026-02-26 — M28: Develop Workflow (Unattended)
+
+### What was built
+
+Roadmap orchestrator (`internal/roadmap/orchestrator.go`) — dependency-aware
+batch execution of all pending roadmap items with concurrency control.
+
+**Orchestrator** — `Run()` loops: find unblocked items, launch up to
+`maxConcurrent` goroutines, wait for completions, cascade to newly-unblocked
+items, repeat until nothing is pending or active. Each item runs via an
+`ItemWorker` callback (dependency injection for the actual PM→Coder flow).
+`StatusReporter` callback posts progress to the orchestration thread.
+
+**Failure isolation** — If an item fails, it's marked `blocked` but
+independent items continue. Items that depend on a blocked item stay
+`pending` (their deps aren't satisfied). The orchestrator tracks completed,
+failed, and active counts separately.
+
+**Progress reporting** — `FormatProgress()` shows each item with status
+icon, title, branch (if completed), and error message (if failed), plus
+aggregate stats via `RoadmapStats.FormatProgress()`.
+
+### Design decisions
+
+**Polling loop, not event-driven.** The orchestrator uses a 100ms poll loop
+rather than channels or condition variables. For a system that runs N items
+over minutes/hours, 100ms granularity is invisible. A channel-based design
+would be more elegant but harder to reason about — especially the cascading
+dependency resolution after completions.
+
+**ItemWorker as callback.** The orchestrator doesn't know about agents,
+Slack, or PRs. It just calls `ItemWorker(ctx, item) (branch, error)`.
+This makes it testable with mock workers and keeps the roadmap package
+independent of the agent package.
+
+### What's next
+
+M29 (Learn Workflow) completes Phase 10.
