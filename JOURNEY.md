@@ -977,3 +977,100 @@ tool call 3 times = loop), and context compaction (when conversations grow too
 long, summarize old messages). M8 needs it to reconcile Slack thread state with
 agent state on restart — loading the conversation file tells the agent which
 messages it already processed.
+
+---
+
+## 2026-02-26 — M7: Agent Loop Safety
+
+### The problem: agents that loop forever
+
+An LLM agent with tools will sometimes get stuck. It reads a file, gets an
+error, reads the same file again, gets the same error, and repeats until it
+exhausts its turn budget. Worse, it might not even be getting errors — it
+might call the same tool with the same arguments three times in a row because
+the model's response is deterministic for that context. Without detection,
+this burns tokens and wastes time.
+
+### Three detection signals
+
+The `ProgressTracker` watches for three patterns, each with a threshold of 3
+consecutive occurrences:
+
+1. **Same tool + same params** — Hash the tool name and arguments with SHA-256.
+   If the last 3 hashes in the rolling window are identical, the agent is
+   calling the same thing repeatedly. "Same tool, different file" doesn't
+   trigger this — only exact parameter matches.
+
+2. **Same error repeated** — Track error messages from tool results. If the
+   last 3 are identical strings, the agent is hitting the same wall. Different
+   errors (even from the same tool) don't trigger — that indicates the agent
+   is trying different things and getting different failures, which is progress.
+
+3. **No progress** — Hash the assistant's text responses. If 3 consecutive
+   responses are identical, the agent is saying the same thing without making
+   observable progress.
+
+The rolling window is 5 entries (the last 5 tool calls, errors, or responses).
+Detection runs before every LLM call, so it can inject escape prompts before
+the model repeats itself again.
+
+### Four escalating escape strategies
+
+When a stuck condition is detected, the runtime applies strategies in order.
+Each strategy gets 2 turns to break the loop before escalating:
+
+1. **Inject reflection** — Append a user message: "You appear to be in a loop.
+   Stop and reflect." This often works because it changes the context enough
+   that the model generates a different response. Cost: 1 turn.
+
+2. **Force reasoning** — If reflection didn't help, inject: "List every approach
+   you've tried and why each failed. Propose an approach you haven't tried."
+   This forces explicit novelty in the next action.
+
+3. **Reduce tools** — Remove the tool that's causing the loop from the active
+   tool list. If the model was stuck calling Read on the same file, removing
+   Read forces it to try something else (Grep, Bash, or just respond with text).
+   Tools are restored when progress is detected.
+
+4. **Escalate** — Post to the thread: "I'm stuck. Here's what I tried. I need
+   help." Coder escalates to PM. PM and Lead escalate to the user. The agent
+   stops its current activation.
+
+Total cost: max 6 extra turns before the user is asked for help.
+
+### Context compaction
+
+Conversations grow. A Coder working through a 50-file refactor can easily hit
+100K tokens. When the cumulative token usage approaches 80% of the model's
+context window, the runner triggers compaction:
+
+1. Keep the system prompt (never summarized)
+2. Keep the last N assistant+tool pairs verbatim (recent context matters most)
+3. Summarize everything in between via a single-shot LLM call
+4. Replace the middle with the summary as a user message
+
+The summary is a user message, not a system message — per the architecture
+doc. This matters because system messages have special weight in most models,
+and a progress summary shouldn't override the agent's identity prompt.
+
+The compaction config is injectable: `WithCompaction(cfg)` sets the context
+window size, threshold, and how many recent pairs to keep. When not configured,
+no compaction happens — the runner behaves exactly as before.
+
+### Integration with the runner
+
+The runner now creates a `ProgressTracker` by default. Before each LLM call,
+it checks for stuck conditions. After each tool execution, it records tool
+call hashes and errors. When an escape sequence resets (progress detected),
+any removed tools are restored.
+
+The `Result` type gained two new fields: `LoopsDetected` (count of stuck
+signals fired) and `Escalated` (true if all escape strategies were exhausted).
+These feed into the decision log and thread reports in later milestones.
+
+### What's next
+
+M7 completes Phase 2 (Agent Core). Phase 3 starts with M8 (Slack Client),
+connecting the agent loop to Slack via Socket Mode. The safety features from
+M7 will be exercised end-to-end once real conversations flow through the
+system.
