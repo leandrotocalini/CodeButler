@@ -2043,3 +2043,55 @@ insight is wall clock = max(durations), not sum, since calls are parallel.
 
 M26 (Decision Log) completes Phase 9. Then Phase 10 (Observability) and
 Phase 11-12 (Polish, Docs).
+
+---
+
+## 2026-02-26 — M26: Decision Log
+
+### What was built
+
+Decision log package (`internal/decisions/`) — append-only JSONL logger for
+recording significant agent choice points, enabling debugging and
+retrospective analysis by the Lead.
+
+**Types** (`types.go`) — 12 decision types as typed constants:
+`workflow_selected`, `skill_matched`, `agent_delegated`, `model_selected`,
+`tool_chosen`, `stuck_detected`, `escalated`, `plan_deviated`,
+`review_issue`, `learning_proposed`, `compaction_triggered`,
+`circuit_breaker`. The `Decision` struct captures timestamp, agent, type,
+input, state, decision, alternatives, evidence, and optional outcome.
+
+**Logger** (`logger.go`) — Thread-safe `Logger` with `sync.Mutex` that
+serializes concurrent writes. `NewLogger` accepts any `io.Writer` for
+testability; `NewFileLogger` creates the JSONL file and parent directories.
+`Log()` sets timestamp and agent automatically, marshals to JSON, and
+appends with newline. `LogDecision()` is a convenience builder.
+
+**Reading and analysis**:
+- `ReadLog(path)` reads all decisions from a file (missing file = empty, not error)
+- `ReadFrom(reader)` parses JSONL, skipping malformed lines
+- `FilterByType`, `FilterByAgent` for selective analysis
+- `Summary` returns decision counts by type
+- `WithOutcome` returns a copy with the outcome field set
+
+### Design decisions
+
+**Append-only JSONL, not a database.** One JSON line per decision, no index,
+no schema migration. The Lead reads the full log during retrospective —
+scanning a few hundred lines is fast. JSONL is human-readable with `jq`,
+trivial to parse, and impossible to corrupt (each write is atomic at the OS
+level for reasonable line lengths).
+
+**Injectable writer, not hardcoded file.** The `Logger` accepts `io.Writer`
+so tests use `bytes.Buffer` and production uses `os.File`. Same pattern as
+every other dependency in the codebase.
+
+**Not every action is a decision.** Reading a file is an action, not a
+decision. Choosing *which* file to read when multiple candidates exist is a
+decision. The distinction matters — logging every tool call would produce
+noise. Logging only choice points produces signal the Lead can analyze.
+
+### What's next
+
+Phase 9 is complete. Phase 10 adds Roadmap System (M27), Learn Workflow
+(M28), and Unattended Mode (M29).
