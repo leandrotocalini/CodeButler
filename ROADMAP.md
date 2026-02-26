@@ -284,19 +284,19 @@ explores codebase, proposes plans, delegates.
 **Acceptance:** PM receives user message, classifies intent, interviews,
 proposes plan, user approves, delegates to Coder with plan.
 
-### M17 — Coder Agent `pending`
+### M17 — Coder Agent `done`
 
 The builder. Receives task from PM, implements in worktree, creates PR.
 
-- [ ] Receive task from PM (parse plan from @mention message)
-- [ ] Implement in worktree (Write, Edit, Bash)
-- [ ] Run test suite
-- [ ] Ask PM when stuck (SendMessage with @codebutler.pm)
-- [ ] Reasoning in thread at decision points
-- [ ] Create PR (GitCommit, GitPush, GHCreatePR)
-- [ ] Hand off to Reviewer (SendMessage with @codebutler.reviewer)
-- [ ] Sandbox enforcement (path validation, command filtering)
-- [ ] Integration test: PM plan → Coder implements → PR created
+- [x] Receive task from PM (parse plan from @mention message)
+- [x] Implement in worktree (Write, Edit, Bash)
+- [x] Run test suite
+- [x] Ask PM when stuck (SendMessage with @codebutler.pm)
+- [x] Reasoning in thread at decision points
+- [x] Create PR (GitCommit, GitPush, GHCreatePR)
+- [x] Hand off to Reviewer (SendMessage with @codebutler.reviewer)
+- [x] Sandbox enforcement (path validation, command filtering)
+- [x] Integration test: PM plan → Coder implements → PR created
 
 **Acceptance:** Coder receives plan, implements code, runs tests, creates PR,
 hands off to Reviewer.
