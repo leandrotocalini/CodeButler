@@ -1124,3 +1124,56 @@ messages correctly: they become the root of their own thread.
 M9 (Message Routing & Thread Registry) builds on this client to add
 per-agent message filtering and goroutine-per-thread dispatch. M10 adds
 Block Kit interactive messages for approval flows.
+
+---
+
+## 2026-02-26 — M9: Message Routing & Thread Registry
+
+### What was built
+
+Three components in the `router` package: message filtering (who processes
+what), thread registry (goroutine-per-thread dispatch), and message
+redaction (sensitive content filtering).
+
+### Message filter: simple rules, no model
+
+The routing rules are string matches — no LLM call needed:
+- PM processes messages containing `@codebutler.pm` OR messages with no
+  `@codebutler.*` mention at all (PM is the default handler)
+- All other agents only process messages containing their specific
+  `@codebutler.<role>` mention
+
+A single message can route to multiple agents: `@codebutler.coder
+@codebutler.reviewer` reaches both. This enables the PM to delegate
+review and coding in one message.
+
+### Thread registry: goroutine-per-thread
+
+Each active Slack thread gets its own goroutine via `ThreadRegistry`.
+The design follows the architecture doc: spawn on first message, die
+after 60 seconds of inactivity (~2KB stack cost per idle goroutine),
+respawn on next message.
+
+Workers have a buffered channel inbox (10 messages). Messages are
+processed sequentially within a thread to maintain ordering. Panic
+recovery wraps both the worker's run loop and individual message
+handling, so a panic in one message doesn't kill the worker or affect
+other threads.
+
+### Redaction: microsecond filtering
+
+The `Redactor` runs regex patterns against every outbound message,
+replacing sensitive content with `[REDACTED]`. Built-in patterns catch:
+API keys (OpenAI, Slack, GitHub, AWS, Google), JWTs, private keys,
+database connection strings, and private IP addresses (10.x, 172.16-31.x,
+192.168.x).
+
+Custom patterns can be added via `AddPattern`/`AddPatterns` for per-repo
+overrides from `policy.json`. The redactor is a pure function on text —
+no LLM, no I/O, microsecond latency.
+
+### What's next
+
+M10 (Block Kit & Interactions) adds interactive Slack messages for
+approval flows. Then Phase 4 (Worktree Management) for isolated git
+workspaces.
