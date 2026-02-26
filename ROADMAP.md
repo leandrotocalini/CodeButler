@@ -181,16 +181,16 @@ agent receives the choice and continues.
 Isolated workspaces for each thread. After this phase, agents can create
 branches, commit, push, and create PRs.
 
-### M11 — Worktree Management `pending`
+### M11 — Worktree Management `done`
 
 Create, initialize, and remove git worktrees.
 
-- [ ] `Create(branchName)` — `git worktree add`, push branch to remote
-- [ ] `Remove(branchName)` — `git worktree remove`, delete remote branch
-- [ ] Per-platform init (Go: nothing, Node: `npm ci`, Python: venv, etc.)
-- [ ] Branch naming: `codebutler/<slug>` from PM's classification
-- [ ] Path: `.codebutler/branches/<branchName>/`
-- [ ] Unit tests: create, verify, remove
+- [x] `Create(branchName)` — `git worktree add`, push branch to remote
+- [x] `Remove(branchName)` — `git worktree remove`, delete remote branch
+- [x] Per-platform init (Go: nothing, Node: `npm ci`, Python: venv, etc.)
+- [x] Branch naming: `codebutler/<slug>` from PM's classification
+- [x] Path: `.codebutler/branches/<branchName>/`
+- [x] Unit tests: create, verify, remove
 
 **Acceptance:** worktree created with correct branch, initialized per platform,
 cleanup removes worktree + remote branch.
