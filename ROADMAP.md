@@ -301,17 +301,17 @@ The builder. Receives task from PM, implements in worktree, creates PR.
 **Acceptance:** Coder receives plan, implements code, runs tests, creates PR,
 hands off to Reviewer.
 
-### M18 — End-to-End: User → PM → Coder → PR `pending`
+### M18 — End-to-End: User → PM → Coder → PR `done`
 
 Integration milestone. Full flow from user message to merged PR (without
 review or retro).
 
-- [ ] User posts feature request in Slack
-- [ ] PM classifies, interviews, explores, proposes plan
-- [ ] User approves plan
-- [ ] PM delegates to Coder
-- [ ] Coder implements in worktree, creates PR
-- [ ] Verify: PR exists with correct changes, branch is clean
+- [x] User posts feature request in Slack
+- [x] PM classifies, interviews, explores, proposes plan
+- [x] User approves plan
+- [x] PM delegates to Coder
+- [x] Coder implements in worktree, creates PR
+- [x] Verify: PR exists with correct changes, branch is clean
 
 **Acceptance:** full implement workflow produces a correct PR from a Slack
 message, end to end.
