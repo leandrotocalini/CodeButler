@@ -572,14 +572,14 @@ Production readiness. Cost controls, conflict handling, comprehensive testing.
 
 **Acceptance:** agents stop at budget limits, user can approve continuation.
 
-### M33 — Conflict Detection & Merge Coordination `pending`
+### M33 — Conflict Detection & Merge Coordination `done`
 
-- [ ] File overlap detection between active threads
-- [ ] Directory overlap detection
-- [ ] Semantic overlap analysis (PM-driven)
-- [ ] Merge ordering: PM suggests smallest-first
-- [ ] Post-merge notification: other threads rebase
-- [ ] Check at thread start + after each Coder response
+- [x] File overlap detection between active threads
+- [x] Directory overlap detection
+- [x] Semantic overlap analysis (PM-driven)
+- [x] Merge ordering: PM suggests smallest-first
+- [x] Post-merge notification: other threads rebase
+- [x] Check at thread start + after each Coder response
 
 **Acceptance:** overlapping threads detected, merge order suggested,
 post-merge rebase notifications sent.
