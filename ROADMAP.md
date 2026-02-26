@@ -436,18 +436,18 @@ External tool servers via Model Context Protocol.
 **Acceptance:** agent starts MCP servers for its role, discovers tools, routes
 LLM tool calls to correct server, handles failures gracefully.
 
-### M25 — Multi-Model Fan-Out `pending`
+### M25 — Multi-Model Fan-Out `done`
 
 Parallel LLM calls to multiple models for brainstorm and other use cases.
 
-- [ ] `MultiModelFanOut` tool: parallel single-shot calls via errgroup
-- [ ] Model validation: all from pool, no duplicates, N ≤ maxAgentsPerRound
-- [ ] Cost estimation before fan-out
-- [ ] Error isolation: one failure doesn't cancel others
-- [ ] Result aggregation: structured JSON with per-model responses
-- [ ] Circuit breaker integration (per-model)
-- [ ] Cost tracking: `FanOutCost` in `ThreadCost`
-- [ ] Unit tests with mock multi-model provider
+- [x] `MultiModelFanOut` tool: parallel single-shot calls via errgroup
+- [x] Model validation: all from pool, no duplicates, N ≤ maxAgentsPerRound
+- [x] Cost estimation before fan-out
+- [x] Error isolation: one failure doesn't cancel others
+- [x] Result aggregation: structured JSON with per-model responses
+- [x] Circuit breaker integration (per-model)
+- [x] Cost tracking: `FanOutCost` in `ThreadCost`
+- [x] Unit tests with mock multi-model provider
 
 **Acceptance:** fan-out executes N parallel calls, handles partial failures,
 tracks cost, respects model pool constraints.
