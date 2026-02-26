@@ -243,16 +243,16 @@ Read agent seed MDs and construct system prompts.
 
 **Acceptance:** system prompt built from seed + global + workflows + skill index.
 
-### M15 — Skill Parser & Validator `pending`
+### M15 — Skill Parser & Validator `done`
 
 Parse skill markdown files and validate them.
 
-- [ ] Parse skill file: extract `# name`, description, `## Trigger`, `## Agent`, `## Prompt`
-- [ ] Variable extraction: `{param}` from triggers, `{{param}}` from prompt
-- [ ] Default values: `{{param | default: "value"}}`
-- [ ] Validation: required sections, valid agent name, no duplicate triggers, no undefined variables
-- [ ] `codebutler validate` command
-- [ ] Unit tests with valid and invalid skill files in `testdata/`
+- [x] Parse skill file: extract `# name`, description, `## Trigger`, `## Agent`, `## Prompt`
+- [x] Variable extraction: `{param}` from triggers, `{{param}}` from prompt
+- [x] Default values: `{{param | default: "value"}}`
+- [x] Validation: required sections, valid agent name, no duplicate triggers, no undefined variables
+- [x] `codebutler validate` command
+- [x] Unit tests with valid and invalid skill files in `testdata/`
 
 **Acceptance:** skill files parse correctly, validation catches all error types
 from SPEC §1.7.
