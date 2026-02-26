@@ -422,16 +422,16 @@ components + responsive behavior, generates images when needed.
 
 MCP, multi-model, decision log, dynamic routing.
 
-### M24 — MCP Integration `pending`
+### M24 — MCP Integration `done`
 
 External tool servers via Model Context Protocol.
 
-- [ ] Config parser: `.codebutler/mcp.json` with per-role filtering
-- [ ] MCP client: stdio transport, protocol handshake, `tools/list`, `tools/call`
-- [ ] Server lifecycle: spawn child process, discover tools, shutdown (SIGTERM → SIGKILL)
-- [ ] Merged tool registry: native tools + MCP tools (native wins on name collision)
-- [ ] Error handling: server crash, hang (30s timeout), startup failure
-- [ ] Unit tests with mock MCP server
+- [x] Config parser: `.codebutler/mcp.json` with per-role filtering
+- [x] MCP client: stdio transport, protocol handshake, `tools/list`, `tools/call`
+- [x] Server lifecycle: spawn child process, discover tools, shutdown (SIGTERM → SIGKILL)
+- [x] Merged tool registry: native tools + MCP tools (native wins on name collision)
+- [x] Error handling: server crash, hang (30s timeout), startup failure
+- [x] Unit tests with mock MCP server
 
 **Acceptance:** agent starts MCP servers for its role, discovers tools, routes
 LLM tool calls to correct server, handles failures gracefully.
